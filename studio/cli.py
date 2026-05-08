@@ -197,10 +197,38 @@ class ProcGroup:
 # ---------------------------------------------------------------------------
 
 
+def _print_npm_install_hint() -> None:
+    """`find_npm()` 返回 None 时打印平台相关安装提示。
+
+    放 stderr，与 `[studio] 错误：找不到 npm` 同流；root 环境去掉 sudo（直接 root 跑装包）。
+    """
+    print("[studio] 错误：找不到 npm。请安装 Node.js 18+", file=sys.stderr)
+    if os.name == "nt":
+        print(
+            "  Windows：前往 https://nodejs.org 下载安装包，"
+            "或用 winget install OpenJS.NodeJS.LTS",
+            file=sys.stderr,
+        )
+    else:
+        sudo = "" if (hasattr(os, "getuid") and os.getuid() == 0) else "sudo "
+        print(
+            f"  Ubuntu/Debian：curl -fsSL https://deb.nodesource.com/setup_22.x "
+            f"| {sudo}bash - && {sudo}apt-get install -y nodejs",
+            file=sys.stderr,
+        )
+        print(
+            "  或使用 nvm（无需 sudo）："
+            "curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh "
+            "| bash && nvm install --lts",
+            file=sys.stderr,
+        )
+    print("  安装后重新运行本命令。", file=sys.stderr)
+
+
 def cmd_build(_args: argparse.Namespace) -> int:
     npm = find_npm()
     if not npm:
-        print("[studio] 错误：找不到 npm。请安装 Node 18+", file=sys.stderr)
+        _print_npm_install_hint()
         return 2
     rc = npm_install_if_missing(npm)
     if rc != 0:
@@ -470,7 +498,7 @@ def cmd_dev(args: argparse.Namespace) -> int:
         return rc
     npm = find_npm()
     if not npm:
-        print("[studio] 错误：找不到 npm", file=sys.stderr)
+        _print_npm_install_hint()
         return 2
     rc = npm_install_if_missing(npm)
     if rc != 0:

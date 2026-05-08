@@ -326,3 +326,58 @@ def test_check_torch_cuda_warns_on_cuda_build_but_unavailable(
     assert "is_available()=False" in out.err
     # 该路径不应给出 pip install 重装建议（torch 装得没问题，是驱动 / WSL 问题）
     assert "pip install torch" not in out.err
+
+
+# ---------------------------------------------------------------------------
+# PR-5 — _print_npm_install_hint
+# ---------------------------------------------------------------------------
+
+
+def test_npm_hint_windows(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    monkeypatch.setattr(cli.os, "name", "nt")
+    cli._print_npm_install_hint()
+    err = capsys.readouterr().err
+    assert "Node.js 18+" in err
+    assert "winget install" in err
+    assert "nodejs.org" in err
+    # 不应该泄漏 Linux-only 内容
+    assert "nodesource" not in err
+    assert "nvm" not in err
+
+
+def test_npm_hint_linux_non_root(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    monkeypatch.setattr(cli.os, "name", "posix")
+    monkeypatch.setattr(cli.os, "getuid", lambda: 1000, raising=False)
+    cli._print_npm_install_hint()
+    err = capsys.readouterr().err
+    assert "nodesource.com" in err
+    assert "sudo bash" in err  # 非 root → 命令带 sudo 前缀
+    assert "nvm" in err
+    # 不应该有 Windows-only 内容
+    assert "winget" not in err
+
+
+def test_npm_hint_linux_root_drops_sudo(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    monkeypatch.setattr(cli.os, "name", "posix")
+    monkeypatch.setattr(cli.os, "getuid", lambda: 0, raising=False)
+    cli._print_npm_install_hint()
+    err = capsys.readouterr().err
+    # root 环境直接跑命令，sudo 字样不应出现（避免误导：sudo 在容器里常无）
+    assert " sudo " not in err
+    assert "sudo bash" not in err
+    assert "nodesource.com" in err
+
+
+def test_cmd_build_no_npm_prints_install_hint(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """cmd_build 找不到 npm 时应通过 _print_npm_install_hint 输出（不只是「找不到 npm」一行）。"""
+    monkeypatch.setattr(cli, "find_npm", lambda: None)
+    monkeypatch.setattr(cli.os, "name", "nt")
+    rc = cli.main(["build"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "winget" in err
+    assert "Node.js 18+" in err
