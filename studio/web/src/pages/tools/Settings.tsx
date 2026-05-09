@@ -4,6 +4,7 @@ import {
   DEFAULT_WD14_MODELS,
   type CLTaggerVariantInfo,
   type FlashAttnStatus,
+  type XformersStatus,
   type ModelDownloadStatus,
   type ModelsCatalog,
   type Secrets,
@@ -522,6 +523,8 @@ export default function SettingsPage() {
       <PyTorchSection />
 
       <FlashAttentionSection />
+
+      <XformersSection />
 
       <ModelsSection
         catalog={catalog}
@@ -1585,6 +1588,116 @@ function FlashAttentionSection() {
               </div>
             </div>
           )}
+        </>)}
+      </div>
+    </details>
+  )
+}
+
+// ── xformers Section（训练 tab）─────────────────────────────────────────────
+//
+// 简化版 attention 加速（替代 flash_attn 的另一选项）。xformers 走 PyPI 直装，
+// 不需要 flash_attn 那种 GitHub 候选 wheel 列表。失败时给 stderr 让用户排错。
+
+function XformersSection() {
+  const [status, setStatus] = useState<XformersStatus | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const { toast } = useToast()
+
+  const refresh = useCallback(async () => {
+    try {
+      const s = await api.getXformersStatus()
+      setStatus(s)
+      setError(null)
+    } catch (e) {
+      setError(String(e))
+    }
+  }, [])
+
+  useEffect(() => { void refresh() }, [refresh])
+
+  const install = async () => {
+    if (!confirm(
+      '将 pip install xformers，按当前 torch+cu 选 PyTorch index URL。\n' +
+      '装包几分钟到十几分钟，装完后必须重启 Studio。继续？'
+    )) return
+    setBusy(true)
+    try {
+      const r = await api.installXformers()
+      toast(`xformers==${r.version ?? '?'} 安装成功，请重启 Studio`, 'success')
+      await refresh()
+    } catch (e) {
+      toast(`安装失败: ${e}`, 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const statusLabel = error
+    ? '加载失败'
+    : !status
+      ? '加载中...'
+      : status.installed
+        ? `已安装 v${status.version ?? '?'}`
+        : '未安装'
+  const statusOk = status?.installed && !error
+  const hasIssue = !!error
+
+  return (
+    <details open={!!hasIssue} className="rounded-md border border-subtle bg-surface group">
+      <summary className="cursor-pointer p-4 list-none flex items-center gap-2">
+        <span className="text-fg-tertiary text-xs transition-transform group-open:rotate-90 inline-block w-3">▸</span>
+        <h2 className="text-sm font-semibold text-fg-primary m-0">xformers</h2>
+        <span className="text-xs text-fg-tertiary">attention 加速（与 Flash Attention 二选一）</span>
+        <span className={`ml-auto text-xs font-mono ${statusOk ? 'text-ok' : 'text-warn'}`}>{statusLabel}</span>
+      </summary>
+
+      <div className="px-4 pb-4 flex flex-col gap-3">
+        {error && <div className="text-err text-xs font-mono">{error}</div>}
+        {!error && !status && <div className="text-xs text-fg-tertiary">加载状态...</div>}
+
+        {status && (<>
+          <div className="rounded-sm border border-subtle bg-sunken p-2 flex items-center gap-2 text-xs">
+            <span className="text-fg-tertiary shrink-0">xformers:</span>
+            <code className="font-mono text-fg-primary">
+              {status.installed ? `v${status.version ?? '?'}` : '（未安装）'}
+            </code>
+            {status.installed && <StatusLabel bg="bg-ok-soft" fg="text-ok" text="已安装" />}
+          </div>
+
+          <p className="text-2xs text-fg-tertiary m-0 leading-relaxed">
+            xformers 与 Flash Attention <strong>互斥</strong>，每个训练/出图任务的{' '}
+            <code className="font-mono">attention_backend</code>{' '}
+            字段三选一（无 / xformers / flash_attn）。xformers 泛用性更广（支持
+            sm_70+），flash_attn 性能更高（sm_80+ Ampere 起）。
+          </p>
+
+          <div className="flex gap-2">
+            <button
+              onClick={() => void install()}
+              disabled={busy}
+              className="btn btn-primary btn-sm"
+            >
+              {busy
+                ? '安装中...'
+                : status.installed
+                  ? '重装（自动匹配）'
+                  : '安装（自动匹配）'}
+            </button>
+            <button
+              onClick={() => void refresh()}
+              disabled={busy}
+              className="btn btn-ghost btn-sm"
+              title="刷新状态"
+            >↻</button>
+          </div>
+
+          <p className="text-2xs text-fg-tertiary m-0">
+            装失败多数是上游 PyPI / PyTorch index 没出对应 torch+cu 组合的 wheel
+            （5090 / 新 GPU 常见）。失败时按钮 toast 会显示 stderr 末尾，可
+            根据提示降 torch 版本或等上游覆盖。
+          </p>
         </>)}
       </div>
     </details>

@@ -598,6 +598,9 @@ export interface RegBuildRequest {
   postprocess_max_crop_ratio?: number
 }
 
+/** Attention backend 三选一 — 替代原 xformers/flash_attn 双 bool。 */
+export type AttentionBackend = 'none' | 'xformers' | 'flash_attn'
+
 /** PR-9 — 先验生成（base 模型反向出 reg 集，无 LoRA）。 */
 export interface RegAiRequest {
   excluded_tags?: string[]
@@ -611,8 +614,7 @@ export interface RegAiRequest {
   seed?: number
   incremental?: boolean
   mixed_precision?: string
-  xformers?: boolean
-  flash_attn?: boolean
+  attention_backend?: AttentionBackend
 }
 
 /** PR-9 — 测试出图（独立工具页，多 LoRA + multi-prompt）。 */
@@ -634,8 +636,20 @@ export interface GenerateRequest {
   seed?: number
   lora_configs?: LoraEntry[]
   mixed_precision?: string
-  xformers?: boolean
-  flash_attn?: boolean
+  attention_backend?: AttentionBackend
+}
+
+/** xformers 安装状态 / 安装结果（简化版，对照 FlashAttnStatus）。 */
+export interface XformersStatus {
+  installed: boolean
+  version: string | null
+}
+
+export interface XformersInstallResult {
+  installed: boolean
+  version: string | null
+  stdout_tail: string
+  restart_required: boolean
 }
 
 export type TaskStatus = 'pending' | 'running' | 'done' | 'failed' | 'canceled'
@@ -1277,6 +1291,16 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ url }),
     }),
+
+  // xformers 运行时（attention_backend=xformers 用） -----------------------
+  /** xformers 安装状态。比 flash_attn 简洁：xformers 走 PyPI 直装，
+   *  没有 GitHub 候选 wheel 列表的复杂选择逻辑。 */
+  getXformersStatus: () => req<XformersStatus>('/api/xformers/status'),
+  /** pip install xformers --index-url <torch-cu-index>。同步 pip，几分钟级。
+   *  装失败时后端把 stderr 末尾透传到 message，多数失败 = 上游 wheel 没覆盖
+   *  当前 torch+cu 组合。装完必须重启 Studio（C extension 不能热替换）。 */
+  installXformers: () =>
+    req<XformersInstallResult>('/api/xformers/install', { method: 'POST' }),
 
   // PP7 — 训练集导出 / 导入 -----------------------------------------------
   /** 当前 version 的 train/ 打包 zip 直链。用 downloadBlob() 调它显示 loading。 */

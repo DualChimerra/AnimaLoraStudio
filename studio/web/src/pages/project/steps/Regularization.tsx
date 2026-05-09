@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useOutletContext } from 'react-router-dom'
 import {
   api,
+  type AttentionBackend,
   type Job,
   type ProjectDetail,
   type RegAiRequest,
@@ -78,7 +79,7 @@ export default function RegularizationPage() {
   const [aiCfg, setAiCfg] = useState(4.0)
   const [aiSeed, setAiSeed] = useState(0)
   const [aiIncremental, setAiIncremental] = useState(false)
-  const [aiFlashAttn, setAiFlashAttn] = useState(true)
+  const [aiBackend, setAiBackend] = useState<AttentionBackend>('flash_attn')
   const [aiTask, setAiTask] = useState<Task | null>(null)
   const [aiBusy, setAiBusy] = useState(false)
   const aiTaskIdRef = useRef<number | null>(null)
@@ -214,7 +215,7 @@ export default function RegularizationPage() {
         cfg_scale: aiCfg,
         seed: aiSeed,
         incremental: aiIncremental,
-        flash_attn: aiFlashAttn,
+        attention_backend: aiBackend,
       }
       const t = await api.enqueueRegPrior(project.id, vid, body)
       setAiTask(t)
@@ -353,7 +354,7 @@ export default function RegularizationPage() {
           cfg={aiCfg} onCfgChange={setAiCfg}
           seed={aiSeed} onSeedChange={setAiSeed}
           incremental={aiIncremental} onIncrementalChange={setAiIncremental}
-          flashAttn={aiFlashAttn} onFlashAttnChange={setAiFlashAttn}
+          backend={aiBackend} onBackendChange={setAiBackend}
           task={aiTask}
           trainImageCount={trainImageCount}
         />
@@ -837,7 +838,7 @@ function AiGenPanel({
   cfg, onCfgChange,
   seed, onSeedChange,
   incremental, onIncrementalChange,
-  flashAttn, onFlashAttnChange,
+  backend, onBackendChange,
   task,
   trainImageCount,
 }: {
@@ -850,7 +851,7 @@ function AiGenPanel({
   cfg: number; onCfgChange: (v: number) => void
   seed: number; onSeedChange: (v: number) => void
   incremental: boolean; onIncrementalChange: (v: boolean) => void
-  flashAttn: boolean; onFlashAttnChange: (v: boolean) => void
+  backend: AttentionBackend; onBackendChange: (v: AttentionBackend) => void
   task: Task | null
   trainImageCount: number
 }) {
@@ -888,7 +889,7 @@ function AiGenPanel({
         </div>
         <AiNumField label="种子（0=随机）" value={seed} onChange={onSeedChange} min={0} />
 
-        <div className="flex flex-wrap gap-3">
+        <div className="flex flex-wrap gap-3 items-end">
           <label className="flex items-center gap-1.5 cursor-pointer text-xs">
             <input
               type="checkbox"
@@ -897,14 +898,18 @@ function AiGenPanel({
             />
             <span className="text-fg-secondary">补足模式（跳过 reg 子目录中已有对应文件名前缀的图）</span>
           </label>
-          <label className="flex items-center gap-1.5 cursor-pointer text-xs">
-            <input
-              type="checkbox"
-              checked={flashAttn}
-              onChange={(e) => onFlashAttnChange(e.target.checked)}
-            />
-            <span className="text-fg-secondary">Flash Attention</span>
-          </label>
+          <div className="flex flex-col gap-1">
+            <label className="caption text-2xs">加速</label>
+            <select
+              className="input text-xs py-1"
+              value={backend}
+              onChange={(e) => onBackendChange(e.target.value as AttentionBackend)}
+            >
+              <option value="flash_attn">Flash Attention</option>
+              <option value="xformers">xformers</option>
+              <option value="none">无（SDPA）</option>
+            </select>
+          </div>
         </div>
 
         <AiTaskStatus task={task} />

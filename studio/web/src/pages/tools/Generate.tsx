@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   api,
+  type AttentionBackend,
   type GenerateRequest,
   type LoraEntry,
   type MonitorState,
@@ -272,7 +273,7 @@ export default function GeneratePage() {
   const [count, setCount] = useState(1)
   const [seed, setSeed] = useState(0)
   const [loras, setLoras] = useState<LoraEntry[]>([])
-  const [flashAttn, setFlashAttn] = useState(true)
+  const [attentionBackend, setAttentionBackend] = useState<AttentionBackend>('flash_attn')
 
   const [busy, setBusy] = useState(false)
   const [currentTask, setCurrentTask] = useState<Task | null>(null)
@@ -349,7 +350,7 @@ export default function GeneratePage() {
         width, height, steps, count, seed,
         cfg_scale: cfgScale,
         lora_configs: loras.filter((l) => l.path.trim()),
-        flash_attn: flashAttn,
+        attention_backend: attentionBackend,
       }
       const t = await api.enqueueGenerate(body)
       setCurrentTask(t)
@@ -423,10 +424,18 @@ export default function GeneratePage() {
               <LoraList loras={loras} onChange={setLoras} recent={recentLoras} />
             </div>
 
-            <label className="flex items-center gap-2 text-sm cursor-pointer">
-              <input type="checkbox" checked={flashAttn} onChange={(e) => setFlashAttn(e.target.checked)} />
-              <span className="text-fg-secondary">Flash Attention</span>
-            </label>
+            <div className="flex flex-col gap-1">
+              <label className="caption">加速</label>
+              <select
+                className="input"
+                value={attentionBackend}
+                onChange={(e) => setAttentionBackend(e.target.value as AttentionBackend)}
+              >
+                <option value="flash_attn">Flash Attention</option>
+                <option value="xformers">xformers</option>
+                <option value="none">无（PyTorch SDPA）</option>
+              </select>
+            </div>
 
             <div className="flex gap-2">
               <button className="btn btn-primary flex-1" onClick={handleGenerate} disabled={busy}>
