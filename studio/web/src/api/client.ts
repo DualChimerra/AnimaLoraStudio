@@ -612,6 +612,29 @@ export interface RegAiRequest {
   flash_attn?: boolean
 }
 
+/** PR-9 — 测试出图（独立工具页，多 LoRA + multi-prompt）。 */
+export interface LoraEntry {
+  path: string
+  scale: number
+}
+
+export interface GenerateRequest {
+  prompts: string[]
+  negative_prompt?: string
+  width?: number
+  height?: number
+  steps?: number
+  cfg_scale?: number
+  sampler_name?: string
+  scheduler?: string
+  count?: number
+  seed?: number
+  lora_configs?: LoraEntry[]
+  mixed_precision?: string
+  xformers?: boolean
+  flash_attn?: boolean
+}
+
 export type TaskStatus = 'pending' | 'running' | 'done' | 'failed' | 'canceled'
 
 export interface Task {
@@ -1106,6 +1129,15 @@ export const api = {
   /** 查询先验生成 task 状态。 */
   getRegPriorTask: (pid: number, vid: number, taskId: number) =>
     req<Task>(`/api/projects/${pid}/versions/${vid}/reg/generate-prior/${taskId}`),
+
+  /** PR-9 — 启动测试出图 task。图写到 tempdir，task 结束清掉（不保存）。 */
+  enqueueGenerate: (body: GenerateRequest) =>
+    req<Task>('/api/generate', { method: 'POST', body: JSON.stringify(body) }),
+  /** 查询测试 task 状态。 */
+  getGenerateTask: (id: number) => req<Task>(`/api/generate/${id}`),
+  /** 测试出图单张 URL（task 跑中或刚完成时拉；清理后 404）。 */
+  generateSampleUrl: (taskId: number, filename: string) =>
+    `/api/generate/${taskId}/sample/${encodeURIComponent(filename)}`,
 
   // Train config (PP6.2) -------------------------------------------------
   getVersionConfig: (pid: number, vid: number) =>
