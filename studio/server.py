@@ -78,7 +78,7 @@ from .paths import (
     WEB_DIST,
     ensure_dirs,
 )
-from .schema import GROUP_ORDER, TrainingConfig
+from .schema import GROUP_ORDER, RegAiConfig, TrainingConfig
 from .supervisor import Supervisor
 
 ensure_dirs()
@@ -1605,6 +1605,105 @@ def get_reg_caption(pid: int, vid: int, path: str) -> dict[str, Any]:
     if not img.exists() or img.suffix.lower() not in datasets.IMAGE_EXTS:
         raise HTTPException(404, "image not found")
     return {"path": path, "tags": tagedit.read_tags(img)}
+
+
+def _resolve_anima_model_paths() -> dict[str, str]:
+    """解析 base 模型默认路径（先验生成 / 测试出图共用）。
+
+    与 version_config 的 model 字段对齐。用户用别的 base 模型时，
+    在 Settings → 模型 里改 selected_anima 影响这里的 anima 主权重路径。
+    """
+    from .services.model_downloader import models_root
+    root = models_root()
+    return {
+        "transformer_path": str(root / "diffusion_models" / "anima-preview3-base.safetensors"),
+        "vae_path": str(root / "vae" / "qwen_image_vae.safetensors"),
+        "text_encoder_path": str(root / "text_encoders"),
+        "t5_tokenizer_path": str(root / "t5_tokenizer"),
+    }
+
+
+class RegAiRequest(BaseModel):
+    """先验生成请求 —— 不含 lora_configs，先验生成不带 LoRA。"""
+    excluded_tags: list[str] = []
+    negative_prompt: str = ""
+    width: int = 1024
+    height: int = 1024
+    steps: int = 25
+    cfg_scale: float = 4.0
+    sampler_name: str = "er_sde"
+    scheduler: str = "simple"
+    seed: int = 0
+    incremental: bool = False
+    mixed_precision: str = "bf16"
+    xformers: bool = False
+    flash_attn: bool = True
+
+
+@app.post("/api/projects/{pid}/versions/{vid}/reg/generate-prior")
+def reg_generate_prior(pid: int, vid: int, body: RegAiRequest) -> dict[str, Any]:
+    """启动先验生成 task —— base 模型给每张 train 图的 tag 反向出对照图。"""
+    model_paths = _resolve_anima_model_paths()
+    _, _, vdir = _version_dir_or_404(pid, vid)
+    train = vdir / "train"
+    has_image = train.exists() and any(
+        f.is_file() and f.suffix.lower() in datasets.IMAGE_EXTS
+        for f in train.rglob("*")
+    )
+    if not has_image:
+        raise HTTPException(400, "train 还没有图片，请先完成 Step 1（下载）或 Step 2（筛选）")
+
+    rdir = _reg_dir(vdir)
+    rdir.mkdir(parents=True, exist_ok=True)
+
+    cfg = RegAiConfig(
+        **model_paths,
+        train_dir=str(train),
+        reg_dir=str(rdir),
+        excluded_tags=list(body.excluded_tags),
+        negative_prompt=body.negative_prompt,
+        width=body.width,
+        height=body.height,
+        steps=body.steps,
+        cfg_scale=body.cfg_scale,
+        sampler_name=body.sampler_name,
+        scheduler=body.scheduler,
+        seed=body.seed,
+        incremental=body.incremental,
+        mixed_precision=body.mixed_precision,
+        xformers=body.xformers,
+        flash_attn=body.flash_attn,
+    )
+
+    cfg_dir = STUDIO_DATA / "reg_ai_configs"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+
+    with db.connection_for() as conn:
+        task_id = db.create_task(
+            conn, name=f"reg-prior p{pid}v{vid}", config_name="reg_ai", priority=0,
+        )
+        db.update_task(
+            conn, task_id, task_type="reg_ai", project_id=pid, version_id=vid,
+        )
+
+    cfg_path = cfg_dir / f"reg_ai_{task_id}.json"
+    cfg_path.write_text(cfg.model_dump_json(indent=2), encoding="utf-8")
+
+    with db.connection_for() as conn:
+        db.update_task(conn, task_id, config_path=str(cfg_path))
+        task = db.get_task(conn, task_id)
+
+    bus.publish({"type": "task_state_changed", "task_id": task_id, "status": "pending"})
+    return task or {"id": task_id}
+
+
+@app.get("/api/projects/{pid}/versions/{vid}/reg/generate-prior/{task_id}")
+def get_reg_prior_task(pid: int, vid: int, task_id: int) -> dict[str, Any]:
+    with db.connection_for() as conn:
+        task = db.get_task(conn, task_id)
+    if not task or task.get("task_type") != "reg_ai":
+        raise HTTPException(404)
+    return task
 
 
 @app.delete("/api/projects/{pid}/versions/{vid}/reg")

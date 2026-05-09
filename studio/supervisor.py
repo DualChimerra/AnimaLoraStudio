@@ -79,10 +79,22 @@ JobCmdBuilder = Callable[[dict[str, Any]], list[str]]
 
 
 def _default_cmd_builder(task: dict[str, Any], config_path: Path) -> list[str]:
-    """默认调用 scripts/anima_train.py --config <path> --monitor-state-file <state>。"""
+    """根据 task_type 路由到对应脚本。
+
+    train (默认 / 老 task): scripts/anima_train.py
+    reg_ai: tools/anima_reg_ai.py（先验生成）
+    generate: tools/anima_generate.py（测试出图）
+    """
+    task_type = task.get("task_type") or "train"
+    if task_type == "reg_ai":
+        script = REPO_ROOT / "tools" / "anima_reg_ai.py"
+    elif task_type == "generate":
+        script = REPO_ROOT / "tools" / "anima_generate.py"
+    else:
+        script = REPO_ROOT / "scripts" / "anima_train.py"
     cmd = [
         sys.executable,
-        str(REPO_ROOT / "scripts" / "anima_train.py"),
+        str(script),
         "--config",
         str(config_path),
     ]
