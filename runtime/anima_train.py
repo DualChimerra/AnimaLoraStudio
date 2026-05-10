@@ -2227,18 +2227,28 @@ def main():
 
     # 注入 LoRA
     logger.info(f"注入 {args.lora_type.upper()}...")
-    from utils.lycoris_adapter import AnimaLycorisAdapter
-    injector = AnimaLycorisAdapter(
-        algo=args.lora_type,
-        rank=args.lora_rank,
-        alpha=args.lora_alpha,
-        factor=args.lokr_factor,
-        dropout=float(getattr(args, "lora_dropout", 0.0) or 0.0),
-        rank_dropout=float(getattr(args, "lora_rank_dropout", 0.0) or 0.0),
-        module_dropout=float(getattr(args, "lora_module_dropout", 0.0) or 0.0),
-        weight_decompose=bool(getattr(args, "lora_dora", False)),
-        rs_lora=bool(getattr(args, "lora_rs", False)),
-    )
+    if args.lora_type == "tlora":
+        from utils.tlora_adapter import AnimaTLoRAAdapter
+        injector = AnimaTLoRAAdapter(
+            rank=args.lora_rank,
+            alpha=args.lora_alpha,
+            min_rank=int(getattr(args, "tlora_min_rank", 1) or 1),
+            reg_dims=getattr(args, "tlora_reg_dims", None) or None,
+            reg_lrs=getattr(args, "tlora_reg_lrs", None) or None,
+        )
+    else:
+        from utils.lycoris_adapter import AnimaLycorisAdapter
+        injector = AnimaLycorisAdapter(
+            algo=args.lora_type,
+            rank=args.lora_rank,
+            alpha=args.lora_alpha,
+            factor=args.lokr_factor,
+            dropout=float(getattr(args, "lora_dropout", 0.0) or 0.0),
+            rank_dropout=float(getattr(args, "lora_rank_dropout", 0.0) or 0.0),
+            module_dropout=float(getattr(args, "lora_module_dropout", 0.0) or 0.0),
+            weight_decompose=bool(getattr(args, "lora_dora", False)),
+            rs_lora=bool(getattr(args, "lora_rs", False)),
+        )
     injector.inject(model)
     
     # 从已有 LoRA 继续训练
