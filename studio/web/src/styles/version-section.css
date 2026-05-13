@@ -229,6 +229,41 @@
 .vs-pill-here   { background: var(--accent-soft); color: var(--accent); }
 .vs-pill-info   { background: var(--info-soft);   color: var(--info); }
 
+/* 折叠包装：master 卡底"上一版本可切回"默认仅小字提示，点开才显示
+   完整 sha + 切回按钮。回滚是潜在危险操作，UI 不应过于显眼。 */
+.vs-rollback-collapse {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border-subtle);
+}
+.vs-rollback-collapse .vs-rollback-summary {
+  cursor: pointer;
+  color: var(--fg-tertiary);
+  font-size: 11px;
+  font-family: var(--font-mono);
+  list-style: none;
+  user-select: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.vs-rollback-collapse .vs-rollback-summary::-webkit-details-marker { display: none; }
+.vs-rollback-collapse .vs-rollback-summary:hover { color: var(--fg-secondary); }
+.vs-rollback-collapse .vs-rollback-summary .vs-caret {
+  display: inline-block;
+  transition: transform 120ms;
+}
+.vs-rollback-collapse[open] .vs-rollback-summary .vs-caret {
+  transform: rotate(90deg);
+}
+.vs-rollback-collapse[open] .vs-rollback-summary { margin-bottom: 10px; }
+/* 折叠包装下原 inline-row 的 margin/border 由 collapse 提供，去掉避免双重 */
+.vs-rollback-collapse .vs-rollback-inline-row {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+
 /* ==================== inline rollback affordance（master 卡底） ==================== */
 .vs-rollback-inline-row {
   margin-top: 10px;
@@ -261,13 +296,13 @@
   font-size: 10.5px;
 }
 
-/* ==================== dev toggle 行（卡片下方，demoted） ==================== */
+/* ==================== dev toggle 行（title 下方独立一行） ==================== */
+/* 之前下方双卡之后用 dashed border 表达 "opt-in"；现在搬到 title 下方
+   主流位置，更紧凑、无边框，背景由 .open / .locked 状态决定 */
 .vs-dev-toggle-row {
-  margin-top: 14px;
-  padding: 11px 14px;
+  padding: 8px 12px;
   background: transparent;
-  border: 1px dashed var(--border-subtle);
-  border-radius: 8px;
+  border-radius: 6px;
   display: flex;
   align-items: center;
   gap: 12px;
@@ -276,12 +311,9 @@
 }
 .vs-dev-toggle-row.open {
   background: var(--bg-sunken);
-  border-style: solid;
 }
 .vs-dev-toggle-row.locked {
   background: var(--bg-sunken);
-  border-style: solid;
-  border-color: var(--border-subtle);
 }
 .vs-dev-toggle-row .vs-lhs {
   display: flex;
@@ -346,6 +378,71 @@
 .vs-sw.locked {
   cursor: not-allowed;
   opacity: 0.7;
+}
+
+/* ==================== InfoButton（title 旁 ⓘ click 开关 tooltip） ==================== */
+/* 之前的 meta-foot 一整行（autocheck 周期 / git reset 实现细节 / 拒绝
+   条件 / 上次日志链接）对普通用户都是 noise；移进此 click-toggle 弹层 */
+.vs-info-wrap {
+  position: relative;
+  display: inline-flex;
+}
+.vs-info-trigger {
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  color: var(--fg-tertiary);
+  font-size: 14px;
+  padding: 2px 4px;
+  line-height: 1;
+  border-radius: 4px;
+}
+.vs-info-trigger:hover { color: var(--fg-primary); background: var(--bg-overlay); }
+.vs-info-trigger[aria-expanded="true"] {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.vs-info-panel {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  z-index: 20;
+  width: 380px;
+  max-width: calc(100vw - 32px);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  box-shadow: var(--sh-md);
+  padding: 12px 14px;
+  font-size: 12px;
+  color: var(--fg-secondary);
+  line-height: 1.6;
+}
+.vs-info-panel ul {
+  padding: 0;
+  margin: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.vs-info-panel li {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+.vs-info-panel li::before {
+  content: '·';
+  color: var(--fg-disabled);
+  flex-shrink: 0;
+  margin-top: -1px;
+}
+.vs-info-panel code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--bg-sunken);
+  padding: 1px 5px;
+  border-radius: 3px;
 }
 
 /* ==================== meta foot 行 ==================== */
@@ -441,7 +538,9 @@
 }
 .vs-commit {
   display: grid;
-  grid-template-columns: 14px minmax(0, 1fr) auto;
+  /* glyph / msg / sha / pill-slot 四列。pill-slot 固定宽度让 sha 列在
+     不同 HEAD/当前/已选/切到此 label 下都对齐，不被 pill 长度挤动。 */
+  grid-template-columns: 14px minmax(0, 1fr) auto 60px;
   gap: 10px;
   padding: 5px 8px;
   margin: 0 -8px;
@@ -460,7 +559,10 @@
   margin-top: 4px;
   z-index: 1;
 }
-.vs-commit.head .vs-glyph {
+/* accent glyph 给 "current"（用户实际在的 commit），不给 dev HEAD —
+   语义是"你在这里"，对得上卡片头 "你在这里" pill。HEAD 仅在右侧 pill
+   slot 用文字 "HEAD" 标记，不动 glyph。 */
+.vs-commit.current .vs-glyph {
   background: var(--accent);
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-soft);
@@ -473,12 +575,20 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.vs-commit.head .vs-msg { font-weight: 500; }
+.vs-commit.current .vs-msg { font-weight: 500; }
 .vs-commit .vs-sha {
   font-family: var(--font-mono);
   font-size: 10.5px;
   color: var(--fg-tertiary);
   white-space: nowrap;
+  text-align: right;
+}
+/* pill-slot 是第 4 列，固定宽度让 sha 列在不同 row 对齐。
+   HEAD / 当前 / 已选 / 切到此 不同 label 都放这儿。 */
+.vs-commit .vs-pill-slot {
+  text-align: right;
+  font-family: var(--font-mono);
+  font-size: 10px;
 }
 .vs-commit.clickable { cursor: pointer; }
 .vs-commit.clickable:hover { background: var(--bg-surface); }
@@ -494,7 +604,6 @@
   color: var(--fg-disabled);
   opacity: 0;
   transition: opacity 100ms;
-  margin-left: 6px;
 }
 .vs-commit.clickable:hover .vs-switch-hint { opacity: 1; }
 .vs-commit.selected .vs-switch-hint { opacity: 1; color: var(--accent); }
@@ -506,7 +615,6 @@
   color: var(--accent);
   border-radius: 999px;
   letter-spacing: 0.04em;
-  margin-left: 6px;
 }
 
 .vs-commits-load-more {
@@ -522,7 +630,9 @@
 }
 .vs-commits-load-more:hover { color: var(--accent); }
 
-/* selected commit action bar（替代 chan-foot） */
+/* selected commit action bar（替代 chan-foot）。
+ * actions 永远固定在右侧（flex-shrink:0）；info 长内容截断 ellipsis，
+ * 不会把按钮挤换行（之前 flex-wrap 会让按钮新起一行）。 */
 .vs-selection-foot {
   display: flex;
   align-items: center;
@@ -532,7 +642,6 @@
   border: 1px solid var(--accent);
   border-radius: 6px;
   gap: 10px;
-  flex-wrap: wrap;
 }
 .vs-selection-foot .vs-info {
   font-size: 12px;
@@ -540,7 +649,10 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  flex-wrap: wrap;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 .vs-selection-foot .vs-info b {
   font-family: var(--font-mono);
@@ -549,6 +661,7 @@
 .vs-selection-foot .vs-actions {
   display: flex;
   gap: 6px;
+  flex-shrink: 0;
 }
 
 /* ==================== preview / progress states（chunk 4） ==================== */
