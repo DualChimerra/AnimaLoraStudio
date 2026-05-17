@@ -1,6 +1,7 @@
 """LLM tagger: OpenAI-compatible Chat Completions + Responses payloads."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -61,6 +62,18 @@ def _responses_response(content: str):
     return r
 
 
+def _sse_response(*payloads: dict):
+    r = MagicMock()
+    r.status_code = 200
+    r.headers = {"content-type": "text/event-stream"}
+    r.text = "".join(
+        f"data: {json.dumps(payload)}\n\n"
+        for payload in payloads
+    ) + "data: [DONE]\n\n"
+    r.json.side_effect = AssertionError("SSE responses must not use resp.json()")
+    return r
+
+
 def test_is_available_requires_model(isolated_secrets) -> None:
     secrets.update(
         {"llm_tagger": {"presets": [{"id": "style_json", "model": ""}]}}
@@ -109,6 +122,23 @@ def test_tag_emits_start_and_done_progress(isolated_secrets, tmp_path: Path) -> 
     list(tagger.tag([img], on_progress=lambda d, t: progress.append((d, t))))
 
     assert progress == [(0, 1), (1, 1)]
+
+
+def test_chat_completions_tag_accepts_sse_delta_stream(
+    isolated_secrets, tmp_path: Path
+) -> None:
+    sess = MagicMock()
+    sess.post.return_value = _sse_response(
+        {"choices": [{"delta": {"content": '{"tags":["ink"'}}]},
+        {"choices": [{"delta": {"content": "]}"}}]},
+    )
+    tagger = llm_tagger.LLMTagger(session=sess)
+    img = _png(tmp_path / "1.png")
+
+    [result] = list(tagger.tag([img]))
+
+    assert result["tags"] == ["ink"]
+    assert result["caption"] == "ink"
 
 
 def test_uses_editable_prompt_preset(isolated_secrets, tmp_path: Path) -> None:
@@ -218,6 +248,52 @@ def test_text_connectivity_uses_chat_shape() -> None:
     assert kwargs["headers"]["Authorization"] == "Bearer secret"
     assert kwargs["json"]["max_tokens"] == 512
     assert kwargs["json"]["messages"][1]["role"] == "user"
+
+
+def test_text_connectivity_accepts_chat_sse_delta_stream() -> None:
+    sess = MagicMock()
+    sess.post.return_value = _sse_response(
+        {"choices": [{"delta": {"content": "hel"}}]},
+        {"choices": [{"delta": {"content": "lo"}}]},
+    )
+
+    result = llm_tagger.test_openai_compatible_connection(
+        "http://x/v1",
+        "secret",
+        "text-model",
+        endpoint="chat_completions",
+        session=sess,
+    )
+
+    assert result["ok"] is True
+    assert result["status_code"] == 200
+    assert result["response_preview"] == "hello"
+
+
+def test_text_connectivity_reports_sse_error_payload() -> None:
+    sess = MagicMock()
+    sess.post.return_value = _sse_response(
+        {
+            "error": {
+                "type": "upstream_error",
+                "code": 403,
+                "message": "model route is forbidden",
+            }
+        },
+    )
+
+    result = llm_tagger.test_openai_compatible_connection(
+        "http://x/v1",
+        "secret",
+        "bad-model",
+        endpoint="chat_completions",
+        session=sess,
+    )
+
+    assert result["ok"] is False
+    assert result["status_code"] == 200
+    assert "upstream_error" in result["error"]
+    assert "model route is forbidden" in result["error"]
 
 
 def test_text_connectivity_uses_responses_shape() -> None:

@@ -74,6 +74,171 @@ def _openai_compatible_endpoint(base_url: str, *, kind: str) -> str:
     return f"{base}/v1/{kind}"
 
 
+def _response_text(resp: requests.Response) -> str:
+    text = getattr(resp, "text", "")
+    return text if isinstance(text, str) else ""
+
+
+def _response_content_type(resp: requests.Response) -> str:
+    headers = getattr(resp, "headers", {}) or {}
+    getter = getattr(headers, "get", None)
+    if not callable(getter):
+        return ""
+    value = getter("content-type")
+    if not isinstance(value, str):
+        value = getter("Content-Type")
+    return value.lower() if isinstance(value, str) else ""
+
+
+def _is_sse_response(resp: requests.Response, raw: str) -> bool:
+    return "text/event-stream" in _response_content_type(resp) or raw.lstrip().startswith("data:")
+
+
+def _iter_sse_payloads(raw: str) -> Iterator[dict[str, Any]]:
+    data_lines: list[str] = []
+
+    def flush() -> Iterator[dict[str, Any]]:
+        if not data_lines:
+            return
+        data = "\n".join(data_lines).strip()
+        data_lines.clear()
+        if not data or data == "[DONE]":
+            return
+        try:
+            payload = json.loads(data)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"LLM SSE 返回不是合法 JSON: {data[:200]}") from exc
+        if isinstance(payload, dict):
+            yield payload
+
+    for line in raw.splitlines():
+        line = line.rstrip("\r")
+        if not line:
+            yield from flush()
+            continue
+        if line.startswith(":"):
+            continue
+        if line.startswith("data:"):
+            data = line[5:]
+            if data.startswith(" "):
+                data = data[1:]
+            data_lines.append(data)
+    yield from flush()
+
+
+def _format_llm_error(error: Any) -> str:
+    if isinstance(error, dict):
+        parts = [
+            error.get("type"),
+            error.get("code") or error.get("status") or error.get("status_code"),
+            error.get("message") or error.get("detail") or error.get("error"),
+        ]
+        text = " ".join(str(part) for part in parts if part not in (None, ""))
+        return text or json.dumps(error, ensure_ascii=False)
+    return str(error or "").strip()
+
+
+def _extract_openai_error(payload: dict[str, Any]) -> str:
+    error = payload.get("error")
+    if error:
+        return _format_llm_error(error)
+    response = payload.get("response")
+    if isinstance(response, dict):
+        nested = _extract_openai_error(response)
+        if nested:
+            return nested
+    last_error = payload.get("last_error")
+    if last_error:
+        return _format_llm_error(last_error)
+    event_type = str(payload.get("type") or "")
+    if event_type == "error" or event_type.endswith(".error"):
+        return _format_llm_error(
+            payload.get("message") or payload.get("detail") or payload
+        )
+    if str(payload.get("status") or "").lower() in {"failed", "error"}:
+        return _format_llm_error(payload.get("message") or payload)
+    return ""
+
+
+def _content_to_text(content: Any) -> str:
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                if item.get("type") in {"text", "output_text"}:
+                    parts.append(str(item.get("text") or ""))
+            elif isinstance(item, str):
+                parts.append(item)
+        return "".join(parts)
+    return str(content or "")
+
+
+def _extract_openai_stream_delta(payload: dict[str, Any]) -> str:
+    event_type = str(payload.get("type") or "")
+    if event_type in {"response.output_text.delta", "response.refusal.delta"}:
+        return str(payload.get("delta") or "")
+    choices = payload.get("choices") or []
+    if not isinstance(choices, list) or not choices:
+        return ""
+    choice = choices[0] if isinstance(choices[0], dict) else {}
+    delta = choice.get("delta") or {}
+    if isinstance(delta, dict):
+        return _content_to_text(delta.get("content") or delta.get("text"))
+    return ""
+
+
+def _extract_openai_final_text(payload: dict[str, Any], *, endpoint: str) -> str:
+    response = payload.get("response")
+    if isinstance(response, dict):
+        try:
+            return LLMTagger._extract_responses_text(response)
+        except Exception:  # noqa: BLE001
+            return ""
+    try:
+        if endpoint == "responses" or "output_text" in payload or "output" in payload:
+            return LLMTagger._extract_responses_text(payload)
+        if "choices" in payload:
+            return LLMTagger._extract_chat_text(payload)
+    except Exception:  # noqa: BLE001
+        return ""
+    return ""
+
+
+def _extract_sse_response_text(raw: str, *, endpoint: str) -> str:
+    parts: list[str] = []
+    final_text = ""
+    seen_payload = False
+    for payload in _iter_sse_payloads(raw):
+        seen_payload = True
+        error = _extract_openai_error(payload)
+        if error:
+            raise RuntimeError(f"LLM SSE error: {error}")
+        delta = _extract_openai_stream_delta(payload)
+        if delta:
+            parts.append(delta)
+        final = _extract_openai_final_text(payload, endpoint=endpoint)
+        if final:
+            final_text = final
+    if not seen_payload:
+        raise RuntimeError("LLM SSE 返回为空")
+    return ("".join(parts) if parts else final_text).strip()
+
+
+def _extract_llm_response_text(resp: requests.Response, *, endpoint: str) -> str:
+    raw = _response_text(resp)
+    if _is_sse_response(resp, raw):
+        return _extract_sse_response_text(raw, endpoint=endpoint)
+    payload = resp.json()
+    error = _extract_openai_error(payload)
+    if error:
+        raise RuntimeError(f"LLM error: {error}")
+    return (
+        LLMTagger._extract_responses_text(payload)
+        if endpoint == "responses"
+        else LLMTagger._extract_chat_text(payload)
+    )
+
+
 def fetch_openai_compatible_models(
     base_url: str,
     api_key: str = "",
@@ -166,17 +331,12 @@ def test_openai_compatible_connection(
         )
         result["elapsed_ms"] = int((time.monotonic() - started) * 1000)
         result["status_code"] = resp.status_code
-        raw_preview = (resp.text or "")[:1000]
+        raw_preview = _response_text(resp)[:1000]
         result["response_preview"] = raw_preview
         if resp.status_code >= 400:
             result["error"] = f"HTTP {resp.status_code}: {raw_preview[:500]}"
             return result
-        payload = resp.json()
-        text = (
-            LLMTagger._extract_responses_text(payload)
-            if endpoint == "responses"
-            else LLMTagger._extract_chat_text(payload)
-        )
+        text = _extract_llm_response_text(resp, endpoint=endpoint)
         result["response_preview"] = text[:1000]
         result["ok"] = bool(text.strip())
         if not result["ok"]:
@@ -318,12 +478,7 @@ class LLMTagger:
                     raise RuntimeError(
                         f"HTTP {resp.status_code} after {elapsed_ms}ms at {endpoint}: {resp.text[:300]}"
                     )
-                payload = resp.json()
-                content = (
-                    self._extract_responses_text(payload)
-                    if cfg.endpoint == "responses"
-                    else self._extract_chat_text(payload)
-                )
+                content = _extract_llm_response_text(resp, endpoint=cfg.endpoint)
                 logger.info(
                     "LLM tagger OK %s model=%s image=%s elapsed=%sms",
                     endpoint,
