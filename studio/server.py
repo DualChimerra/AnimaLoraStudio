@@ -22,8 +22,10 @@ import io
 import json
 import logging
 import os
+import shutil
 import threading
 import time
+import zipfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator, Optional
@@ -55,11 +57,13 @@ from . import (
     secrets,
     thumb_cache,
     versions,
+    versions_phase,
 )
 from .event_bus import bus
 from .services import (
     caption_snapshot,
     downloader,
+    duplicate_finder,
     presets as preset_flow,
     model_downloader,
     flash_attention_setup,
@@ -79,6 +83,7 @@ from .services import (
 )
 from .services.tagger import VALID_TAGGER_NAMES, get_tagger
 from .paths import (
+    DATA_EXPORTS,
     LOGS_DIR,
     OUTPUT_DIR,
     REPO_ROOT,
@@ -122,6 +127,33 @@ def _validate_component_or_400(name: str) -> None:
         validate_path_component(name)
     except ValueError as exc:
         raise HTTPException(400, f"invalid path: {exc}") from exc
+
+
+def _data_export_path(filename: str, suffixes: tuple[str, ...] = (".zip",)) -> Path:
+    path = _safe_join_or_400(DATA_EXPORTS, filename)
+    allowed = tuple(s.lower() for s in suffixes)
+    if allowed and path.suffix.lower() not in allowed:
+        label = " / ".join(allowed)
+        raise HTTPException(400, f"请选择 {label} 文件")
+    return path
+
+
+def _unique_data_export_path(filename: str, suffixes: tuple[str, ...] = (".zip",)) -> Path:
+    base = _data_export_path(filename, suffixes)
+    if not base.exists():
+        return base
+    stem = base.stem
+    suffix = base.suffix
+    for i in range(2, 1000):
+        candidate = _data_export_path(f"{stem}-{i}{suffix}", suffixes)
+        if not candidate.exists():
+            return candidate
+    raise HTTPException(409, f"导出文件名冲突过多: {filename}")
+
+
+def _export_result(path: Path) -> dict[str, Any]:
+    st = path.stat()
+    return {"filename": path.name, "path": str(path), "size": st.st_size, "mtime": st.st_mtime}
 
 
 def _install_proactor_disconnect_filter(loop: asyncio.AbstractEventLoop) -> None:
@@ -367,6 +399,18 @@ class DuplicateRequest(BaseModel):
     new_name: str
 
 
+class _PresetExportBody(BaseModel):
+    config: dict[str, Any]
+
+
+class _PresetImportBody(BaseModel):
+    filename: str
+
+
+class _PresetImportFromPathBody(BaseModel):
+    path: str
+
+
 @app.get("/api/schema")
 def get_schema() -> dict[str, Any]:
     """返回 TrainingConfig 的 JSON Schema + 分组顺序，前端据此渲染表单。"""
@@ -429,6 +473,73 @@ def download_preset(name: str) -> FileResponse:
     if not path.exists():
         raise HTTPException(status_code=404, detail=f"预设不存在: {name}")
     return FileResponse(path, media_type="application/yaml", filename=f"{name}.yaml")
+
+@app.post("/api/presets/{name}/export")
+def export_preset_to_data_exports(name: str, body: _PresetExportBody) -> dict[str, Any]:
+    """把当前预设表单完整参数校验后保存到 data_exports/。"""
+    DATA_EXPORTS.mkdir(parents=True, exist_ok=True)
+    try:
+        dest = _unique_data_export_path(f"{name}.yaml", (".yaml", ".yml"))
+        path = presets_io.write_preset(dest.stem, body.config, DATA_EXPORTS)
+    except presets_io.PresetError as exc:
+        raise HTTPException(status_code=_err_code(exc), detail=str(exc)) from exc
+    return _export_result(path)
+
+
+@app.post("/api/presets/import-from-data-exports")
+def import_preset_from_data_exports(body: _PresetImportBody) -> dict[str, Any]:
+    """从 data_exports/ 里的 yaml/json 预设导入到用户预设池。"""
+    src = _data_export_path(body.filename, (".yaml", ".yml", ".json"))
+    if not src.exists():
+        raise HTTPException(404, f"文件不存在: {body.filename}")
+    if not src.is_file():
+        raise HTTPException(400, "请选择文件")
+    try:
+        config, suggested = presets_io.parse_preset_bytes(src.read_bytes(), src.name)
+    except presets_io.PresetError as exc:
+        raise HTTPException(status_code=_err_code(exc), detail=str(exc)) from exc
+    if presets_io.preset_path(suggested).exists():
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": f"预设已存在: {suggested}",
+                "config": config,
+                "suggested_name": suggested,
+            },
+        )
+    try:
+        path = presets_io.write_preset(suggested, config)
+    except presets_io.PresetError as exc:
+        raise HTTPException(status_code=_err_code(exc), detail=str(exc)) from exc
+    return {"name": suggested, "path": str(path)}
+
+
+@app.post("/api/presets/import-from-path")
+def import_preset_from_path(body: _PresetImportFromPathBody) -> dict[str, Any]:
+    """从服务器绝对路径导入预设（yaml/yml/json）。"""
+    src = Path(body.path)
+    if not src.is_file():
+        raise HTTPException(400, f"文件不存在或不可读: {body.path}")
+    if src.suffix.lower() not in (".yaml", ".yml", ".json"):
+        raise HTTPException(400, "请选择 .yaml / .yml / .json 文件")
+    try:
+        config, suggested = presets_io.parse_preset_bytes(src.read_bytes(), src.name)
+    except presets_io.PresetError as exc:
+        raise HTTPException(status_code=_err_code(exc), detail=str(exc)) from exc
+    if presets_io.preset_path(suggested).exists():
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": f"预设已存在: {suggested}",
+                "config": config,
+                "suggested_name": suggested,
+            },
+        )
+    try:
+        path = presets_io.write_preset(suggested, config)
+    except presets_io.PresetError as exc:
+        raise HTTPException(status_code=_err_code(exc), detail=str(exc)) from exc
+    return {"name": suggested, "path": str(path)}
 
 
 @app.post("/api/presets/import")
@@ -667,7 +778,6 @@ def _publish_project_state(p: dict[str, Any]) -> None:
     bus.publish({
         "type": "project_state_changed",
         "project_id": p["id"],
-        "stage": p["stage"],
     })
 
 
@@ -676,7 +786,8 @@ def _publish_version_state(v: dict[str, Any]) -> None:
         "type": "version_state_changed",
         "project_id": v["project_id"],
         "version_id": v["id"],
-        "stage": v["stage"],
+        "status": versions.get_status(v),
+        "phase": versions.get_phase(v),
     })
 
 
@@ -691,9 +802,21 @@ def _project_err_code(exc: Exception) -> int:
 
 @app.get("/api/projects")
 def list_projects_endpoint() -> dict[str, Any]:
+    """ADR-0007 §11.8-E：enrich active version label + status，卡片右上角 badge 用。"""
     with db.connection_for() as conn:
         rows = projects.list_projects(conn)
-    return {"items": projects.projects_with_stats(rows)}
+        enriched: list[dict[str, Any]] = []
+        for r in projects.projects_with_stats(rows):
+            r["active_version_label"] = None
+            r["active_version_status"] = None
+            avid = r.get("active_version_id")
+            if avid:
+                av = versions.get_version(conn, int(avid))
+                if av:
+                    r["active_version_label"] = av["label"]
+                    r["active_version_status"] = versions.get_status(av)
+            enriched.append(r)
+    return {"items": enriched}
 
 
 @app.post("/api/projects")
@@ -873,6 +996,56 @@ def activate_version_endpoint(pid: int, vid: int) -> dict[str, Any]:
     return _project_payload(p)
 
 
+# ---------------------------------------------------------------------------
+# Phase cursor 推进 / 跳过 — ADR-0007 §11.5-A / §11.5-B
+# ---------------------------------------------------------------------------
+
+
+def _phase_advance_payload(
+    advanced: bool, result: versions_phase.CheckResult,
+    new_phase: Optional[str], version: Optional[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "advanced": advanced,
+        "ok": result.ok,
+        "reason": result.reason,
+        "new_phase": new_phase,
+        "version": version,
+    }
+
+
+@app.post("/api/projects/{pid}/versions/{vid}/advance-phase")
+def advance_phase_endpoint(pid: int, vid: int) -> dict[str, Any]:
+    """phase cursor 推进 —— "下一步" 按钮调用（ADR-0007 §11.5-A）。
+
+    成功 → cursor++ + 返回新 phase + publish version_state_changed。
+    失败 → ok=False + reason（前端 toast），cursor 不动。
+    """
+    with db.connection_for() as conn:
+        v = versions.get_version(conn, vid)
+        if not v or v["project_id"] != pid:
+            raise HTTPException(404, f"版本不存在: id={vid}")
+        advanced, result, new_phase = versions_phase.advance_phase(conn, vid)
+        v_after = versions.get_version(conn, vid)
+    if advanced and v_after is not None:
+        _publish_version_state(v_after)
+    return _phase_advance_payload(advanced, result, new_phase, v_after)
+
+
+@app.post("/api/projects/{pid}/versions/{vid}/skip-phase")
+def skip_phase_endpoint(pid: int, vid: int) -> dict[str, Any]:
+    """跳过可跳过的 phase（当前仅 regularizing；ADR-0007 §11.5-A）。"""
+    with db.connection_for() as conn:
+        v = versions.get_version(conn, vid)
+        if not v or v["project_id"] != pid:
+            raise HTTPException(404, f"版本不存在: id={vid}")
+        advanced, result, new_phase = versions_phase.skip_phase(conn, vid)
+        v_after = versions.get_version(conn, vid)
+    if advanced and v_after is not None:
+        _publish_version_state(v_after)
+    return _phase_advance_payload(advanced, result, new_phase, v_after)
+
+
 # Train export / import (PP7) -----------------------------------------------
 
 
@@ -935,6 +1108,197 @@ def export_version_train_zip(
         filename=archive_name,
         background=background,
     )
+
+
+class _BundleOptionsBody(BaseModel):
+    train: bool = True
+    train_captions: bool = True
+    reg: bool = False
+    reg_captions: bool = False
+    include_config: bool = False
+
+    def to_options(self) -> train_io.BundleOptions:
+        return train_io.BundleOptions(
+            train=self.train,
+            train_captions=self.train_captions,
+            reg=self.reg,
+            reg_captions=self.reg_captions,
+            include_config=self.include_config,
+        )
+
+
+class _BundleImportBody(BaseModel):
+    path: Optional[str] = None
+    filename: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _exactly_one_source(self) -> "_BundleImportBody":
+        if sum(bool(v) for v in (self.path, self.filename)) != 1:
+            raise ValueError("exactly one of path or filename is required")
+        return self
+
+
+@app.get("/api/data-exports")
+def list_data_exports() -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    DATA_EXPORTS.mkdir(parents=True, exist_ok=True)
+    for path in sorted(DATA_EXPORTS.iterdir(), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True):
+        if not path.is_file() or path.suffix.lower() not in {".zip", ".yaml", ".yml", ".json"}:
+            continue
+        try:
+            items.append(_export_result(path))
+        except OSError:
+            continue
+    return items
+
+
+@app.get("/api/projects/{pid}/versions/{vid}/bundle.zip")
+def export_version_bundle(
+    pid: int,
+    vid: int,
+    background: BackgroundTasks,
+    train: bool = True,
+    train_captions: bool = True,
+    reg: bool = False,
+    reg_captions: bool = False,
+    include_config: bool = False,
+) -> FileResponse:
+    """按选项临时打包 bundle.zip（schema_version 2）并交给浏览器下载。"""
+    import tempfile
+
+    opts = train_io.BundleOptions(
+        train=train,
+        train_captions=train_captions,
+        reg=reg,
+        reg_captions=reg_captions,
+        include_config=include_config,
+    )
+
+    with db.connection_for() as conn:
+        v = versions.get_version(conn, vid)
+        if not v or v["project_id"] != pid:
+            raise HTTPException(404, f"版本不存在: id={vid}")
+        p = projects.get_project(conn, pid)
+        assert p is not None
+
+        tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
+        tmp.close()
+        tmp_path = Path(tmp.name)
+        try:
+            train_io.export_bundle(conn, vid, tmp_path, opts)
+        except train_io.TrainIOError as exc:
+            tmp_path.unlink(missing_ok=True)
+            bus.publish({"type": "version_bundle_zip_failed", "project_id": pid, "version_id": vid, "error": str(exc)})
+            raise HTTPException(400, str(exc)) from exc
+        except Exception as exc:
+            tmp_path.unlink(missing_ok=True)
+            bus.publish({"type": "version_bundle_zip_failed", "project_id": pid, "version_id": vid, "error": str(exc)})
+            raise
+
+    bus.publish({"type": "version_bundle_zip_ready", "project_id": pid, "version_id": vid})
+    background.add_task(lambda: tmp_path.unlink(missing_ok=True))
+    return FileResponse(
+        tmp_path,
+        media_type="application/zip",
+        filename=f"{p['slug']}-{v['label']}.bundle.zip",
+        background=background,
+    )
+
+
+@app.post("/api/projects/{pid}/versions/{vid}/export-bundle")
+def export_version_bundle_to_data_exports(
+    pid: int,
+    vid: int,
+    body: _BundleOptionsBody,
+) -> dict[str, Any]:
+    """按选项打包 bundle.zip 并保存到 data_exports/。"""
+    opts = body.to_options()
+    with db.connection_for() as conn:
+        v = versions.get_version(conn, vid)
+        if not v or v["project_id"] != pid:
+            raise HTTPException(404, f"版本不存在: id={vid}")
+        p = projects.get_project(conn, pid)
+        assert p is not None
+        DATA_EXPORTS.mkdir(parents=True, exist_ok=True)
+        dest = _unique_data_export_path(f"{p['slug']}-{v['label']}.bundle.zip")
+        try:
+            train_io.export_bundle(conn, vid, dest, opts)
+        except train_io.TrainIOError as exc:
+            dest.unlink(missing_ok=True)
+            bus.publish({"type": "version_bundle_zip_failed", "project_id": pid, "version_id": vid, "error": str(exc)})
+            raise HTTPException(400, str(exc)) from exc
+        except Exception as exc:
+            dest.unlink(missing_ok=True)
+            bus.publish({"type": "version_bundle_zip_failed", "project_id": pid, "version_id": vid, "error": str(exc)})
+            raise
+
+    bus.publish({"type": "version_bundle_zip_ready", "project_id": pid, "version_id": vid})
+    return _export_result(dest)
+
+
+def _bundle_import_payload(result: dict[str, Any]) -> dict[str, Any]:
+    p = result["project"]
+    _publish_project_state(p)
+    _publish_version_state(result["version"])
+    return {
+        "project": _project_payload(p),
+        "version": result["version"],
+        "stats": result["stats"],
+    }
+
+
+def _import_bundle_from_path(dest: Path, original: str) -> dict[str, Any]:
+    if not dest.exists():
+        raise HTTPException(404, f"文件不存在: {original}")
+    if not dest.is_file():
+        raise HTTPException(400, "请选择 zip 文件")
+    if dest.suffix.lower() != ".zip":
+        raise HTTPException(400, "请选择 .zip 文件")
+    with db.connection_for() as conn:
+        try:
+            result = train_io.import_bundle(conn, dest, USER_PRESETS_DIR)
+        except train_io.TrainIOError as exc:
+            raise HTTPException(400, str(exc)) from exc
+    return _bundle_import_payload(result)
+
+
+@app.post("/api/projects/import-bundle")
+def import_bundle_zip(body: _BundleImportBody) -> dict[str, Any]:
+    """从 PathPicker 路径或 data_exports 文件名导入 bundle（v1/v2 均支持）。"""
+    if body.filename:
+        return _import_bundle_from_path(_data_export_path(body.filename), body.filename)
+    assert body.path is not None
+    dest = Path(body.path)
+    if not dest.is_absolute():
+        dest = (REPO_ROOT / dest).resolve()
+    else:
+        dest = dest.resolve()
+    return _import_bundle_from_path(dest, body.path)
+
+
+@app.post("/api/projects/import-bundle/upload")
+async def import_bundle_upload(file: UploadFile = File(...)) -> dict[str, Any]:
+    """上传 bundle zip → 新建 project + version。"""
+    import tempfile
+
+    if not file.filename:
+        raise HTTPException(400, "缺少上传文件")
+    if Path(file.filename).suffix.lower() != ".zip":
+        raise HTTPException(400, "请选择 .zip 文件")
+    tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
+    try:
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            tmp.write(chunk)
+        tmp.close()
+        return _import_bundle_from_path(Path(tmp.name), file.filename)
+    finally:
+        try:
+            Path(tmp.name).unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 @app.post("/api/projects/import-train")
@@ -1076,11 +1440,13 @@ def start_download(pid: int, body: DownloadRequest) -> dict[str, Any]:
                 "api_source": body.api_source,
             },
         )
-        # 推进项目 stage → downloading
-        p = projects.advance_stage(conn, pid, "downloading")
     _publish_job_state(job)
-    _publish_project_state(p)
     return job
+
+
+def _apply_project_upload_result(pid: int, result: uploads_svc.UploadResult) -> dict[str, Any]:
+    # ADR-0007 PR-5: project 无 stage 字段；upload 完成由前端实时扫 download/ 派生数字
+    return result.as_dict()
 
 
 @app.post("/api/projects/{pid}/upload")
@@ -1107,12 +1473,33 @@ async def upload_local_files(
         data = await f.read()
         pairs.append((f.filename or "", io.BytesIO(data)))
     result = uploads_svc.accept_many(pairs, pdir)
+    return _apply_project_upload_result(pid, result)
 
-    if result.added:
-        with db.connection_for() as conn:
-            updated = projects.advance_stage(conn, pid, "downloading")
-        _publish_project_state(updated)
-    return result.as_dict()
+
+class _UploadFromPathBody(BaseModel):
+    path: str
+
+
+@app.post("/api/projects/{pid}/upload-from-path")
+def upload_local_file_from_path(pid: int, body: _UploadFromPathBody) -> dict[str, Any]:
+    """从 server 可见路径导入单图或 zip → project 的 download/。"""
+    with db.connection_for() as conn:
+        p = projects.get_project(conn, pid)
+    if not p:
+        raise HTTPException(404, f"项目不存在: id={pid}")
+    src = Path(body.path)
+    if not src.is_absolute():
+        src = (REPO_ROOT / src).resolve()
+    else:
+        src = src.resolve()
+    if not src.exists():
+        raise HTTPException(404, f"文件不存在: {body.path}")
+    if not src.is_file():
+        raise HTTPException(400, "请选择文件")
+    pdir = projects.project_dir(p["id"], p["slug"]) / "download"
+    with src.open("rb") as fh:
+        result = uploads_svc.accept_many([(src.name, fh)], pdir)
+    return _apply_project_upload_result(pid, result)
 
 
 @app.get("/api/projects/{pid}/download/status")
@@ -1164,6 +1551,25 @@ class PreprocessRestoreRequest(BaseModel):
 PreprocessDeleteRequest = PreprocessRestoreRequest
 
 
+class CropRect(BaseModel):
+    """归一化裁剪矩形 [0..1]^4。x/y = 左上角，w/h = 宽高。"""
+    x: float
+    y: float
+    w: float
+    h: float
+    label: Optional[str] = None
+
+
+class PreprocessCropRequest(BaseModel):
+    """裁剪 job 输入：源文件名 → 一个或多个归一化矩形。
+
+    源文件名为 preprocess/ 下当前文件名（或 download/ 文件名兜底，若 preprocess/
+    没对应）。每个矩形产出一张 PNG：N=1 覆盖 stem.png；N>1 输出 stem_c0.png /
+    stem_c1.png / ... 并删除原 stem.png。
+    """
+    crops: dict[str, list[CropRect]]
+
+
 @app.post("/api/projects/{pid}/preprocess/start")
 def start_preprocess(pid: int, body: PreprocessStartRequest) -> dict[str, Any]:
     """开始预处理 job（当前只放大）。
@@ -1213,10 +1619,7 @@ def start_preprocess(pid: int, body: PreprocessStartRequest) -> dict[str, Any]:
             )
         except preprocess_svc.PreprocessError as exc:
             raise HTTPException(400, str(exc)) from exc
-        # 推进 stage（不阻塞 curate；stepper 自己派生 done/active）
-        p = projects.advance_stage(conn, pid, "preprocessing")
     _publish_job_state(job)
-    _publish_project_state(p)
     return job
 
 
@@ -1258,6 +1661,88 @@ def list_preprocess_files(pid: int) -> dict[str, Any]:
         "pending": preprocess_svc.list_pending(p),
         "summary": preprocess_svc.summary(p),
     }
+
+
+@app.get("/api/projects/{pid}/preprocess/duplicates/removed")
+def list_duplicate_removed(pid: int) -> dict[str, Any]:
+    """总览页「已删除」tab：列出被去重审核标记的 manifest entries。
+
+    返回 `{images: [{name, source, w, h, mtime, size}, ...]}`。物理图仍在
+    `download/{source}`，缩略图按 download bucket + source 取。恢复走
+    `POST /api/projects/{pid}/preprocess/files/restore`（restore() 对
+    duplicate_removed entry 也 work：删 entry，没 PNG 时静默跳过）。
+    """
+    with db.connection_for() as conn:
+        p = projects.get_project(conn, pid)
+    if not p:
+        raise HTTPException(404, f"项目不存在: id={pid}")
+    return {"images": preprocess_svc.list_duplicate_removed_workspace(p)}
+
+
+@app.get("/api/projects/{pid}/preprocess/crop/workspace")
+def list_crop_workspace(pid: int) -> dict[str, Any]:
+    """裁剪页工作集：返回所有可裁剪的图 + 像素尺寸。
+
+    包含两类：
+    - preprocess/ 里已处理的图（origin 指 download/ 原图）
+    - download/ 里未处理的图（裁剪页把"未放大"图当 1× pass-through）
+
+    返回 `{images: [{name, source, w, h, mtime, size, processed}, ...]}`。
+    """
+    with db.connection_for() as conn:
+        p = projects.get_project(conn, pid)
+    if not p:
+        raise HTTPException(404, f"项目不存在: id={pid}")
+    return {"images": preprocess_svc.list_crop_workspace(p)}
+
+
+@app.post("/api/projects/{pid}/preprocess/crop")
+def start_preprocess_crop(
+    pid: int, body: PreprocessCropRequest
+) -> dict[str, Any]:
+    """开始裁剪 job。
+
+    `crops`: `{源文件名: [{x,y,w,h,label?}], ...}`，每条 rect 归一化 [0..1]。
+    源文件名为 preprocess/ 下当前文件名（worker 兜底 download/）。
+
+    返回新建的 job 行。worker 切 PNG + 更新 manifest（多裁剪走 fan-out 命名
+    `{stem}_c{n}.png` 并删原 `{stem}.png`）。详见 docs/design/preprocess-crop-design.md。
+    """
+    if not body.crops:
+        raise HTTPException(400, "crops 不能为空")
+    with db.connection_for() as conn:
+        if not projects.get_project(conn, pid):
+            raise HTTPException(404, f"项目不存在: id={pid}")
+        # Pydantic 模型转成 dict 喂业务层（业务层会再做一次校验 + clamp）
+        crops_payload: dict[str, list[dict[str, Any]]] = {
+            name: [r.model_dump() for r in rects]
+            for name, rects in body.crops.items()
+        }
+        try:
+            job = preprocess_svc.start_crop_job(
+                conn, project_id=pid, crops=crops_payload
+            )
+        except preprocess_svc.PreprocessError as exc:
+            raise HTTPException(400, str(exc)) from exc
+    _publish_job_state(job)
+    return job
+
+
+@app.post("/api/projects/{pid}/preprocess/files/reset")
+def reset_preprocess_files(pid: int) -> dict[str, Any]:
+    """整项目预处理状态归零：删 manifest 所有 entry + 删 preprocess/ 所有 PNG。
+
+    工具栏「总览」tab 的「撤销全部」走这个；下游 resolver 回看 download/ 原图。
+    `preprocess_manifest.clear_all` 已存在；这里只是 HTTP 入口 + 项目存在校验。
+    """
+    with db.connection_for() as conn:
+        p = projects.get_project(conn, pid)
+    if not p:
+        raise HTTPException(404, f"项目不存在: id={pid}")
+    pdir = projects.project_dir(p["id"], p["slug"])
+    preprocess_manifest.clear_all(pdir)
+    _publish_project_state(p)
+    return {"ok": True}
 
 
 @app.post("/api/projects/{pid}/preprocess/files/restore")
@@ -1409,36 +1894,66 @@ def project_thumb(
     bucket: str = "download",
     name: str = "",
     size: int = 256,
+    raw: int = 0,
 ) -> FileResponse:
     """缩略图：默认 256px JPEG（缓存）；size=0 → 原图。
 
-    `name` 是 download/ 下的**原始文件名**。后端通过
-    `preprocess_manifest.resolve()` 决定实际字节路径（见 ADR 0004）：
-      - 未处理 → download/{name}
-      - 已处理 → preprocess/{stem}.png（用户看到的是"升级后"的图，但 URL 不变）
+    两种 bucket：
+      - `bucket=download`（默认）：`name` 是 download/ 下的原始文件名。
+        后端通过 `preprocess_manifest.resolve_origin()` 决定实际字节路径：
+        未处理 → download/{name}，已处理 → preprocess/ 下第一个 origin 匹配
+        的派生。前端"按 download 名"调用时不需要感知预处理。
+      - `bucket=preprocess`：`name` 是 preprocess/ 下的**实际产物文件名**
+        （含 multi-crop 派生的 _c0 / _c1 后缀）。直接按文件名取，**不走**
+        resolve_origin —— multi-crop 后多个产物共享同一 origin，按 origin
+        永远落到 [0] 是 bug。裁剪 / 总览页应该走这条来精确寻址。
 
-    前端**不需要**知道有没有预处理过——这个端点已经吃下了差异。
+    `raw=1`（仅 bucket=download）：跳过 resolve_origin，强制读 download/{name}
+    原始字节。给「对比预览」场景用：左 pane 永远要 download 原图，不能被
+    preprocess 派生 hijack。
 
     缓存路径：`studio_data/thumb_cache/{sha1(src+mtime+size)}.jpg`。
     源文件 mtime 变化会自动 invalidate（hash 变）。
     """
-    if bucket != "download":
-        raise HTTPException(400, "PP2 仅支持 bucket=download")
+    if bucket not in ("download", "preprocess"):
+        raise HTTPException(400, f"unknown bucket: {bucket}")
     with db.connection_for() as conn:
         p = projects.get_project(conn, pid)
     if not p:
         raise HTTPException(404, f"项目不存在: id={pid}")
     pdir = projects.project_dir(p["id"], p["slug"])
-    # path traversal 校验（safe_join 对 download 路径，校验文件名安全性）
-    _safe_join_or_400(pdir / "download", name)
-    # ADR 0004：resolve 决定真路径
     preprocess_manifest.ensure_manifest(pdir)
-    product_name = Path(name).stem + ".png"
-    entry = preprocess_manifest.get_entry(pdir, product_name)
-    if entry and entry.get("kind") == "processed":
-        f = pdir / "preprocess" / product_name
-    else:
+
+    if bucket == "preprocess":
+        # Direct addressing — no resolve. Path traversal guard against the
+        # actual preprocess/ dir (any filename including _c0/_c1 derivatives).
+        _safe_join_or_400(pdir / "preprocess", name)
+        f = pdir / "preprocess" / name
+    elif raw:
+        # bucket=download + raw=1: bypass resolve_origin, hand back the
+        # untouched download/{name} bytes. Used by the processed-tab compare
+        # preview left pane (need the original, not the derivative).
+        _safe_join_or_400(pdir / "download", name)
         f = pdir / "download" / name
+    else:
+        # bucket=download — historical behavior: address by download name,
+        # resolve to first preprocess product if any (1:1 / multi-crop cases).
+        # duplicate_removed origins: resolve_origin returns [] but the original
+        # file in download/ still exists; the Download page must keep showing
+        # it (软删除 ≠ 不可见). Fall back to download/{name} like any other
+        # un-resolved origin.
+        _safe_join_or_400(pdir / "download", name)
+        candidates = preprocess_manifest.resolve_origin(pdir, name)
+        f = candidates[0] if candidates else (pdir / "download" / name)
+        # Curation passes multi-crop derivative names (X_c0.png) through this
+        # endpoint with bucket=download. resolve_origin only matches by origin,
+        # not by entry key, so derivatives miss → f points at a non-existent
+        # download/X_c0.png. Fall back: if the name IS a preprocess entry key,
+        # serve preprocess/{name} directly. Filename was already safety-checked
+        # against download/, same validation applies to preprocess/.
+        if not f.exists() and preprocess_manifest.get_entry(pdir, name) is not None:
+            f = pdir / "preprocess" / name
+
     if not f.exists() or f.suffix.lower() not in datasets.IMAGE_EXTS:
         logger.info("thumb 404: pid=%s bucket=%s name=%s -> %s", pid, bucket, name, f)
         raise HTTPException(404)
@@ -1541,6 +2056,23 @@ class FolderOp(BaseModel):
     new_name: Optional[str] = None
 
 
+class DuplicateScanRequest(BaseModel):
+    match_scope: str = "both"
+    hash_size: int = duplicate_finder.DEFAULT_HASH_SIZE
+    hash_workers: int = duplicate_finder.DEFAULT_HASH_WORKERS
+    tile_grids: list[int] = list(duplicate_finder.DEFAULT_TILE_GRIDS)
+    structure_threshold: int = duplicate_finder.DEFAULT_STRUCTURE_THRESHOLD
+    variant_score: float = duplicate_finder.DEFAULT_VARIANT_SCORE
+    aspect_tolerance: float = duplicate_finder.DEFAULT_ASPECT_TOLERANCE
+    min_close_tiles: float = duplicate_finder.DEFAULT_MIN_CLOSE_TILES
+    tile_median: float = duplicate_finder.DEFAULT_TILE_MEDIAN
+    min_gray_close: float = duplicate_finder.DEFAULT_MIN_GRAY_CLOSE
+
+
+class DuplicateApplyRequest(BaseModel):
+    names: list[str]
+
+
 def _curation_err_code(exc: curation.CurationError) -> int:
     msg = str(exc)
     if "不存在" in msg:
@@ -1550,19 +2082,6 @@ def _curation_err_code(exc: curation.CurationError) -> int:
     return 422
 
 
-def _maybe_advance_after_train_change(conn, pid: int, vid: int) -> None:
-    """copy/remove 后视情况推进 stage：train 有图 → curating → tagging 提示位。"""
-    if curation.has_train_images(conn, pid, vid):
-        v = versions.get_version(conn, vid)
-        if v and v["stage"] == "curating":
-            updated = versions.advance_stage(conn, vid, "tagging")
-            _publish_version_state(updated)
-        p = projects.get_project(conn, pid)
-        if p and p["stage"] in ("created", "downloading", "curating"):
-            updated_p = projects.advance_stage(conn, pid, "tagging")
-            _publish_project_state(updated_p)
-
-
 @app.get("/api/projects/{pid}/versions/{vid}/curation")
 def get_curation(pid: int, vid: int) -> dict[str, Any]:
     with db.connection_for() as conn:
@@ -1570,6 +2089,121 @@ def get_curation(pid: int, vid: int) -> dict[str, Any]:
             return curation.curation_view(conn, pid, vid)
         except curation.CurationError as exc:
             raise HTTPException(_curation_err_code(exc), str(exc)) from exc
+
+
+def _duplicate_err_code(exc: duplicate_finder.DuplicateFinderError) -> int:
+    msg = str(exc)
+    if "not found" in msg or "不存在" in msg:
+        return 404
+    if "invalid" in msg or "非法" in msg:
+        return 400
+    if "not installed" in msg:
+        return 422
+    return 422
+
+
+@app.post("/api/projects/{pid}/preprocess/duplicates/scan")
+def scan_preprocess_duplicates(
+    pid: int, body: DuplicateScanRequest
+) -> dict[str, Any]:
+    with db.connection_for() as conn:
+        try:
+            options = duplicate_finder.options_from_payload(body.model_dump())
+            last_progress_at = 0.0
+
+            def publish_progress(payload: dict[str, Any]) -> None:
+                nonlocal last_progress_at
+                now = time.monotonic()
+                if now - last_progress_at < 1.0:
+                    return
+                last_progress_at = now
+                bus.publish({
+                    "type": "duplicate_scan_progress",
+                    "project_id": pid,
+                    "status": "running",
+                    **payload,
+                })
+
+            bus.publish({
+                "type": "duplicate_scan_progress",
+                "project_id": pid,
+                "status": "running",
+                "text": "Scanning duplicate candidates...",
+            })
+            result = duplicate_finder.scan_project_duplicates(
+                conn,
+                pid,
+                options,
+                on_progress=publish_progress,
+            )
+            bus.publish({
+                "type": "duplicate_scan_progress",
+                "project_id": pid,
+                "status": "done",
+                "total_images": result["total_images"],
+                "group_count": result["group_count"],
+                "candidate_count": result["candidate_count"],
+                "elapsed_seconds": result["elapsed_seconds"],
+                "text": (
+                    f"Scanned {result['total_images']} images; "
+                    f"found {result['group_count']} groups / "
+                    f"{result['candidate_count']} candidates."
+                ),
+            })
+            return result
+        except curation.CurationError as exc:
+            bus.publish({
+                "type": "duplicate_scan_progress",
+                "project_id": pid,
+                "status": "failed",
+                "text": str(exc),
+            })
+            raise HTTPException(_curation_err_code(exc), str(exc)) from exc
+        except duplicate_finder.DuplicateFinderError as exc:
+            bus.publish({
+                "type": "duplicate_scan_progress",
+                "project_id": pid,
+                "status": "failed",
+                "text": str(exc),
+            })
+            raise HTTPException(_duplicate_err_code(exc), str(exc)) from exc
+
+
+@app.post("/api/projects/{pid}/preprocess/duplicates/apply")
+def apply_preprocess_duplicates(
+    pid: int, body: DuplicateApplyRequest
+) -> dict[str, Any]:
+    with db.connection_for() as conn:
+        try:
+            result = duplicate_finder.apply_duplicate_removals(
+                conn,
+                pid,
+                names=body.names,
+            )
+            project = projects.get_project(conn, pid)
+        except curation.CurationError as exc:
+            raise HTTPException(_curation_err_code(exc), str(exc)) from exc
+        except duplicate_finder.DuplicateFinderError as exc:
+            raise HTTPException(_duplicate_err_code(exc), str(exc)) from exc
+    if project:
+        _publish_project_state(project)
+    return result
+
+
+@app.post("/api/projects/{pid}/duplicates/scan")
+def scan_project_duplicates(
+    pid: int, body: DuplicateScanRequest
+) -> dict[str, Any]:
+    """Backward-compatible alias; UI uses /preprocess/duplicates/scan."""
+    return scan_preprocess_duplicates(pid, body)
+
+
+@app.post("/api/projects/{pid}/duplicates/apply")
+def apply_project_duplicates(
+    pid: int, body: DuplicateApplyRequest
+) -> dict[str, Any]:
+    """Backward-compatible alias; now marks manifest duplicate_removed."""
+    return apply_preprocess_duplicates(pid, body)
 
 
 @app.post("/api/projects/{pid}/versions/{vid}/curation/copy")
@@ -1583,7 +2217,6 @@ def copy_to_train(
             )
         except curation.CurationError as exc:
             raise HTTPException(_curation_err_code(exc), str(exc)) from exc
-        _maybe_advance_after_train_change(conn, pid, vid)
     return result
 
 
@@ -2036,14 +2669,6 @@ def start_tag(pid: int, vid: int, body: TagJobRequest) -> dict[str, Any]:
             kind="tag",
             params=params,
         )
-        # 推 stage：tagging
-        if v["stage"] in ("curating",):
-            updated = versions.advance_stage(conn, vid, "tagging")
-            _publish_version_state(updated)
-        p = projects.get_project(conn, pid)
-        if p and p["stage"] in ("created", "downloading", "curating"):
-            up = projects.advance_stage(conn, pid, "tagging")
-            _publish_project_state(up)
     _publish_job_state(job)
     return job
 
@@ -2287,9 +2912,6 @@ def start_reg_build(pid: int, vid: int, body: RegBuildRequest) -> dict[str, Any]
                 "postprocess_max_crop_ratio": float(body.postprocess_max_crop_ratio),
             },
         )
-        if v["stage"] in ("curating", "tagging"):
-            updated = versions.advance_stage(conn, vid, "regularizing")
-            _publish_version_state(updated)
     _publish_job_state(job)
     return job
 
@@ -2338,13 +2960,6 @@ class RegAiRequest(BaseModel):
     seed: int = 0
     incremental: bool = False
     mixed_precision: str = "bf16"
-    attention_backend: AttentionBackend = "flash_attn"
-
-    # 兼容老前端送 xformers / flash_attn 双 bool（自动映射成 attention_backend）
-    @model_validator(mode="before")
-    @classmethod
-    def _migrate_attention(cls, data: Any) -> Any:
-        return migrate_legacy_attention(data)
 
 
 @app.post("/api/projects/{pid}/versions/{vid}/reg/generate-prior")
@@ -2363,6 +2978,7 @@ def reg_generate_prior(pid: int, vid: int, body: RegAiRequest) -> dict[str, Any]
     rdir = _reg_dir(vdir)
     rdir.mkdir(parents=True, exist_ok=True)
 
+    from studio.services.xformers_setup import detect_attention_backend
     cfg = RegAiConfig(
         **model_paths,
         train_dir=str(train),
@@ -2378,7 +2994,7 @@ def reg_generate_prior(pid: int, vid: int, body: RegAiRequest) -> dict[str, Any]
         seed=body.seed,
         incremental=body.incremental,
         mixed_precision=body.mixed_precision,
-        attention_backend=body.attention_backend,
+        attention_backend=detect_attention_backend(),
     )
 
     cfg_dir = STUDIO_DATA / "reg_ai_configs"
@@ -2564,6 +3180,16 @@ def get_daemon_status() -> dict[str, Any]:
         "busy": daemon.is_busy,
         "alive": daemon.is_alive,
     }
+
+
+@app.get("/api/generate/daemon/logs")
+def get_daemon_logs(since_seq: int = 0, limit: int = 2000) -> dict[str, Any]:
+    """读 daemon stderr ring buffer。前端日志抽屉打开时拉历史；增量靠 SSE。
+
+    since_seq>0 时只返新于该 seq 的行。
+    """
+    from .services.inference_daemon import get_daemon
+    return get_daemon().read_logs(since_seq=since_seq, limit=limit)
 
 
 @app.post("/api/generate/daemon/unload")
@@ -2798,15 +3424,8 @@ def enqueue_version_training(pid: int, vid: int) -> dict[str, Any]:
         )
         tid = int(cur.lastrowid)
         conn.commit()
-
-        # 推 stage：configured → training（task 启动后由 supervisor 推 done）
-        if ver["stage"] in ("ready", "configured", "regularizing", "tagging", "curating"):
-            updated = versions.advance_stage(conn, vid, "training")
-            _publish_version_state(updated)
-        if project["stage"] in ("created", "downloading", "curating", "tagging", "regularizing"):
-            up = projects.advance_stage(conn, pid, "training")
-            _publish_project_state(up)
-
+        # ADR-0007 PR-5: version.status 由 supervisor 在 _spawn_task 推到 training；
+        # project 无 stage；这里不再 advance。
         task = db.get_task(conn, tid)
     bus.publish({
         "type": "task_state_changed",
@@ -2936,7 +3555,7 @@ def list_queue(
     with db.connection_for() as conn:
         items = db.list_tasks(conn, status=status)
     if not include_generate:
-        items = db.filter_out_task_types(items, ("generate",))
+        items = db.filter_out_task_types(items, ("generate", "reg_ai"))
     # ADR 0006 PR-4 — is_pausable 信号每行注入（§8.1 / 上面 get_queue_item 注释）
     try:
         sup = _supervisor()
@@ -2965,6 +3584,44 @@ def enqueue(body: EnqueueRequest) -> dict[str, Any]:
     return task or {"id": task_id}
 
 
+@app.get("/api/queue/hold")
+def get_queue_hold() -> dict[str, Any]:
+    """查看当前队列挂起状态 + 等待恢复调度的 pending task 数（UI banner 用）。"""
+    with db.connection_for() as conn:
+        held = db.get_queue_held(conn)
+        pending = db.list_tasks(conn, status="pending")
+    return {"held": held, "pending_waiting": len(pending)}
+
+
+@app.post("/api/queue/hold")
+def hold_queue() -> dict[str, Any]:
+    """挂起队列：dispatcher 不再拉新 task。已 running 的不受影响（ADR §3.2）。
+
+    "同时暂停 running task" 由前端 modal 拆成两步：先调本 endpoint，再
+    单独调 `/api/queue/{id}/pause`。后端不做合一操作。
+    """
+    with db.connection_for() as conn:
+        db.set_queue_held(conn, True)
+    bus.publish({"type": "queue_hold_changed", "held": True})
+    return {"held": True}
+
+
+@app.post("/api/queue/release")
+def release_queue() -> dict[str, Any]:
+    """恢复调度：dispatcher 重新按 priority + created_at 拉 pending。"""
+    with db.connection_for() as conn:
+        db.set_queue_held(conn, False)
+    bus.publish({"type": "queue_hold_changed", "held": False})
+    return {"held": False}
+
+
+@app.post("/api/queue/reorder")
+def reorder_queue(body: ReorderRequest) -> dict[str, Any]:
+    with db.connection_for() as conn:
+        db.reorder(conn, body.ordered_ids)
+    return {"reordered": len(body.ordered_ids)}
+
+
 @app.get("/api/queue/{task_id}")
 def get_queue_item(task_id: int) -> dict[str, Any]:
     with db.connection_for() as conn:
@@ -2978,6 +3635,24 @@ def get_queue_item(task_id: int) -> dict[str, Any]:
     except HTTPException:
         task["is_pausable"] = False
     return task
+
+
+@app.get("/api/queue/{task_id}/snapshot/config")
+def get_task_snapshot_config(task_id: int) -> dict[str, Any]:
+    """ADR-0007 §11.7：返回 task 启动时冻结的 config。
+
+    返回 ``{"yaml": str, "config": dict}``。task 不存在 / 无 snapshot → 404。
+    UI [关联配置] tab 用此 + 触发 "套用此配置" 路由跳转到 ⑦ 训练 phase + prefill。
+    """
+    from . import task_snapshot
+    with db.connection_for() as conn:
+        task = db.get_task(conn, task_id)
+    if not task:
+        raise HTTPException(404, "task not found")
+    data = task_snapshot.read_snapshot_config(task_id)
+    if data is None:
+        raise HTTPException(404, "snapshot not found")
+    return data
 
 
 @app.post("/api/queue/{task_id}/cancel")
@@ -3015,37 +3690,6 @@ def pause_task(task_id: int) -> dict[str, Any]:
             raise HTTPException(404, "task not found")
         raise HTTPException(409, reason or "pause rejected")
     return {"task_id": task_id, "pause_pending": True}
-
-
-@app.get("/api/queue/hold")
-def get_queue_hold() -> dict[str, Any]:
-    """查看当前队列挂起状态 + 等待恢复调度的 pending task 数（UI banner 用）。"""
-    with db.connection_for() as conn:
-        held = db.get_queue_held(conn)
-        pending = db.list_tasks(conn, status="pending")
-    return {"held": held, "pending_waiting": len(pending)}
-
-
-@app.post("/api/queue/hold")
-def hold_queue() -> dict[str, Any]:
-    """挂起队列：dispatcher 不再拉新 task。已 running 的不受影响（ADR §3.2）。
-
-    "同时暂停 running task" 由前端 modal 拆成两步：先调本 endpoint，再
-    单独调 `/api/queue/{id}/pause`。后端不做合一操作。
-    """
-    with db.connection_for() as conn:
-        db.set_queue_held(conn, True)
-    bus.publish({"type": "queue_hold_changed", "held": True})
-    return {"held": True}
-
-
-@app.post("/api/queue/release")
-def release_queue() -> dict[str, Any]:
-    """恢复调度：dispatcher 重新按 priority + created_at 拉 pending。"""
-    with db.connection_for() as conn:
-        db.set_queue_held(conn, False)
-    bus.publish({"type": "queue_hold_changed", "held": False})
-    return {"held": False}
 
 
 @app.post("/api/queue/{task_id}/resume")
@@ -3163,6 +3807,46 @@ def _task_output_dir(task: dict[str, Any]) -> Optional[Path]:
     return versions.version_dir(int(pid), p["slug"], v["label"]) / "output"
 
 
+class _ExportOutputsBody(BaseModel):
+    files: Optional[list[str]] = None
+
+
+def _select_task_output_files(task_id: int, files: Optional[list[str]] = None) -> tuple[dict[str, Any], list[Path], bool]:
+    with db.connection_for() as conn:
+        task = db.get_task(conn, task_id)
+    if not task:
+        raise HTTPException(404)
+    out_dir = _task_output_dir(task)
+    if not out_dir or not out_dir.exists():
+        raise HTTPException(404, "no output dir")
+    all_files = _iter_task_output_files(out_dir, task_id)
+    if not all_files:
+        raise HTTPException(404, "empty output dir")
+    if not files:
+        return task, all_files, False
+    by_path = {_task_output_relpath(out_dir, f): f for f in all_files}
+    selected: list[Path] = []
+    missing: list[str] = []
+    for name in files:
+        _safe_output_relpath_or_400(out_dir, name)
+        f = by_path.get(name)
+        if f:
+            selected.append(f)
+        else:
+            missing.append(name)
+    if missing:
+        raise HTTPException(404, f"file(s) not found: {', '.join(missing)}")
+    if not selected:
+        raise HTTPException(400, "empty files list")
+    return task, selected, True
+
+
+def _write_outputs_zip(dest: Path, out_dir: Path, selected: list[Path]) -> None:
+    with zipfile.ZipFile(dest, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as zf:
+        for f in selected:
+            zf.write(f, arcname=_task_output_relpath(out_dir, f))
+
+
 def _task_archive_basename(task: dict[str, Any]) -> Optional[str]:
     """task 关联 project / version → "{slug}-{label}"，用作 outputs zip 文件名
     前缀。和 train.zip 命名风格一致（PP7：{slug}-{label}.train.zip）。
@@ -3186,13 +3870,47 @@ def _is_loopback(request: Request) -> bool:
     return bool(client and client.host in _LOCALHOST_HOSTS)
 
 
+def _task_output_kind(path: Path) -> str:
+    name = path.name
+    suffix = path.suffix.lower()
+    if name.startswith("training_state_") and suffix == ".pt":
+        return "training_state"
+    if name.startswith("pause_step_") and suffix == ".pt":
+        return "pause_state"
+    if name == "auto_epoch_state.pt":
+        return "auto_epoch_state"
+    if suffix in _LORA_EXTS and not name.startswith("training_state_"):
+        return "lora"
+    return "other"
+
+
+def _task_output_relpath(out_dir: Path, path: Path) -> str:
+    return path.relative_to(out_dir).as_posix()
+
+
+def _iter_task_output_files(out_dir: Path, task_id: int) -> list[Path]:
+    files = [p for p in out_dir.iterdir() if p.is_file()]
+    state_dir = out_dir / "state" / f"task_{task_id}"
+    if state_dir.exists():
+        files.extend(
+            p for p in state_dir.rglob("*")
+            if p.is_file() and _task_output_kind(p) in {"training_state", "pause_state", "auto_epoch_state"}
+        )
+    return sorted(files, key=lambda p: _task_output_relpath(out_dir, p))
+
+
+def _safe_output_relpath_or_400(base: Path, relpath: str) -> Path:
+    if not relpath or relpath.startswith(("/", "\\")):
+        raise HTTPException(400, "invalid path")
+    parts = Path(relpath.replace("\\", "/")).parts
+    if any(part in ("", ".", "..") for part in parts):
+        raise HTTPException(400, "invalid path")
+    return _safe_join_or_400(base, *parts)
+
+
 @app.get("/api/queue/{task_id}/outputs")
 def list_task_outputs(task_id: int, request: Request) -> dict[str, Any]:
-    """列出 task 关联 version 的 output 目录里所有文件。
-
-    `supports_open_folder` 仅在请求来自 loopback（同机浏览器）时为 True；
-    云端部署时永远为 False，避免前端显示一个无意义按钮。
-    """
+    """列出 task 关联 version 的 output 目录里所有文件。"""
     with db.connection_for() as conn:
         task = db.get_task(conn, task_id)
     if not task:
@@ -3200,18 +3918,20 @@ def list_task_outputs(task_id: int, request: Request) -> dict[str, Any]:
     out_dir = _task_output_dir(task)
     files: list[dict[str, Any]] = []
     if out_dir and out_dir.exists():
-        for f in sorted(out_dir.iterdir(), key=lambda p: p.name):
-            if not f.is_file():
-                continue
+        for f in _iter_task_output_files(out_dir, task_id):
+            relpath = _task_output_relpath(out_dir, f)
             try:
                 st = f.stat()
             except OSError:
                 continue
+            kind = _task_output_kind(f)
             files.append({
                 "name": f.name,
+                "path": relpath,
                 "size": st.st_size,
                 "mtime": st.st_mtime,
-                "is_lora": f.suffix.lower() in _LORA_EXTS,
+                "kind": kind,
+                "is_lora": kind == "lora",
             })
     return {
         "task_id": task_id,
@@ -3229,59 +3949,20 @@ def download_task_outputs_zip(
     background: BackgroundTasks,
     files: Optional[str] = None,
 ) -> FileResponse:
-    """把 output 目录里的文件打包成 zip 一次性下载。
-
-    没传 `files` → 全量打包（向后兼容）。
-    传了 `files`（逗号分隔的文件名）→ 仅打包这些，路径必须是 out_dir 下的直接
-    子文件，禁止 path traversal / 子目录。
-
-    实现：写到临时文件再 FileResponse；响应发完后用 BackgroundTasks 清理。
-    safetensors / pt 几乎都是已压缩二进制，用 ZIP_STORED（不再压缩，CPU 省一倍）。
-    """
+    """把 output 目录里的文件打包成 zip 一次性下载。"""
     import tempfile
-    import zipfile
-    with db.connection_for() as conn:
-        task = db.get_task(conn, task_id)
-    if not task:
-        raise HTTPException(404)
+    wanted = [n for n in files.split(",") if n] if files else None
+    if files is not None and not wanted:
+        raise HTTPException(400, "empty files list")
+    task, selected, partial = _select_task_output_files(task_id, wanted)
     out_dir = _task_output_dir(task)
-    if not out_dir or not out_dir.exists():
-        raise HTTPException(404, "no output dir")
-    all_files = [f for f in sorted(out_dir.iterdir()) if f.is_file()]
-    if not all_files:
-        raise HTTPException(404, "empty output dir")
-
-    selected: list[Path]
-    partial = False
-    if files is None or files == "":
-        selected = all_files
-    else:
-        wanted = [n for n in files.split(",") if n]
-        if not wanted:
-            raise HTTPException(400, "empty files list")
-        by_name = {f.name: f for f in all_files}
-        missing: list[str] = []
-        selected = []
-        for name in wanted:
-            _validate_component_or_400(name)
-            f = by_name.get(name)
-            if not f:
-                missing.append(name)
-                continue
-            selected.append(f)
-        if missing:
-            raise HTTPException(404, f"file(s) not found: {', '.join(missing)}")
-        partial = True
+    assert out_dir is not None  # _select_task_output_files 已经校验
 
     tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
     tmp.close()
     tmp_path = Path(tmp.name)
     try:
-        with zipfile.ZipFile(
-            tmp_path, "w", compression=zipfile.ZIP_STORED, allowZip64=True
-        ) as zf:
-            for f in selected:
-                zf.write(f, arcname=f.name)
+        _write_outputs_zip(tmp_path, out_dir, selected)
     except Exception as e:
         tmp_path.unlink(missing_ok=True)
         bus.publish({
@@ -3307,10 +3988,32 @@ def download_task_outputs_zip(
     )
 
 
-@app.get("/api/queue/{task_id}/output/{filename}")
+@app.post("/api/queue/{task_id}/export-outputs")
+def export_task_outputs_to_data_exports(
+    task_id: int,
+    body: _ExportOutputsBody,
+) -> dict[str, Any]:
+    """把 output 文件打包保存到 data_exports/。"""
+    task, selected, partial = _select_task_output_files(task_id, body.files)
+    DATA_EXPORTS.mkdir(parents=True, exist_ok=True)
+    basename = _task_archive_basename(task) or f"task_{task_id}"
+    archive_name = f"{basename}_outputs_selected.zip" if partial else f"{basename}_outputs.zip"
+    dest = _unique_data_export_path(archive_name)
+    out_dir = _task_output_dir(task)
+    assert out_dir is not None
+    try:
+        _write_outputs_zip(dest, out_dir, selected)
+    except Exception as e:
+        dest.unlink(missing_ok=True)
+        bus.publish({"type": "task_outputs_zip_failed", "task_id": task_id, "error": str(e)})
+        raise
+    bus.publish({"type": "task_outputs_zip_ready", "task_id": task_id})
+    return _export_result(dest)
+
+
+@app.get("/api/queue/{task_id}/output/{filename:path}")
 def download_task_output(task_id: int, filename: str) -> FileResponse:
-    """下载 output 目录下的指定文件。`Content-Disposition: attachment` 让
-    浏览器走「保存」对话框而不是 inline 渲染。"""
+    """下载 output 目录下的指定文件。"""
     with db.connection_for() as conn:
         task = db.get_task(conn, task_id)
     if not task:
@@ -3318,13 +4021,13 @@ def download_task_output(task_id: int, filename: str) -> FileResponse:
     out_dir = _task_output_dir(task)
     if not out_dir or not out_dir.exists():
         raise HTTPException(404, "no output dir")
-    f = _safe_join_or_400(out_dir, filename)
+    f = _safe_output_relpath_or_400(out_dir, filename)
     if not f.exists() or not f.is_file():
         raise HTTPException(404, "file not found")
     return FileResponse(
         f,
         media_type="application/octet-stream",
-        filename=filename,  # 让 starlette 自动加 Content-Disposition
+        filename=f.name,
     )
 
 
@@ -3371,13 +4074,6 @@ def delete_queue_item(task_id: int) -> dict[str, Any]:
             raise HTTPException(400, "only terminal tasks can be deleted")
         db.delete_task(conn, task_id)
     return {"deleted": task_id}
-
-
-@app.post("/api/queue/reorder")
-def reorder_queue(body: ReorderRequest) -> dict[str, Any]:
-    with db.connection_for() as conn:
-        db.reorder(conn, body.ordered_ids)
-    return {"reordered": len(body.ordered_ids)}
 
 
 # ---------------------------------------------------------------------------
@@ -3437,7 +4133,9 @@ def get_log(task_id: int) -> dict[str, Any]:
     p = LOGS_DIR / f"{task_id}.log"
     if not p.exists():
         return {"task_id": task_id, "content": "", "size": 0}
-    text = p.read_text(encoding="utf-8", errors="replace")
+    raw = p.read_text(encoding="utf-8", errors="replace")
+    lines = [ln for ln in raw.splitlines(keepends=True) if not ln.startswith("__EVENT__:")]
+    text = "".join(lines)
     return {"task_id": task_id, "content": text, "size": len(text.encode("utf-8"))}
 
 

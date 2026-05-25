@@ -1,27 +1,30 @@
-import { useEffect, useState } from 'react'
+import { Fragment, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Link, useLocation } from 'react-router-dom'
-import { api, type ProjectDetail, type Version, type VersionStage } from '../api/client'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
+import { api, PHASE_ORDER, PHASE_SKIPPABLE, type Version, type VersionPhase, type VersionStatus } from '../api/client'
 import { getStoredTheme, toggleTheme, type Theme } from '../lib/theme'
+import { useToast } from './Toast'
 
-/** Map version stage → 0-based index of the current active step（STEPS 数组里）。
- *
- * 注意：
- * - 后端 version stage 集合是 {curating, tagging, regularizing, ready, training,
- *   done}，**没有 editing**——打标完成后到正则启动前，stage 一直停在 "tagging"，
- *   单看 stage tag/edit 都不会自动变 done。`isStepDone` 用 stats 派生覆盖。
- * - preprocess 是 project-scope 的可选阶段，version stage 不感知它；status 完全
- *   靠 `preprocess_image_count > 0` 派生（同样在 `isStepDone` 里）。
+/** ADR-0007 §11.2 / §11.5: cursor 派生 step 完成态。
  *
  * STEPS 顺序：0 download / 1 preprocess / 2 curate / 3 tag / 4 edit / 5 reg / 6 train
+ * 项目级 ①②：`*_image_count > 0` 派生
+ * version 级 ③-⑦：`PHASE_ORDER.indexOf(STEP_KEY_TO_PHASE[key]) < cursorIdx`
  */
-const STAGE_TO_STEP_IDX: Record<VersionStage, number> = {
-  curating: 2,
-  tagging: 3,
-  regularizing: 5,
-  ready: 6,
-  training: 6,
-  done: 7,
+const STEP_KEY_TO_PHASE: Record<string, VersionPhase> = {
+  curate: 'curating',
+  tag:    'tagging',
+  edit:   'editing',
+  reg:    'regularizing',
+  train:  'ready',
+}
+
+const PHASE_TO_STEP_KEY: Record<VersionPhase, string> = {
+  curating:     'curate',
+  tagging:      'tag',
+  editing:      'edit',
+  regularizing: 'reg',
+  ready:        'train',
 }
 import { useProjectCtx } from '../context/ProjectContext'
 
@@ -49,14 +52,13 @@ const I = {
   moon:    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>,
 }
 
-// ── version stage dot ──────────────────────────────────────────────────────
-const STAGE_DOT: Record<VersionStage, string> = {
-  curating:     'dot dot-warn',
-  tagging:      'dot dot-warn',
-  regularizing: 'dot dot-warn',
-  ready:        'dot dot-ok',
-  training:     'dot dot-running',
-  done:         'dot dot-ok',
+// ── version status dot (ADR-0007 §11.3-B) ─────────────────────────────────
+const STATUS_DOT: Record<VersionStatus, string> = {
+  preparing: 'dot dot-warn',
+  training:  'dot dot-running',
+  completed: 'dot dot-ok',
+  failed:    'dot dot-err',
+  canceled:  'dot dot-neutral',
 }
 
 // ── logo ───────────────────────────────────────────────────────────────────
@@ -87,16 +89,21 @@ function Logo({ collapsed }: { collapsed: boolean }) {
 }
 
 // ── nav item ───────────────────────────────────────────────────────────────
-function NavItem({ to, label, icon, active, collapsed }: {
+function NavItem({ to, label, icon, active, collapsed, prominent = false }: {
   to: string; label: string; icon: React.ReactNode; active: boolean; collapsed: boolean
+  /** 顶级 tab 用更大字号 + 更大 padding，跟项目下属 sub-nav 区分。 */
+  prominent?: boolean
 }) {
   return (
     <Link
       to={to}
       title={collapsed ? label : undefined}
       className={[
-        'flex w-full items-center gap-2.5 rounded-md text-sm no-underline transition-colors relative',
-        collapsed ? 'py-[9px] px-0 justify-center' : 'py-2 px-3 justify-start',
+        'flex w-full items-center gap-2.5 rounded-md no-underline transition-colors relative',
+        prominent ? 'text-md' : 'text-sm',
+        collapsed
+          ? 'py-[9px] px-0 justify-center'
+          : prominent ? 'py-2.5 px-3 justify-start' : 'py-2 px-3 justify-start',
         active
           ? 'bg-surface text-fg-primary font-semibold shadow-sm'
           : 'text-fg-secondary font-medium hover:bg-overlay',
@@ -111,26 +118,58 @@ function NavItem({ to, label, icon, active, collapsed }: {
   )
 }
 
-// ── version panel ──────────────────────────────────────────────────────────
-function VersionPanel({ collapsed }: { collapsed: boolean }) {
-  const { t } = useTranslation()
+// ── project info block (项目名 + active version label，放最上) ──────────────
+function ProjectInfoBlock({ collapsed }: { collapsed: boolean }) {
   const ctx = useProjectCtx()
   if (!ctx) return null
+  if (collapsed) return null
+  const { project } = ctx
+  return (
+    <div className="px-3 py-1.5">
+      <div className="font-semibold text-fg-primary text-sm overflow-hidden text-ellipsis whitespace-nowrap" title={project.title}>
+        {project.title}
+      </div>
+      <div className="font-mono text-xs text-fg-tertiary mt-0.5 overflow-hidden text-ellipsis whitespace-nowrap" title={project.slug}>
+        slug / {project.slug}
+      </div>
+    </div>
+  )
+}
+
+// ── version picker block (header "训练 vX [+/-]" 始终显示，展开后下方再渲染完整 list) ─
+function VersionPickerBlock({ collapsed }: { collapsed: boolean }) {
+  const { t } = useTranslation()
+  const ctx = useProjectCtx()
+  const [expanded, setExpanded] = useState(false)
+  if (!ctx) return null
+  if (collapsed) return null
   const { project, activeVersion, onSelectVersion, onCreateVersion, onExportTrain, onDeleteVersion, exporting } = ctx
 
-  if (collapsed) return null
+  const header = (
+    <div className="flex items-center gap-2.5 rounded-md py-2 px-3 text-sm text-fg-secondary hover:bg-overlay transition-colors">
+      <span className="w-5 h-5 grid place-items-center text-fg-tertiary shrink-0">
+        {I.train}
+      </span>
+      <span className="flex-1 overflow-hidden text-ellipsis whitespace-nowrap">
+        {t('sidebar.trainingVersionPrefix')} <span className="font-mono text-fg-primary">{activeVersion?.label ?? '—'}</span>
+      </span>
+      <button
+        onClick={() => setExpanded((v) => !v)}
+        title={expanded ? t('sidebar.collapseVersions') : t('sidebar.expandVersions')}
+        className="w-5 h-5 grid place-items-center text-fg-tertiary text-sm bg-transparent border border-dim rounded-sm cursor-pointer hover:bg-surface hover:text-accent shrink-0"
+      >
+        {expanded ? '−' : '+'}
+      </button>
+    </div>
+  )
 
+  if (!expanded) return header
+
+  // 展开态：header（[-]）+ 下方完整版本列表 + 新建/导出
   return (
-    <div className="rounded-md border border-subtle bg-overlay px-2 pt-2 pb-1.5 flex flex-col gap-1">
-      <div className="px-0.5">
-        <div className="font-semibold text-fg-primary text-sm">
-          {project.title}
-        </div>
-        <div className="font-mono text-xs text-fg-tertiary mt-0.5">
-          v / {activeVersion?.label ?? '—'}
-        </div>
-      </div>
-
+    <>
+      {header}
+      <div className="rounded-md border border-subtle bg-overlay px-2 pt-2 pb-1.5 flex flex-col gap-1 mb-1">
       <div className="flex flex-col gap-px">
         {project.versions.map((v) => {
           const isActive = v.id === project.active_version_id
@@ -145,7 +184,7 @@ function VersionPanel({ collapsed }: { collapsed: boolean }) {
                     : 'text-fg-secondary font-normal bg-transparent hover:bg-surface',
                 ].join(' ')}
               >
-                <span className={STAGE_DOT[v.stage]} />
+                <span className={STATUS_DOT[v.status] ?? 'dot dot-neutral'} />
                 <span className="flex-1 overflow-hidden text-ellipsis whitespace-nowrap">{v.label}</span>
               </button>
               {isActive && project.versions.length > 1 && (
@@ -164,7 +203,7 @@ function VersionPanel({ collapsed }: { collapsed: boolean }) {
 
       <div className="flex gap-1 mt-0.5">
         <button
-          onClick={onCreateVersion}
+          onClick={() => onCreateVersion()}
           className="flex-1 flex items-center justify-center gap-1 py-1 px-1.5 text-xs text-fg-secondary bg-transparent border border-dashed border-dim rounded-sm cursor-pointer hover:bg-surface hover:text-accent transition-colors"
         >
           {I.plus} {t('sidebar.newVersion')}
@@ -172,75 +211,92 @@ function VersionPanel({ collapsed }: { collapsed: boolean }) {
         <button
           onClick={onExportTrain}
           disabled={!activeVersion || exporting}
-          title={exporting ? t('sidebar.exporting') : t('sidebar.deleteVersionTitle')}
+          title={exporting ? t('sidebar.exporting') : t('sidebar.exportTitle')}
           className={`flex items-center justify-center gap-1 py-1 px-2 text-xs text-fg-secondary bg-transparent border border-dim rounded-sm cursor-pointer hover:bg-surface hover:text-fg-primary transition-colors ${!activeVersion ? 'opacity-40' : ''}`}
         >
           {I.export}
           {exporting ? t('sidebar.exporting') : t('sidebar.export')}
         </button>
       </div>
-    </div>
+      </div>
+    </>
   )
 }
 
 // ── project stepper nav ────────────────────────────────────────────────────
-function ProjectStepperNav({ pid, activeVid, currentStep, project, version, collapsed }: {
+function ProjectStepperNav({ pid, activeVid, currentStep, version, collapsed }: {
   pid: string
   activeVid: string | null
   currentStep: string | null
-  project: ProjectDetail | null
   version: Version | null
   collapsed: boolean
 }) {
   const { t } = useTranslation()
+  const navigate = useNavigate()
+  const { toast } = useToast()
 
+  // 项目级 ①② 跟"概览"同款：圆盘里放 icon、无序号、无完成绿色态。
+  // version 级 phase 重编号 1-5（每个 version 自己一段流水线）。
   const STEPS = [
-    { key: 'download',   labelKey: 'nav.download',   idx: '1', icon: I.download, scope: 'project' as const },
-    { key: 'preprocess', labelKey: 'nav.preprocess',  idx: '2', icon: I.upscale,  scope: 'project' as const },
-    { key: 'curate',     labelKey: 'nav.curate',      idx: '3', icon: I.filter,   scope: 'version' as const },
-    { key: 'tag',        labelKey: 'nav.tag',         idx: '4', icon: I.tag,      scope: 'version' as const },
-    { key: 'edit',       labelKey: 'nav.tagEdit',     idx: '5', icon: I.edit,     scope: 'version' as const },
-    { key: 'reg',        labelKey: 'nav.reg',         idx: '6', icon: I.reg,      scope: 'version' as const },
-    { key: 'train',      labelKey: 'nav.train',       idx: '7', icon: I.train,    scope: 'version' as const },
+    { key: 'download',   labelKey: 'nav.download',   idx: '',  icon: I.download, scope: 'project' as const },
+    { key: 'preprocess', labelKey: 'nav.preprocess', idx: '',  icon: I.upscale,  scope: 'project' as const },
+    { key: 'curate',     labelKey: 'nav.curate',     idx: '1', icon: I.filter,   scope: 'version' as const },
+    { key: 'tag',        labelKey: 'nav.tag',        idx: '2', icon: I.tag,      scope: 'version' as const },
+    { key: 'edit',       labelKey: 'nav.tagEdit',    idx: '3', icon: I.edit,     scope: 'version' as const },
+    { key: 'reg',        labelKey: 'nav.reg',        idx: '4', icon: I.reg,      scope: 'version' as const },
+    { key: 'train',      labelKey: 'nav.train',      idx: '5', icon: I.train,    scope: 'version' as const },
   ]
 
   const overviewActive = currentStep === null
-  const stage: VersionStage = version?.stage ?? 'curating'
-  const stageStepIdx = STAGE_TO_STEP_IDX[stage] ?? 0
-  const stats = version?.stats
-  const preprocessCount = project?.preprocess_image_count ?? 0
+  // ADR-0007 §11.5 cursor 派生：cursor 之前的 phase = done（仅 version 级）。
+  // 项目级 ①② 不参与 cursor、不显示完成态。
+  const cursorPhase: VersionPhase = (version?.phase as VersionPhase | undefined) ?? 'curating'
+  const cursorIdx = PHASE_ORDER.indexOf(cursorPhase)
 
-  const isStepDone = (key: string, idx: number): boolean => {
-    if (key === 'preprocess') return preprocessCount > 0
-    if (idx < stageStepIdx) return true
-    if (
-      (key === 'tag' || key === 'edit') &&
-      stats &&
-      stats.train_image_count > 0 &&
-      stats.tagged_image_count >= stats.train_image_count
-    ) return true
-    if (
-      key === 'reg' &&
-      stats &&
-      stats.reg_meta_exists &&
-      stats.reg_image_count > 0
-    ) return true
-    if (key === 'train' && version?.output_lora_path) return true
-    return false
+  const isStepDone = (key: string): boolean => {
+    const phase = STEP_KEY_TO_PHASE[key]
+    if (!phase) return false
+    return PHASE_ORDER.indexOf(phase) < cursorIdx
   }
 
-  const linkCls = (active: boolean) => [
+  // ADR-0007 §11.5-A: 推进 cursor 的唯一入口 —— 点击 cursor+1 那一行触发。
+  // skippable 调 skip，必经调 advance；校验失败给 warning toast。
+  const handleAdvanceToNext = async () => {
+    if (!activeVid) return
+    const nextIdx = cursorIdx + 1
+    if (nextIdx >= PHASE_ORDER.length) return
+    const nextPhase = PHASE_ORDER[nextIdx]
+    const isSkippable = PHASE_SKIPPABLE.includes(cursorPhase)
+    try {
+      const res = isSkippable
+        ? await api.skipVersionPhase(Number(pid), Number(activeVid))
+        : await api.advanceVersionPhase(Number(pid), Number(activeVid))
+      if (!res.ok) {
+        toast(res.reason || t('sidebar.advanceFailed'), 'error')
+        return
+      }
+      navigate(`/projects/${pid}/v/${activeVid}/${PHASE_TO_STEP_KEY[nextPhase]}`)
+    } catch (e) {
+      toast(String(e), 'error')
+    }
+  }
+
+  const linkCls = (active: boolean, indent = false) => [
     'flex items-center gap-2.5 rounded-md text-sm no-underline transition-colors',
     collapsed ? 'py-2 px-0 justify-center' : 'py-2 px-3 justify-start',
+    !collapsed && indent ? 'ml-3' : '',
     active ? 'bg-surface text-fg-primary font-semibold shadow-sm' : 'text-fg-secondary font-normal hover:bg-overlay',
   ].join(' ')
 
   return (
     <div className="flex flex-col gap-px">
+      {/* 项目名 + 当前 version label，放最顶 */}
+      <ProjectInfoBlock collapsed={collapsed} />
+
       <Link
         to={`/projects/${pid}`}
         title={collapsed ? t('nav.overview') : undefined}
-        className={linkCls(overviewActive) + ' mb-1'}
+        className={linkCls(overviewActive)}
       >
         <span className={`w-5 h-5 rounded-full grid place-items-center text-[12px] shrink-0 ${overviewActive ? 'bg-accent-soft text-accent' : 'bg-overlay text-fg-tertiary'}`}>
           ≡
@@ -251,46 +307,98 @@ function ProjectStepperNav({ pid, activeVid, currentStep, project, version, coll
       {STEPS.map((s, i) => {
         const label = t(s.labelKey)
         const isActive = s.key === currentStep
-        const isDone = isStepDone(s.key, i)
+        const isProject = s.scope === 'project'
+        const phase = STEP_KEY_TO_PHASE[s.key]
+        const phaseIdx = phase != null ? PHASE_ORDER.indexOf(phase) : -1
+        // ADR-0007 §11.5-A: sidebar 是 cursor 推进主通道。
+        // - phase_idx < cursorIdx  → done (绿数字，Link)
+        // - phase_idx == cursorIdx → 当前 cursor (Link)
+        // - phase_idx == cursorIdx+1 → "下一步"，呼吸 button，点击触发 advance/skip
+        // - phase_idx > cursorIdx+1 → disabled
+        const isCursorCurrent = !isProject && phaseIdx === cursorIdx
+        const isNextStep = !isProject && phaseIdx === cursorIdx + 1
+        const isFuturePhase = !isProject && phaseIdx > cursorIdx + 1
+        const isDone = isProject ? false : isStepDone(s.key)
 
-        const href = s.scope === 'project'
-          ? `/projects/${pid}/${s.key}`
-          : activeVid ? `/projects/${pid}/v/${activeVid}/${s.key}` : null
+        const href = (isFuturePhase || isNextStep)
+          ? null
+          : isProject
+            ? `/projects/${pid}/${s.key}`
+            : activeVid ? `/projects/${pid}/v/${activeVid}/${s.key}` : null
 
+        // 视觉强度：cursor 当前（实心 accent）> cursor+1（弱底 + 静态 ring）> 已完成（绿）> 默认
+        // 注：之前 cursor+1 用 animate-pulse 反而盖过 cursor 当前，去掉动画；改用 ring 静态提示。
         const badgeCls = isDone
           ? 'bg-ok-soft text-ok'
-          : isActive
-            ? 'bg-accent-soft text-accent'
-            : 'bg-overlay text-fg-tertiary'
+          : isCursorCurrent
+            ? 'bg-accent text-accent-fg'
+            : isNextStep
+              ? 'bg-overlay text-fg-secondary ring-1 ring-accent'
+              : isActive
+                ? 'bg-accent-soft text-accent'
+                : 'bg-overlay text-fg-tertiary'
+
+        // 项目级 ①② badge 内放 icon（跟"概览" ≡ 同款），不要数字 / 不要绿色态。
+        // version 级 badge 始终放数字；完成时数字变绿；cursor+1 时背景 accent + 呼吸。
+        const badgeContent = isProject ? s.icon : s.idx
 
         const inner = (
           <>
             <span className={`w-5 h-5 rounded-full grid place-items-center text-[10px] font-bold font-mono shrink-0 ${badgeCls}`}>
-              {collapsed ? s.idx : (isDone ? I.check : s.idx)}
+              {badgeContent}
             </span>
             {!collapsed && <span className="flex-1 text-left">{label}</span>}
             {!collapsed && isActive && <span className="dot dot-running" />}
           </>
         )
 
-        if (!href) {
-          return (
-            <span key={s.key} title={collapsed ? `${s.idx}. ${label}` : undefined}
-              className={linkCls(false) + ' opacity-40 cursor-default'}>
+        // version 级 step（筛选→训练）整体再缩进一层，表达从属于上方的 version 选择器。
+        const indent = s.scope === 'version'
+
+        let stepNode: React.ReactNode
+        if (isNextStep) {
+          // 推进入口：button + onClick
+          stepNode = (
+            <button
+              key={s.key}
+              type="button"
+              onClick={() => void handleAdvanceToNext()}
+              title={collapsed ? `→ ${label}` : t('sidebar.advanceToTitle', { label })}
+              className={linkCls(false, indent) + ' cursor-pointer text-fg-primary font-medium'}
+            >
+              {inner}
+            </button>
+          )
+        } else if (!href) {
+          stepNode = (
+            <span key={s.key} title={collapsed ? (s.idx ? `${s.idx}. ${label}` : label) : undefined}
+              className={linkCls(false, indent) + ' opacity-40 cursor-default'}>
               {inner}
             </span>
           )
+        } else {
+          stepNode = (
+            <Link
+              key={s.key}
+              to={href}
+              title={collapsed ? (s.idx ? `${s.idx}. ${label}` : label) : undefined}
+              className={linkCls(isActive, indent)}
+            >
+              {inner}
+            </Link>
+          )
         }
 
+        // 在 scope 从 project 切到 version 的边界（"预处理"和"筛选"之间）
+        // 插入 VersionPickerBlock —— 版本选择紧靠 version 级 phase 上方。
+        const prev = STEPS[i - 1]
+        const isBoundary = prev && prev.scope === 'project' && s.scope === 'version'
+        if (!isBoundary) return stepNode
         return (
-          <Link
-            key={s.key}
-            to={href}
-            title={collapsed ? `${s.idx}. ${label}` : undefined}
-            className={linkCls(isActive)}
-          >
-            {inner}
-          </Link>
+          <Fragment key={s.key}>
+            <VersionPickerBlock collapsed={collapsed} />
+            {stepNode}
+          </Fragment>
         )
       })}
     </div>
@@ -375,16 +483,19 @@ export default function Sidebar() {
       </div>
 
       <nav className={`flex-1 flex flex-col gap-0.5 overflow-hidden ${collapsed ? 'px-2 py-2.5' : 'px-2 py-3.5'}`}>
-        <NavItem to="/" label={t('nav.projects')} icon={I.folder} active={!inProject && location.pathname === '/'} collapsed={collapsed} />
-        <NavItem to="/queue" label={t('nav.queue')} icon={I.queue} active={isMain('/queue')} collapsed={collapsed} />
-        <NavItem to="/tools/generate" label={t('nav.generate')} icon={I.image} active={isMain('/tools/generate')} collapsed={collapsed} />
+        <NavItem to="/" label={t('nav.projects')} icon={I.folder} active={!inProject && location.pathname === '/'} collapsed={collapsed} prominent />
 
+        {/* 当前项目下的全部内容（概览 + ①② + VersionPanel + ③-⑦）夹在 项目 / 队列 之间。
+            sub-nav 性质，缩进表达从属（折叠态不缩进）。
+            VersionPanel 由 ProjectStepperNav 在 project→version scope 切换点插入。 */}
         {inProject && pid && (
-          <div className="mt-2.5 flex flex-col gap-1">
-            <VersionPanel collapsed={collapsed} />
-            <ProjectStepperNav pid={pid} activeVid={activeVid} currentStep={currentStep} project={ctx?.project ?? null} version={ctx?.activeVersion ?? null} collapsed={collapsed} />
+          <div className={`flex flex-col gap-0.5 ${collapsed ? '' : 'ml-3'}`}>
+            <ProjectStepperNav pid={pid} activeVid={activeVid} currentStep={currentStep} version={ctx?.activeVersion ?? null} collapsed={collapsed} />
           </div>
         )}
+
+        <NavItem to="/queue" label={t('nav.queue')} icon={I.queue} active={isMain('/queue')} collapsed={collapsed} prominent />
+        <NavItem to="/tools/generate" label={t('nav.generate')} icon={I.image} active={isMain('/tools/generate')} collapsed={collapsed} prominent />
       </nav>
 
       <div className={`border-t border-subtle flex flex-col gap-0.5 shrink-0 ${collapsed ? 'px-1.5 py-2' : 'p-2.5'}`}>

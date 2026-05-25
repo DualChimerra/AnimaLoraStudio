@@ -12,7 +12,7 @@ import { useToast } from '../components/Toast'
 import { useEventStream } from '../lib/useEventStream'
 import MonitorDashboard from '../components/MonitorDashboard'
 
-type Tab = 'overview' | 'log' | 'monitor' | 'outputs'
+type Tab = 'overview' | 'log' | 'monitor' | 'outputs' | 'snapshot'
 
 const STATUS_BADGE: Record<TaskStatus, string> = {
   pending: 'badge badge-neutral',
@@ -92,7 +92,7 @@ export default function QueueDetailPage() {
   const [tab, setTab] = useState<Tab>(() => {
     if (typeof window === 'undefined') return 'overview'
     const v = window.location.hash.replace(/^#/, '')
-    return (['overview', 'log', 'monitor', 'outputs'] as const).includes(v as Tab) ? (v as Tab) : 'overview'
+    return (['overview', 'log', 'monitor', 'outputs', 'snapshot'] as const).includes(v as Tab) ? (v as Tab) : 'overview'
   })
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [pauseModalOpen, setPauseModalOpen] = useState(false)
@@ -111,7 +111,7 @@ export default function QueueDetailPage() {
   // 写回不会更新 router state，所以两条 effect 不会 ping-pong。
   useEffect(() => {
     const v = location.hash.replace(/^#/, '')
-    if ((['overview', 'log', 'monitor', 'outputs'] as const).includes(v as Tab)) {
+    if ((['overview', 'log', 'monitor', 'outputs', 'snapshot'] as const).includes(v as Tab)) {
       setTab((prev) => (prev === v ? prev : (v as Tab)))
     }
   }, [location.hash])
@@ -206,6 +206,7 @@ export default function QueueDetailPage() {
     { key: 'log',      label: t('queueDetail.tabLogs') },
     { key: 'monitor',  label: t('queueDetail.tabMonitor') },
     { key: 'outputs',  label: t('queueDetail.tabOutputs') },
+    { key: 'snapshot', label: t('queueDetail.tabSnapshot') },
   ]
 
   return (
@@ -305,6 +306,7 @@ export default function QueueDetailPage() {
         {tab === 'log' && <LogTab taskId={taskId} />}
         {tab === 'monitor' && <MonitorTab taskId={taskId} />}
         {tab === 'outputs' && <OutputsTab taskId={taskId} />}
+        {tab === 'snapshot' && <SnapshotConfigTab task={task} />}
       </div>
 
 
@@ -367,7 +369,7 @@ function OverviewTab({ task }: { task: Task }) {
     items.push({
       label: t('queueDetail.source'),
       value: task.project_id && task.version_id ? (
-        <Link to={`/projects/${task.project_id}/v/${task.version_id}/train`}
+        <Link to={`/projects/${task.project_id}?version=${task.version_id}`}
           className="text-accent font-mono text-sm"
         >{t('queueDetail.sourceLink', { projectId: task.project_id, versionId: task.version_id })}</Link>
       ) : '—',
@@ -384,7 +386,7 @@ function OverviewTab({ task }: { task: Task }) {
   }
 
   return (
-    <div className="overflow-y-auto p-5">
+    <div className="flex-1 min-h-0 overflow-y-auto p-5">
       <div className="card overflow-hidden p-0" style={{ maxWidth: 720 }}>
         {items.map((row, i) => (
           <div
@@ -473,16 +475,18 @@ function MonitorTab({ taskId }: { taskId: number }) {
 
 // ── OutputsTab ──────────────────────────────────────────────────────────────
 
-function OutputsTab({ taskId }: { taskId: number }) {
+export function OutputsTab({ taskId }: { taskId: number }) {
   const { t } = useTranslation()
   const { toast } = useToast()
   const [data, setData] = useState<TaskOutputs | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [zipping, setZipping] = useState(false)
+  const [exportingOutputs, setExportingOutputs] = useState(false)
   const [refreshKey, setRefreshKey] = useState(0)
   const [selectMode, setSelectMode] = useState(false)
   const [selected, setSelected] = useState<Set<string>>(() => new Set())
+  const [downloadDialog, setDownloadDialog] = useState<null | { destination: 'download' | 'data_exports' }>(null)
 
   useEffect(() => {
     let alive = true
@@ -523,13 +527,21 @@ function OutputsTab({ taskId }: { taskId: number }) {
     const sign = sortDir === 'asc' ? 1 : -1
     return [...data.files].sort((a, b) => {
       if (sortKey === 'name') {
-        // numeric: true 让 ep_002 排在 ep_010 之前，避免字典序的 ep_10 < ep_2
-        return a.name.localeCompare(b.name, undefined, { numeric: true }) * sign
+        // numeric 让 ep_002 排在 ep_010 之前，避免字典序的 ep_10 < ep_2
+        return (a.path || a.name).localeCompare(b.path || b.name, undefined, { numeric: true }) * sign
       }
       if (sortKey === 'size') return (a.size - b.size) * sign
       return (a.mtime - b.mtime) * sign
     })
   }, [data, sortKey, sortDir])
+  const stateFiles = useMemo(
+    () => sortedFiles.filter((f) => f.kind === 'training_state' || f.kind === 'pause_state' || f.kind === 'auto_epoch_state'),
+    [sortedFiles]
+  )
+  const regularFiles = useMemo(
+    () => sortedFiles.filter((f) => f.kind !== 'training_state' && f.kind !== 'pause_state' && f.kind !== 'auto_epoch_state'),
+    [sortedFiles]
+  )
 
   const onHeaderClick = (key: SortKey) => {
     if (key === sortKey) {
@@ -542,10 +554,10 @@ function OutputsTab({ taskId }: { taskId: number }) {
   const sortArrow = (key: SortKey) =>
     sortKey === key ? (sortDir === 'asc' ? ' ↑' : ' ↓') : ''
 
-  // 刷新后剔除选中里已不存在的文件名（比如有人手动删了 ep_001.safetensors）
+  // 刷新后剔除选中里已不存在的文件路径
   useEffect(() => {
     if (selected.size === 0) return
-    const names = new Set(sortedFiles.map((f) => f.name))
+    const names = new Set(sortedFiles.map((f) => f.path))
     let dropped = false
     const next = new Set<string>()
     for (const n of selected) {
@@ -556,7 +568,7 @@ function OutputsTab({ taskId }: { taskId: number }) {
 
   const selectedSize = useMemo(() => {
     let total = 0
-    for (const f of sortedFiles) if (selected.has(f.name)) total += f.size
+    for (const f of sortedFiles) if (selected.has(f.path)) total += f.size
     return total
   }, [sortedFiles, selected])
 
@@ -565,7 +577,7 @@ function OutputsTab({ taskId }: { taskId: number }) {
   const partialSelected = !allSelected && !noneSelected
 
   const toggleSelectAll = () => {
-    setSelected(allSelected ? new Set() : new Set(sortedFiles.map((f) => f.name)))
+    setSelected(allSelected ? new Set() : new Set(sortedFiles.map((f) => f.path)))
   }
   const toggleOne = (name: string) => {
     setSelected((prev) => {
@@ -588,23 +600,43 @@ function OutputsTab({ taskId }: { taskId: number }) {
     finally { setBusy(false) }
   }
 
+  const outputSelection = () => {
+    const partial = selectMode && selected.size > 0
+    if (selectMode && !partial) return null
+    return partial ? Array.from(selected) : undefined
+  }
+
   const handleDownloadZip = () => {
     if (zipping) return
-    const partial = selectMode && selected.size > 0
-    if (selectMode && !partial) return  // 批量模式下没选任何文件，按钮应已 disabled
+    const files = outputSelection()
+    if (selectMode && files === null) return
     setZipping(true)
     // 优先用后端给的 archive_basename ({slug}-{label})，老任务没 project/version
     // 时 fallback task_{id}。download 属性是兜底 —— 浏览器优先用响应头
     // Content-Disposition.filename，所以最终下载名以后端为准。
     const baseName = data?.archive_basename ?? `task_${taskId}`
-    const zipName = partial ? `${baseName}_outputs_selected.zip` : `${baseName}_outputs.zip`
-    const files = partial ? Array.from(selected) : undefined
+    const zipName = files ? `${baseName}_outputs_selected.zip` : `${baseName}_outputs.zip`
     const a = document.createElement('a')
-    a.href = api.taskOutputsZipUrl(taskId, files)
+    a.href = api.taskOutputsZipUrl(taskId, files ?? undefined)
     a.download = zipName
     document.body.appendChild(a)
     a.click()
     document.body.removeChild(a)
+  }
+
+  const handleExportOutputs = async () => {
+    if (exportingOutputs) return
+    const files = outputSelection()
+    if (selectMode && files === null) return
+    setExportingOutputs(true)
+    try {
+      const result = await api.exportTaskOutputs(taskId, files ?? undefined)
+      toast(t('queueDetail.exportedToDataExports', { filename: result.filename, path: result.path }), 'success')
+    } catch (e) {
+      toast(String(e), 'error')
+    } finally {
+      setExportingOutputs(false)
+    }
   }
 
   const copyPath = async () => {
@@ -612,6 +644,79 @@ function OutputsTab({ taskId }: { taskId: number }) {
     try { await navigator.clipboard.writeText(data.output_dir); toast(t('queueDetail.pathCopied'), 'success') }
     catch { toast(t('queueDetail.copyFailed'), 'error') }
   }
+
+  const renderFileRows = (files: typeof sortedFiles) => files.map((f) => {
+    const isSel = selected.has(f.path)
+    return (
+      <div
+        key={f.path}
+        onClick={selectMode ? () => toggleOne(f.path) : undefined}
+        className={`grid gap-2 px-4 py-2 items-center border-b border-subtle text-xs transition-colors ${selectMode ? `cursor-pointer ${isSel ? 'bg-accent-soft' : 'hover:bg-overlay'}` : 'hover:bg-overlay'}`}
+        style={{ gridTemplateColumns: '1fr 100px 160px 80px' }}
+      >
+        <div className="flex items-center gap-1.5 min-w-0">
+          <code className="font-mono text-fg-primary overflow-hidden text-ellipsis whitespace-nowrap">{f.path || f.name}</code>
+          {f.is_lora && <span className="badge badge-ok">LoRA</span>}
+          {f.kind === 'training_state' && <span className="badge badge-warn">State</span>}
+          {f.kind === 'pause_state' && <span className="badge badge-warn">Pause</span>}
+          {f.kind === 'auto_epoch_state' && <span className="badge badge-warn">Auto</span>}
+        </div>
+        <span className="text-right font-mono text-fg-tertiary">{fmtBytes(f.size)}</span>
+        <span className="text-right font-mono text-fg-tertiary">{fmtTime(f.mtime)}</span>
+        <span className="text-right">
+          {selectMode ? (
+            <input
+              type="checkbox"
+              checked={isSel}
+              onChange={() => toggleOne(f.path)}
+              onClick={(e) => e.stopPropagation()}
+              style={{ width: 14, height: 14, accentColor: 'var(--accent)', cursor: 'pointer' }}
+              aria-label={`${t('common.select')} ${f.path || f.name}`}
+            />
+          ) : (
+            <a href={api.taskOutputDownloadUrl(taskId, f.path)} download={f.name}
+              className="text-accent no-underline hover:underline text-xs"
+            >{t('queueDetail.downloadFile')}</a>
+          )}
+        </span>
+      </div>
+    )
+  })
+
+  const renderFileTable = (files: typeof sortedFiles) => (
+    <div className="card overflow-hidden p-0">
+      <div
+        className="grid gap-2 px-4 py-2 text-xs text-fg-tertiary border-b border-subtle font-mono"
+        style={{ gridTemplateColumns: '1fr 100px 160px 80px' }}
+      >
+        <button
+          onClick={() => onHeaderClick('name')}
+          className="text-left bg-transparent border-0 p-0 text-xs font-mono text-fg-tertiary hover:text-fg-primary cursor-pointer"
+        >{t('common.file')}{sortArrow('name')}</button>
+        <button
+          onClick={() => onHeaderClick('size')}
+          className="text-right bg-transparent border-0 p-0 text-xs font-mono text-fg-tertiary hover:text-fg-primary cursor-pointer"
+        >{t('common.size')}{sortArrow('size')}</button>
+        <button
+          onClick={() => onHeaderClick('mtime')}
+          className="text-right bg-transparent border-0 p-0 text-xs font-mono text-fg-tertiary hover:text-fg-primary cursor-pointer"
+        >{t('queueDetail.modifiedTime')}{sortArrow('mtime')}</button>
+        <span className="text-right">
+          {selectMode ? (
+            <input
+              type="checkbox"
+              checked={allSelected}
+              ref={(el) => { if (el) el.indeterminate = partialSelected }}
+              onChange={toggleSelectAll}
+              style={{ width: 14, height: 14, accentColor: 'var(--accent)', cursor: 'pointer' }}
+              aria-label={t('common.selectAll')}
+            />
+          ) : null}
+        </span>
+      </div>
+      {renderFileRows(files)}
+    </div>
+  )
 
   return (
     <div className="flex flex-col flex-1 min-h-0 p-4 gap-2.5">
@@ -637,15 +742,17 @@ function OutputsTab({ taskId }: { taskId: number }) {
                 {selectMode ? t('queueDetail.exitBatchMode') : t('queueDetail.batchMode')}
               </button>
               <button
-                onClick={handleDownloadZip}
-                disabled={zipping || (selectMode && noneSelected)}
+                onClick={() => setDownloadDialog({ destination: 'download' })}
+                disabled={zipping || exportingOutputs || (selectMode && noneSelected)}
                 className="btn btn-primary btn-sm"
               >
                 {zipping
                   ? t('queueDetail.compressing')
-                  : selectMode
-                    ? (noneSelected ? t('queueDetail.downloadSelectedEmpty') : t('queueDetail.downloadSelected', { n: selected.size, size: fmtBytes(selectedSize) }))
-                    : t('queueDetail.downloadAll')}
+                  : exportingOutputs
+                    ? t('queueDetail.exportingOutputs')
+                    : selectMode
+                      ? (noneSelected ? t('queueDetail.downloadSelectedEmpty') : t('queueDetail.downloadSelected', { n: selected.size, size: fmtBytes(selectedSize) }))
+                      : t('queueDetail.downloadAll')}
               </button>
             </>
           )}
@@ -666,73 +773,187 @@ function OutputsTab({ taskId }: { taskId: number }) {
         ) : sortedFiles.length === 0 ? (
           <div className="text-fg-tertiary text-sm text-center p-5">{t('queueDetail.dirEmpty')}</div>
         ) : (
-          <div className="card overflow-hidden p-0">
-            <div
-              className="grid gap-2 px-4 py-2 text-xs text-fg-tertiary border-b border-subtle font-mono"
-              style={{ gridTemplateColumns: '1fr 100px 160px 80px' }}
-            >
-              <button
-                onClick={() => onHeaderClick('name')}
-                className="text-left bg-transparent border-0 p-0 text-xs font-mono text-fg-tertiary hover:text-fg-primary cursor-pointer"
-              >{t('common.file')}{sortArrow('name')}</button>
-              <button
-                onClick={() => onHeaderClick('size')}
-                className="text-right bg-transparent border-0 p-0 text-xs font-mono text-fg-tertiary hover:text-fg-primary cursor-pointer"
-              >{t('common.size')}{sortArrow('size')}</button>
-              <button
-                onClick={() => onHeaderClick('mtime')}
-                className="text-right bg-transparent border-0 p-0 text-xs font-mono text-fg-tertiary hover:text-fg-primary cursor-pointer"
-              >{t('queueDetail.modifiedTime')}{sortArrow('mtime')}</button>
-              <span className="text-right">
-                {selectMode ? (
-                  <input
-                    type="checkbox"
-                    checked={allSelected}
-                    ref={(el) => { if (el) el.indeterminate = partialSelected }}
-                    onChange={toggleSelectAll}
-                    style={{ width: 14, height: 14, accentColor: 'var(--accent)', cursor: 'pointer' }}
-                    aria-label={t('common.selectAll')}
-                  />
-                ) : null}
-              </span>
-            </div>
-            {sortedFiles.map((f) => {
-              const isSel = selected.has(f.name)
-              return (
-              <div
-                key={f.name}
-                onClick={selectMode ? () => toggleOne(f.name) : undefined}
-                className={`grid gap-2 px-4 py-2 items-center border-b border-subtle text-xs transition-colors ${selectMode ? `cursor-pointer ${isSel ? 'bg-accent-soft' : 'hover:bg-overlay'}` : 'hover:bg-overlay'}`}
-                style={{ gridTemplateColumns: '1fr 100px 160px 80px' }}
-              >
-                <div className="flex items-center gap-1.5 min-w-0">
-                  <code className="font-mono text-fg-primary overflow-hidden text-ellipsis whitespace-nowrap">{f.name}</code>
-                  {f.is_lora && <span className="badge badge-ok">LoRA</span>}
-                </div>
-                <span className="text-right font-mono text-fg-tertiary">{fmtBytes(f.size)}</span>
-                <span className="text-right font-mono text-fg-tertiary">{fmtTime(f.mtime)}</span>
-                <span className="text-right">
-                  {selectMode ? (
-                    <input
-                      type="checkbox"
-                      checked={isSel}
-                      onChange={() => toggleOne(f.name)}
-                      onClick={(e) => e.stopPropagation()}
-                      style={{ width: 14, height: 14, accentColor: 'var(--accent)', cursor: 'pointer' }}
-                      aria-label={`${t('common.select')} ${f.name}`}
-                    />
-                  ) : (
-                    <a href={api.taskOutputDownloadUrl(taskId, f.name)} download={f.name}
-                      className="text-accent no-underline hover:underline text-xs"
-                    >{t('queueDetail.downloadFile')}</a>
-                  )}
-                </span>
-              </div>
-              )
-            })}
+          <div className="flex flex-col gap-3">
+            {regularFiles.length > 0 && (
+              <section className="flex flex-col gap-1.5">
+                <div className="px-1 text-xs font-semibold text-fg-secondary">输出文件</div>
+                {renderFileTable(regularFiles)}
+              </section>
+            )}
+            {stateFiles.length > 0 && (
+              <section className="flex flex-col gap-1.5">
+                <div className="px-1 text-xs font-semibold text-warn">训练状态</div>
+                {renderFileTable(stateFiles)}
+              </section>
+            )}
           </div>
         )}
       </div>
+
+      {downloadDialog && (
+        <OutputsDownloadDialog
+          destination={downloadDialog.destination}
+          onDestinationChange={(d) => setDownloadDialog({ destination: d })}
+          busy={zipping || exportingOutputs}
+          onCancel={() => setDownloadDialog(null)}
+          onConfirm={() => {
+            const dest = downloadDialog.destination
+            setDownloadDialog(null)
+            if (dest === 'download') handleDownloadZip()
+            else void handleExportOutputs()
+          }}
+        />
+      )}
+    </div>
+  )
+}
+
+// ── OutputsDownloadDialog ───────────────────────────────────────────────────
+
+function OutputsDownloadDialog({
+  destination, onDestinationChange, busy, onConfirm, onCancel,
+}: {
+  destination: 'download' | 'data_exports'
+  onDestinationChange: (d: 'download' | 'data_exports') => void
+  busy: boolean
+  onConfirm: () => void
+  onCancel: () => void
+}) {
+  const { t } = useTranslation()
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      onMouseDown={(e) => { if (e.target === e.currentTarget && !busy) onCancel() }}
+    >
+      <div className="bg-elevated border border-subtle rounded-lg shadow-lg w-full max-w-[420px]">
+        <header className="px-[18px] py-3.5 border-b border-subtle">
+          <h3 className="m-0 text-md font-semibold text-fg-primary">{t('queueDetail.downloadDialogTitle')}</h3>
+        </header>
+        <div className="px-[18px] py-3.5 flex flex-col gap-2">
+          <div className="text-sm text-fg-secondary">{t('queueDetail.downloadDialogHint')}</div>
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="radio"
+              name="outputs-download-destination"
+              checked={destination === 'download'}
+              onChange={() => onDestinationChange('download')}
+              disabled={busy}
+            />
+            <span className="text-sm text-fg-primary">{t('queueDetail.downloadDestinationLocal')}</span>
+          </label>
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="radio"
+              name="outputs-download-destination"
+              checked={destination === 'data_exports'}
+              onChange={() => onDestinationChange('data_exports')}
+              disabled={busy}
+            />
+            <span className="text-sm text-fg-primary">{t('queueDetail.downloadDestinationDataExports')}</span>
+          </label>
+        </div>
+        <footer className="px-[18px] py-3 border-t border-subtle flex items-center gap-2 justify-end">
+          <button onClick={onCancel} disabled={busy} className="btn btn-ghost btn-sm">{t('common.cancel')}</button>
+          <button onClick={onConfirm} disabled={busy} className="btn btn-primary btn-sm">
+            {busy ? '...' : t('common.confirm')}
+          </button>
+        </footer>
+      </div>
+    </div>
+  )
+}
+
+// ── SnapshotConfigTab (ADR-0007 §11.7 / §11.8-D) ──────────────────────────
+
+/** task 启动时冻结的 training config 只读展示 + "套用此配置" 流程。
+ *
+ *  心智分离（§11.7 设计）：snapshot 是历史，不点 task 跳 version config 编辑页；
+ *  按钮 "套用此配置" → confirm → PUT version config → navigate train phase 页。
+ *  user 在 train 页可编辑后点 "开始训练" → 创建新 task（同 version 多 task）。
+ */
+function SnapshotConfigTab({ task }: { task: Task | null }) {
+  const { t } = useTranslation()
+  const navigate = useNavigate()
+  const { toast } = useToast()
+  const [data, setData] = useState<{ yaml: string; config: Record<string, unknown> } | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [applying, setApplying] = useState(false)
+  const [confirmApply, setConfirmApply] = useState(false)
+
+  useEffect(() => {
+    if (!task) { setLoading(false); return }
+    let cancelled = false
+    setLoading(true)
+    void api.getTaskSnapshotConfig(task.id)
+      .then((r) => { if (!cancelled) { setData(r); setError(null) } })
+      .catch((e) => { if (!cancelled) setError(String(e)) })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [task])
+
+  const apply = async () => {
+    if (!task || !data) return
+    const pid = task.project_id, vid = task.version_id
+    if (!pid || !vid) {
+      toast(t('snapshot.noVersionLink'), 'error')
+      return
+    }
+    setApplying(true)
+    try {
+      await api.putVersionConfig(pid, vid, data.config as Parameters<typeof api.putVersionConfig>[2])
+      setConfirmApply(false)
+      navigate(`/projects/${pid}/v/${vid}/train`)
+    } catch (e) {
+      toast(String(e), 'error')
+    } finally {
+      setApplying(false)
+    }
+  }
+
+  if (loading) return <div className="p-6 text-fg-tertiary text-sm">{t('common.loading')}</div>
+  if (error) {
+    return (
+      <div className="p-6">
+        <p className="m-0 text-sm text-err">{error}</p>
+        <p className="m-0 text-xs text-fg-tertiary mt-2">{t('snapshot.notFoundHint')}</p>
+      </div>
+    )
+  }
+  if (!data) return <div className="p-6 text-fg-tertiary text-sm italic">{t('snapshot.empty')}</div>
+
+  const canApply = !!(task?.project_id && task?.version_id)
+
+  return (
+    <div className="p-6 flex flex-col gap-4 flex-1 min-h-0">
+      <div className="flex items-start gap-3 shrink-0">
+        <div className="flex-1">
+          <h3 className="m-0 text-md font-semibold">{t('snapshot.title')}</h3>
+          <p className="m-0 mt-1 text-xs text-fg-tertiary">{t('snapshot.subtitle')}</p>
+        </div>
+        <button
+          className="btn btn-primary btn-sm"
+          onClick={() => setConfirmApply(true)}
+          disabled={!canApply || applying}
+          title={canApply ? undefined : t('snapshot.noVersionLink')}
+        >
+          {t('snapshot.applyBtn')}
+        </button>
+      </div>
+      <pre className="m-0 p-4 rounded-md border border-subtle bg-sunken text-xs font-mono overflow-auto whitespace-pre flex-1 min-h-0">{data.yaml}</pre>
+
+      {confirmApply && (
+        <ConfirmDialog
+          title={t('snapshot.applyConfirmTitle')}
+          message={t('snapshot.applyConfirmDesc')}
+          confirmLabel={t('snapshot.applyBtn')}
+          onConfirm={apply}
+          onCancel={() => { if (!applying) setConfirmApply(false) }}
+          busy={applying}
+        />
+      )}
     </div>
   )
 }

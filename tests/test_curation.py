@@ -4,8 +4,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from PIL import Image, ImageDraw
 
 from studio import curation, db, projects, versions
+from studio.services import duplicate_finder
 from studio.services import preprocess_manifest
 
 
@@ -27,6 +29,25 @@ def _dl(env, name: str, blob: bytes = b"img") -> Path:
     f.parent.mkdir(parents=True, exist_ok=True)
     f.write_bytes(blob)
     return f
+
+
+def _png(env, name: str, color: str = "#d8dde6") -> Path:
+    p = _dl(env, name, blob=b"")
+    img = Image.new("RGB", (96, 96), color)
+    draw = ImageDraw.Draw(img)
+    draw.rectangle((12, 16, 84, 80), outline="#111111", width=4)
+    draw.ellipse((34, 30, 62, 58), fill="#f0c4a0", outline="#111111", width=2)
+    img.save(p)
+    return p
+
+
+def _different_png(env, name: str) -> Path:
+    p = _dl(env, name, blob=b"")
+    img = Image.new("RGB", (96, 96), "#90c8ff")
+    draw = ImageDraw.Draw(img)
+    draw.polygon([(16, 82), (48, 12), (82, 82)], fill="#62aa55", outline="#111111")
+    img.save(p)
+    return p
 
 
 def _meta(env, name: str, ext: str, content: str) -> Path:
@@ -124,6 +145,60 @@ def test_copy_to_train_uses_original_when_unprocessed(env) -> None:
         )
     copied = _train_dir(env, "5_concept") / "1.png"
     assert copied.read_bytes() == b"original-bytes"
+
+
+def test_curation_view_expands_multi_crop_derivatives(env) -> None:
+    """Multi-crop fan-out: download/X.png 派生 X_c0.png / X_c1.png，
+    筛选 left 展开为 N 行可单独勾选，原 X.png 不再单独出现。"""
+    _dl(env, "X.png", blob=b"orig")
+    _dl(env, "Y.png", blob=b"orig")
+    pdir = projects.project_dir(env["p"]["id"], env["p"]["slug"])
+    # 模拟 multi-crop fan-out 写盘 + manifest
+    (pdir / "preprocess").mkdir(parents=True, exist_ok=True)
+    (pdir / "preprocess" / "X_c0.png").write_bytes(b"head")
+    (pdir / "preprocess" / "X_c1.png").write_bytes(b"body")
+    preprocess_manifest.replace_with_crops(
+        pdir,
+        source_name="X.png",
+        outputs=[
+            {"name": "X_c0.png", "origin": "X.png", "size": 4, "mtime": 1.0},
+            {"name": "X_c1.png", "origin": "X.png", "size": 4, "mtime": 1.0},
+        ],
+    )
+    with db.connection_for(env["db"]) as conn:
+        view = curation.curation_view(conn, env["p"]["id"], env["v"]["id"])
+    # X 派生为 c0 / c1；Y 未处理保持原名；X.png 自身不在 left
+    assert set(_names(view["left"])) == {"X_c0.png", "X_c1.png", "Y.png"}
+
+
+def test_copy_to_train_accepts_preprocess_derivative_name(env) -> None:
+    """筛选 left 给的派生名（如 X_c0.png）应能直接 copy 到 train，
+    bytes 来自 preprocess/，metadata 从 download/{origin} 跟着复制。"""
+    _dl(env, "X.png")
+    _meta(env, "X.png", ".txt", "tag for X")
+    pdir = projects.project_dir(env["p"]["id"], env["p"]["slug"])
+    (pdir / "preprocess").mkdir(parents=True, exist_ok=True)
+    (pdir / "preprocess" / "X_c0.png").write_bytes(b"crop-0-bytes")
+    (pdir / "preprocess" / "X_c1.png").write_bytes(b"crop-1-bytes")
+    preprocess_manifest.replace_with_crops(
+        pdir,
+        source_name="X.png",
+        outputs=[
+            {"name": "X_c0.png", "origin": "X.png", "size": 4, "mtime": 1.0},
+            {"name": "X_c1.png", "origin": "X.png", "size": 4, "mtime": 1.0},
+        ],
+    )
+    with db.connection_for(env["db"]) as conn:
+        curation.copy_to_train(
+            conn, env["p"]["id"], env["v"]["id"],
+            ["X_c0.png", "X_c1.png"], "5_concept",
+        )
+    folder = _train_dir(env, "5_concept")
+    assert (folder / "X_c0.png").read_bytes() == b"crop-0-bytes"
+    assert (folder / "X_c1.png").read_bytes() == b"crop-1-bytes"
+    # metadata 共享原图 caption，复制到各 stem
+    assert (folder / "X_c0.txt").read_text(encoding="utf-8") == "tag for X"
+    assert (folder / "X_c1.txt").read_text(encoding="utf-8") == "tag for X"
 
 
 def test_copy_to_train_handles_mixed_processed_unprocessed(env) -> None:
@@ -289,3 +364,53 @@ def test_has_train_images_false_then_true(env) -> None:
             conn, env["p"]["id"], env["v"]["id"], ["1.png"], "5_concept"
         )
         assert curation.has_train_images(conn, env["p"]["id"], env["v"]["id"]) is True
+
+
+# ---------------------------------------------------------------------------
+# duplicate review
+# ---------------------------------------------------------------------------
+
+
+def test_duplicate_scan_returns_review_groups(env) -> None:
+    _png(env, "1.png")
+    _png(env, "2.png")
+    _different_png(env, "3.png")
+
+    with db.connection_for(env["db"]) as conn:
+        result = duplicate_finder.scan_project_duplicates(
+            conn,
+            env["p"]["id"],
+            duplicate_finder.DuplicateOptions(
+                match_scope="strict",
+                hash_workers=1,
+            ),
+        )
+
+    assert result["total_images"] == 3
+    assert result["group_count"] == 1
+    group = result["groups"][0]
+    assert group["keep"] in {"1.png", "2.png"}
+    assert {item["name"] for item in group["items"]} == {"1.png", "2.png"}
+    assert group["best"]["match_type"] == "strict-duplicate"
+
+
+def test_duplicate_apply_marks_confirmed_names_without_touching_download(env) -> None:
+    _png(env, "1.png")
+    _png(env, "2.png")
+    _meta(env, "2.png", ".txt", "tag")
+
+    with db.connection_for(env["db"]) as conn:
+        result = duplicate_finder.apply_duplicate_removals(
+            conn,
+            env["p"]["id"],
+            names=["2.png"],
+        )
+        left = curation.list_download(conn, env["p"]["id"])
+
+    pdir = projects.project_dir(env["p"]["id"], env["p"]["slug"])
+    assert result["removed"] == ["2.png"]
+    assert (pdir / "download" / "1.png").exists()
+    assert (pdir / "download" / "2.png").exists()
+    assert (pdir / "download" / "2.txt").exists()
+    assert not (pdir / "download" / "_Duplicates_Found").exists()
+    assert {item["name"] for item in left} == {"1.png"}

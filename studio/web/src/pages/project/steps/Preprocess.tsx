@@ -12,8 +12,11 @@ import {
 } from '../../../api/client'
 import ImageGrid, { applySelection } from '../../../components/ImageGrid'
 import ImagePreviewModal from '../../../components/ImagePreviewModal'
+import PreprocessJobStrip from '../../../components/preprocess/PreprocessJobStrip'
+import PreprocessToolsBar from '../../../components/preprocess/PreprocessToolsBar'
 import StepShell from '../../../components/StepShell'
-import { useDialog } from '../../../components/Dialog'
+import BarHistogram from '../../../components/BarHistogram'
+import { PX_BINS, pxBinFor, computePixelHist, type PxBinId } from '../../../lib/pixelBins'
 import { useToast } from '../../../components/Toast'
 import { useEventStream } from '../../../lib/useEventStream'
 
@@ -26,7 +29,7 @@ interface Ctx {
 interface Status {
   job: Job | null
   log_tail: string
-  summary: { download_count: number; processed_count: number; pending_count: number }
+  summary: { image_count: number }
 }
 
 interface FilesView {
@@ -44,17 +47,17 @@ interface ImageRow {
   status: 'pending' | 'processed'
   processed?: PreprocessedItem  // status=processed 时有
   size: number
+  /** 实际像素尺寸（pending 取 download/，processed 取 preprocess/）。filter 用。 */
+  w: number | null
+  h: number | null
+  /** 源文件 mtime — 当 thumb cache-buster 用。in-place 覆盖（同名裁剪 / 同名再放大）
+   *  后 URL 不带这个 → 浏览器 memory image cache 会继续展示旧 decoded 像素。 */
+  mtime: number
 }
 
-type FilterMode = 'all' | 'pending' | 'processed'
-
-const STATUS_COLOR: Record<Job['status'], string> = {
-  pending: 'badge badge-neutral',
-  running: 'badge badge-warn',
-  done: 'badge badge-ok',
-  failed: 'badge badge-err',
-  canceled: 'badge badge-neutral',
-}
+/** Pixel-area histogram bins — 共享于 sidebar histogram + grid filter chips +
+ *  Overview 详情 tab。定义/逻辑移到 lib/pixelBins.ts。 */
+type FilterMode = 'all' | PxBinId
 
 const FALLBACK_MODEL = '4x-AnimeSharp'
 const TILE_OPTIONS = [128, 192, 256, 384, 512] as const
@@ -74,7 +77,6 @@ export default function PreprocessPage() {
   const { t } = useTranslation()
   const { project, reload } = useOutletContext<Ctx>()
   const { toast } = useToast()
-  const { confirm } = useDialog()
 
   const [files, setFiles] = useState<FilesView | null>(null)
   const [status, setStatus] = useState<Status | null>(null)
@@ -114,7 +116,10 @@ export default function PreprocessPage() {
     try {
       const r = await api.getPreprocessStatus(project.id)
       setStatus(r)
-      setLogs(r.log_tail ? r.log_tail.split('\n') : [])
+      // Logs are ephemeral per-session — don't hydrate from log_tail. After
+      // refresh the user only sees a fresh, empty log; SSE appends as the
+      // current job emits. Matches the crop tool's behavior so the two pages
+      // are consistent.
     } catch {
       /* ignore */
     }
@@ -171,11 +176,7 @@ export default function PreprocessPage() {
 
   const job = status?.job ?? null
   const isLive = job?.status === 'running' || job?.status === 'pending'
-  const summary = files?.summary ?? status?.summary ?? {
-    download_count: 0,
-    processed_count: 0,
-    pending_count: 0,
-  }
+  const summary = files?.summary ?? status?.summary ?? { image_count: 0 }
   const modelReady = !!upscaler?.exists
 
   // ADR 0004：合并 pending + processed 成单一带状态的列表。
@@ -186,6 +187,8 @@ export default function PreprocessPage() {
       out.push({
         name: it.name, productName: `${fileStem(it.name)}.png`,
         status: 'pending', size: it.size,
+        w: it.w, h: it.h,
+        mtime: it.mtime,
       })
     }
     for (const p of files.processed) {
@@ -193,44 +196,85 @@ export default function PreprocessPage() {
       out.push({
         name: downloadName, productName: p.name,
         status: 'processed', processed: p, size: p.size,
+        w: p.w, h: p.h,
+        mtime: p.mtime,
       })
     }
     out.sort((a, b) => a.name.localeCompare(b.name))
     return out
   }, [files])
 
+  // Per-bin counts — drives both filter chip labels and the "hide empty bins"
+  // logic so users only see chips for bins they actually have images in.
+  const binCounts = useMemo(() => {
+    const m = new Map<PxBinId, number>()
+    for (const r of rows) {
+      const id = pxBinFor(r.w, r.h)
+      if (id) m.set(id, (m.get(id) ?? 0) + 1)
+    }
+    return m
+  }, [rows])
+
   const visibleRows = useMemo(
-    () => rows.filter((r) => filter === 'all' || r.status === filter),
+    () =>
+      rows.filter((r) => {
+        if (filter === 'all') return true
+        return pxBinFor(r.w, r.h) === filter
+      }),
     [rows, filter],
   )
-  const visibleNames = useMemo(() => visibleRows.map((r) => r.name), [visibleRows])
+  // visibleNames must match gridItems' unique keys (see gridItems below) so
+  // shift-range selection stays consistent — multi-crop fan-out produces
+  // processed rows sharing one download `name`, productName disambiguates.
+  const visibleNames = useMemo(
+    () =>
+      visibleRows.map((r) =>
+        r.status === 'processed' ? r.productName : r.name,
+      ),
+    [visibleRows],
+  )
 
   const gridItems = useMemo(
     () =>
       visibleRows.map((r) => ({
-        name: r.name,
-        thumbUrl: api.projectThumbUrl(project.id, r.name),
-        meta:
-          r.status === 'processed'
-            ? `✓ ${r.processed?.action ?? 'upscale'}`
-            : t('preprocess.statusPending'),
+        // Grid key — must be unique per row. Multi-crop fan-out produces
+        // multiple processed rows that share the same download `name`; use
+        // productName (= preprocess filename, including _c0/_c1 suffixes) to
+        // disambiguate. Pending rows have unique download names.
+        name: r.status === 'processed' ? r.productName : r.name,
+        // For processed rows, address by preprocess product name (handles
+        // multi-crop fan-out where multiple products share one origin). For
+        // pending rows, still address by download name.
+        thumbUrl: r.status === 'processed'
+          ? api.projectThumbUrl(project.id, r.productName, 'preprocess', 256, r.mtime)
+          : api.projectThumbUrl(project.id, r.name, 'download', 256, r.mtime),
+        // ADR 0004 Addendum 1 §「Stage 不强制时序」：grid 不分"未处理 / 已处理"。
+        // 只在派生路径标 action 给用户看上次处理留下的痕迹（resize / upscale
+        // / crop 等），原图路径不挂角标 — 那只是"当前态从 download 读"，不是
+        // 一种待办状态。
+        meta: r.status === 'processed' ? (r.processed?.action ?? undefined) : undefined,
       })),
-    [visibleRows, project.id, t],
+    [visibleRows, project.id],
   )
 
-  const { selPending, selProcessed } = useMemo(() => {
-    const byName = new Map(rows.map((r) => [r.name, r]))
-    let p = 0, q = 0
-    const pNames: string[] = []
-    const qProductNames: string[] = []
-    for (const n of sel) {
-      const r = byName.get(n)
+  // grid key（= productName / r.name，跟 gridItems 一致）→ resolve_targets 接收的
+  // 后端名（processed 走 productName / pending 走 r.name 都是 ADR-0004 selected
+  // mode selectable 集合的元素）。这俩在当前实现下等值，但保留这层映射方便未来
+  // grid key 跟后端名分流时只动 byKey。
+  const selectedTargets = useMemo(() => {
+    const byKey = new Map(
+      rows.map((r) => [
+        r.status === 'processed' ? r.productName : r.name,
+        r,
+      ] as const),
+    )
+    const names: string[] = []
+    for (const k of sel) {
+      const r = byKey.get(k)
       if (!r) continue
-      if (r.status === 'pending') { p++; pNames.push(r.name) }
-      else { q++; qProductNames.push(r.productName) }
+      names.push(r.status === 'processed' ? r.productName : r.name)
     }
-    return { selPending: { count: p, names: pNames },
-             selProcessed: { count: q, productNames: qProductNames } }
+    return { count: names.length, names }
   }, [sel, rows])
 
   // ----- 操作 ---------------------------------------------------------------
@@ -309,27 +353,8 @@ export default function PreprocessPage() {
     }
   }
 
-  const restoreSelected = async () => {
-    if (selProcessed.count === 0) return
-    if (!(await confirm(
-      t('preprocess.confirmRestore', { n: selProcessed.count }),
-      { tone: 'danger', okText: t('preprocess.confirmRestoreOk') },
-    ))) return
-    try {
-      const r = await api.restorePreprocessFiles(project.id, selProcessed.productNames)
-      toast(
-        t('preprocess.restoredToast', { restored: r.restored.length }) +
-          (r.missing.length ? t('preprocess.restoredSkipped', { skipped: r.missing.length }) : ''),
-        'success',
-      )
-      setSel(new Set())
-      setSelAnchor(null)
-      await refreshFiles()
-      void reload()
-    } catch (e) {
-      toast(String(e), 'error')
-    }
-  }
+  // 撤销 (restore) 流程已迁移到「总览」tab (PreprocessOverview)，作为
+  // 跨工具统一入口，避免每个工具页都有自己的撤销按钮。
 
   return (
     <StepShell
@@ -341,6 +366,7 @@ export default function PreprocessPage() {
         <div className="grid gap-3 flex-1 min-h-0" style={{ gridTemplateColumns: '1fr 260px' }}>
           {/* 左栏 */}
           <div className="flex flex-col gap-2 min-h-0 min-w-0">
+            <PreprocessToolsBar current="upscale" projectId={project.id} />
             <OperationPanel
               tileSize={tileSize}
               setTileSize={setTileSize}
@@ -357,17 +383,22 @@ export default function PreprocessPage() {
               allUpscalers={allUpscalers}
               selectedModel={selectedModel}
               onSelectedModelChange={(label) => void changeSelectedModel(label)}
-              pendingCount={summary.pending_count}
-              pendingSelCount={selPending.count}
+              totalCount={rows.length}
+              selectedCount={selectedTargets.count}
               busy={busy || isLive}
               onStartAll={() => void startPreprocess('all')}
               onStartSelected={() =>
-                void startPreprocess('selected', selPending.names)
+                void startPreprocess('selected', selectedTargets.names)
               }
             />
 
-            {job && (
-              <JobStrip
+            {/* Show JobStrip only when there's a live job OR session has
+                accumulated logs. After a page refresh the historic job may
+                still be present in `status.job` but logs are reset (ephemeral
+                per session) — rendering an empty JobStrip for a stale
+                terminal job is just clutter. */}
+            {job && (isLive || logs.length > 0) && (
+              <PreprocessJobStrip
                 job={job}
                 logs={logs}
                 onCancel={isLive ? cancel : undefined}
@@ -383,10 +414,9 @@ export default function PreprocessPage() {
                 setSelAnchor(null)
                 setPreviewIdx(null)
               }}
+              binCounts={binCounts}
               items={gridItems}
               selected={sel}
-              selPendingCount={selPending.count}
-              selProcessedCount={selProcessed.count}
               onSelect={(name, e) => {
                 const r = applySelection(sel, name, e, visibleNames, selAnchor)
                 setSel(r.next)
@@ -401,18 +431,16 @@ export default function PreprocessPage() {
                 setSel(new Set())
                 setSelAnchor(null)
               }}
-              onRestore={() => void restoreSelected()}
-              filterMode={filter}
             />
           </div>
 
           {/* 右栏统计 */}
           <PreprocessSidebar
-            summary={summary}
             upscaler={upscaler}
             selectedModel={selectedModel}
             tileSize={tileSize}
             processed={files?.processed ?? []}
+            pending={files?.pending ?? []}
             targetEdge={targetEdge}
           />
         </div>
@@ -420,7 +448,9 @@ export default function PreprocessPage() {
 
       {previewIdx !== null && visibleRows[previewIdx] && (
         <ImagePreviewModal
-          src={api.projectThumbUrl(project.id, visibleRows[previewIdx].name, 'download', 1600)}
+          src={visibleRows[previewIdx].status === 'processed'
+            ? api.projectThumbUrl(project.id, visibleRows[previewIdx].productName, 'preprocess', 1600, visibleRows[previewIdx].mtime)
+            : api.projectThumbUrl(project.id, visibleRows[previewIdx].name, 'download', 1600, visibleRows[previewIdx].mtime)}
           caption={`${visibleRows[previewIdx].name} · ${
             visibleRows[previewIdx].status === 'processed' ? '✓ 已处理' : '⊘ 未处理'
           }`}
@@ -455,8 +485,8 @@ interface OperationPanelProps {
   allUpscalers: UpscalerVariant[]
   selectedModel: string
   onSelectedModelChange: (label: string) => void
-  pendingCount: number
-  pendingSelCount: number
+  totalCount: number
+  selectedCount: number
   busy: boolean
   onStartAll: () => void
   onStartSelected: () => void
@@ -478,8 +508,8 @@ function OperationPanel({
   allUpscalers,
   selectedModel,
   onSelectedModelChange,
-  pendingCount,
-  pendingSelCount,
+  totalCount,
+  selectedCount,
   busy,
   onStartAll,
   onStartSelected,
@@ -638,42 +668,27 @@ function OperationPanel({
 
         <button
           onClick={onStartSelected}
-          disabled={busy || !modelReady || pendingSelCount === 0}
+          disabled={busy || !modelReady || selectedCount === 0}
           className="btn btn-secondary btn-sm"
-          title={pendingSelCount === 0 ? t('preprocess.upscaleSelectedHint') : ''}
+          title={selectedCount === 0 ? t('preprocess.upscaleSelectedHint') : ''}
         >
-          {t('preprocess.upscaleSelected', { n: pendingSelCount })}
+          {t('preprocess.upscaleSelected', { n: selectedCount })}
         </button>
         <button
           onClick={onStartAll}
-          disabled={busy || !modelReady || pendingCount === 0}
+          disabled={busy || !modelReady || totalCount === 0}
           className="btn btn-primary btn-sm"
         >
-          {pendingCount > 0 ? t('preprocess.upscaleAll', { n: pendingCount }) : t('preprocess.noPending')}
+          {t('preprocess.upscaleAll', { n: totalCount })}
         </button>
       </div>
 
-      {/* 智能流水说明 + 未来 tabs 占位 */}
-      <div className="flex items-center gap-2 mt-1 text-xs text-fg-tertiary flex-wrap">
-        <span className="font-medium text-fg-secondary">{t('preprocess.stageLabel')}</span>
-        <span className="px-1.5 py-0.5 rounded bg-accent-soft text-accent text-xs font-medium">
-          {t('preprocess.stageUpscale')}
-        </span>
-        <span
-          className="px-1.5 py-0.5 rounded bg-overlay opacity-50 cursor-not-allowed"
-          title={t('preprocess.stageCropTitle')}
-        >{t('preprocess.stageCrop')}</span>
-        <span
-          className="px-1.5 py-0.5 rounded bg-overlay opacity-50 cursor-not-allowed"
-          title={t('preprocess.stageInpaintTitle')}
-        >{t('preprocess.stageInpaint')}</span>
-        <span className="flex-1" />
-        {targetEdge !== null && (
-          <span title={t('preprocess.smartHint')}>
-            {t('preprocess.smartHint')}
-          </span>
-        )}
-      </div>
+      {/* 智能流水提示（tools 切换已移到页面顶部 PreprocessToolsBar） */}
+      {targetEdge !== null && (
+        <div className="flex items-center gap-2 mt-1 text-xs text-fg-tertiary">
+          <span title={t('preprocess.smartHint')}>{t('preprocess.smartHint')}</span>
+        </div>
+      )}
     </section>
   )
 }
@@ -686,32 +701,32 @@ function ImagesPanel({
   summary,
   filter,
   setFilter,
+  binCounts,
   items,
   selected,
-  selPendingCount,
-  selProcessedCount,
   onSelect,
   onPreview,
   onSelectAll,
   onClear,
-  onRestore,
-  filterMode,
 }: {
   summary: Status['summary']
   filter: FilterMode
   setFilter: (f: FilterMode) => void
+  binCounts: Map<PxBinId, number>
   items: { name: string; thumbUrl: string; meta?: string }[]
   selected: Set<string>
-  selPendingCount: number
-  selProcessedCount: number
   onSelect: (name: string, e: React.MouseEvent) => void
   onPreview: (name: string) => void
   onSelectAll: () => void
   onClear: () => void
-  onRestore: () => void
-  filterMode: FilterMode
 }) {
   const { t } = useTranslation()
+  // Pixel-bin chips replace the old 全部 / 未处理 / 已处理 filter.
+  // 「未处理 / 已处理」was a workspace concept that doesn't apply to upscale —
+  // unlike crop, upscale has no session state to remember; the meaningful
+  // axis users want to filter by is resolution (which images need upscaling
+  // and which are already large enough). Pixel bins double as a visual link
+  // to the sidebar histogram so users see the same buckets on both sides.
   const chip = (key: FilterMode, label: string, count: number) => (
     <button
       onClick={() => setFilter(key)}
@@ -725,27 +740,24 @@ function ImagesPanel({
       {label} {count}
     </button>
   )
-
-  const emptyHint =
-    filterMode === 'pending'
-      ? t('preprocess.emptyPending')
-      : filterMode === 'processed'
-        ? t('preprocess.emptyProcessed')
-        : t('preprocess.emptyAll')
+  // Only show bin chips that have at least one image — keeps the chip row
+  // tight on small datasets (a 10-image set isn't going to occupy all 6 bins).
+  const nonEmptyBins = PX_BINS.filter((b) => (binCounts.get(b.id) ?? 0) > 0)
 
   return (
     <section className="flex flex-col flex-1 min-h-0 rounded-md border border-subtle bg-surface overflow-hidden">
       <header className="flex items-center gap-2 shrink-0 px-2.5 py-1.5 border-b border-subtle text-sm flex-wrap">
         <h3 className="font-semibold">{t('preprocess.imagesTitle')}</h3>
-        <span className="text-fg-tertiary">{t('preprocess.totalCount', { n: summary.download_count })}</span>
+        <span className="text-fg-tertiary">{t('preprocess.totalCount', { n: summary.image_count })}</span>
         {selected.size > 0 && (
           <span className="text-accent">{t('preprocess.selectedCount', { n: selected.size })}</span>
         )}
         <span className="mx-1 text-dim">·</span>
-        <div className="flex items-center gap-1">
-          {chip('all',       t('preprocess.filterAll'),       summary.download_count)}
-          {chip('pending',   t('preprocess.filterPending'),   summary.pending_count)}
-          {chip('processed', t('preprocess.filterProcessed'), summary.processed_count)}
+        <div className="flex items-center gap-1 flex-wrap">
+          {chip('all', t('preprocess.filterAll'), summary.image_count)}
+          {nonEmptyBins.map((b) =>
+            chip(b.id, b.label, binCounts.get(b.id) ?? 0),
+          )}
         </div>
         <span className="flex-1" />
         <button
@@ -758,20 +770,7 @@ function ImagesPanel({
           disabled={selected.size === 0}
           className="btn btn-ghost btn-sm"
         >{t('common.deselect')}</button>
-        <button
-          onClick={onRestore}
-          disabled={selProcessedCount === 0}
-          className="btn btn-sm bg-err-soft text-err"
-          title={selProcessedCount === 0
-            ? t('preprocess.restoreHintDisabled')
-            : t('preprocess.restoreHint', { n: selProcessedCount })}
-        >{t('preprocess.restoreBtn', { n: selProcessedCount })}</button>
       </header>
-      {selected.size > 0 && selPendingCount > 0 && selProcessedCount > 0 && (
-        <div className="px-2.5 py-1 bg-warn-soft text-warn text-xs">
-          {t('preprocess.mixedSelectionWarning', { pending: selPendingCount, processed: selProcessedCount })}
-        </div>
-      )}
       <div className="flex-1 min-h-0 overflow-y-auto p-2">
         <ImageGrid
           items={items}
@@ -781,60 +780,10 @@ function ImagesPanel({
           onPreview={onPreview}
           clickMode="activate"
           ariaLabel="preprocess-grid"
-          emptyHint={emptyHint}
+          emptyHint={t('preprocess.emptyForBin')}
         />
       </div>
     </section>
-  )
-}
-
-// ---------------------------------------------------------------------------
-// JobStrip
-// ---------------------------------------------------------------------------
-
-function JobStrip({
-  job,
-  logs,
-  onCancel,
-}: {
-  job: Job
-  logs: string[]
-  onCancel?: () => void
-}) {
-  const { t } = useTranslation()
-  const elapsed =
-    job.started_at && (job.finished_at ?? Date.now() / 1000) - job.started_at
-  const isLive = job.status === 'running' || job.status === 'pending'
-  const lastLine = logs[logs.length - 1] ?? ''
-  return (
-    <details
-      open={isLive}
-      className="group rounded-md border border-subtle bg-surface overflow-hidden shrink-0"
-    >
-      <summary className="cursor-pointer flex items-center gap-2 list-none px-2.5 py-1.5 text-sm select-none">
-        <span className="inline-block transition-transform group-open:rotate-90 text-fg-tertiary w-3">▸</span>
-        <span className={STATUS_COLOR[job.status]}>{job.status}</span>
-        <span className="mono text-fg-secondary">job #{job.id}</span>
-        {elapsed && elapsed > 0 && (
-          <span className="text-fg-tertiary">· {Math.round(elapsed)}s</span>
-        )}
-        <span className="mono truncate flex-1 min-w-0 text-fg-secondary text-xs">
-          {lastLine}
-        </span>
-        {isLive && onCancel && (
-          <button
-            onClick={(e) => {
-              e.preventDefault()
-              onCancel()
-            }}
-            className="btn btn-ghost btn-sm text-err"
-          >{t('common.cancel')}</button>
-        )}
-      </summary>
-      <pre className="px-3 py-2 text-xs font-mono text-fg-secondary bg-sunken max-h-[224px] overflow-auto whitespace-pre-wrap border-t border-subtle m-0">
-        {logs.length === 0 ? t('jobProgress.waitingLogs') : logs.slice(-1000).join('\n')}
-      </pre>
-    </details>
   )
 }
 
@@ -843,34 +792,30 @@ function JobStrip({
 // ---------------------------------------------------------------------------
 
 function PreprocessSidebar({
-  summary,
   upscaler,
   selectedModel,
   tileSize,
   processed,
+  pending,
   targetEdge,
 }: {
-  summary: Status['summary']
   upscaler: UpscalerVariant | null
   selectedModel: string
   tileSize: number
   processed: PreprocessedItem[]
+  pending: PreprocessPendingItem[]
   targetEdge: number | null
 }) {
   const { t } = useTranslation()
-  const { download_count, processed_count, pending_count } = summary
-  const pct = download_count > 0 ? Math.round((processed_count / download_count) * 100) : 0
   const estVramMB = Math.round((tileSize * tileSize * 16 * 2 * 7) / (1024 * 1024))
 
-  const actionStats = useMemo(() => {
-    const stats = { resize: 0, upscale: 0, 'upscale+resize': 0, unknown: 0 }
-    for (const it of processed) {
-      const a = it.action ?? 'unknown'
-      if (a in stats) (stats as Record<string, number>)[a]++
-      else stats.unknown++
-    }
-    return stats
-  }, [processed])
+  // Histogram counts BOTH processed and pending — global view of the
+  // dataset's resolution distribution. 按 ADR 0004 这俩只是 grid 来源不同
+  // （preprocess/ 派生 vs download 原图），全部图就是 grid 上看到的全部图。
+  const pixelHist = useMemo(
+    () => computePixelHist([...processed, ...pending]),
+    [processed, pending],
+  )
 
   const processedBytes = useMemo(
     () => processed.reduce((s, it) => s + (it.size ?? 0), 0),
@@ -886,45 +831,17 @@ function PreprocessSidebar({
 
   return (
     <div className="flex flex-col gap-3 min-w-0">
-      <div className="rounded-md border border-subtle bg-surface px-3 py-2.5">
-        <h3 className="caption flex items-center gap-1.5">
-          <span className="inline-block w-1.5 h-1.5 rounded-full shrink-0 bg-accent" />
-          {t('preprocess.sidebarProgress')}
-        </h3>
-        <StatRow label={t('preprocess.sidebarSource')} value={t('preprocess.sidebarNImages', { n: download_count })} />
-        <StatRow label={t('preprocess.sidebarProcessed')} value={t('preprocess.sidebarNImages', { n: processed_count })} accent="ok" />
-        <StatRow label={t('preprocess.sidebarPending')} value={t('preprocess.sidebarNImages', { n: pending_count })} accent={pending_count > 0 ? 'warn' : undefined} />
-        <div className="mt-2 h-1.5 rounded bg-sunken overflow-hidden">
-          <div
-            className="h-full bg-accent rounded transition-[width] duration-300 ease-out"
-            style={{ width: `${pct}%` }}
-          />
-        </div>
-        <p className="text-xs text-fg-tertiary mt-1 text-right">{pct}%</p>
-      </div>
-
-      {processed.length > 0 && (
+      {/* 像素分布 — 用户最直接关心的"图够不够大"信息，置顶；按总像素面积
+          分桶映射到常见 LoRA 训练分辨率，跟 grid 上的 chip 一一对应。 */}
+      {pixelHist.length > 0 && (
         <div className="rounded-md border border-subtle bg-surface px-3 py-2.5">
           <h3 className="caption flex items-center gap-1.5">
             <span className="inline-block w-1.5 h-1.5 rounded-full shrink-0 bg-accent" />
-            {t('preprocess.sidebarActionDist')}
+            {t('preprocess.sidebarPxDist')}
           </h3>
-          {actionStats.resize > 0 && (
-            <StatRow label={t('preprocess.actionResize')} value={t('preprocess.sidebarNImages', { n: actionStats.resize })} accent="ok" />
-          )}
-          {actionStats['upscale+resize'] > 0 && (
-            <StatRow label={t('preprocess.actionUpscaleResize')} value={t('preprocess.sidebarNImages', { n: actionStats['upscale+resize'] })} accent="warn" />
-          )}
-          {actionStats.upscale > 0 && (
-            <StatRow label={t('preprocess.actionUpscale')} value={t('preprocess.sidebarNImages', { n: actionStats.upscale })} />
-          )}
-          {actionStats.unknown > 0 && (
-            <StatRow label={t('preprocess.actionUnknown')} value={t('preprocess.sidebarNImages', { n: actionStats.unknown })} />
-          )}
-          <p className="text-[11px] text-fg-tertiary mt-1.5 leading-snug">
-            {t('preprocess.actionNote')}
-            {targetEdge === null && t('preprocess.actionNoteOff')}
-          </p>
+          <div className="mt-1.5">
+            <BarHistogram bins={pixelHist.map((b) => ({ key: b.id, label: b.label, n: b.n }))} />
+          </div>
         </div>
       )}
 

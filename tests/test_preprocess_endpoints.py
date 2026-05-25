@@ -86,10 +86,7 @@ def test_start_preprocess_creates_pending_job(client: TestClient) -> None:
     job = resp.json()
     assert job["kind"] == "preprocess"
     assert job["status"] == "pending"
-
-    # stage 推到 preprocessing
-    p2 = client.get(f"/api/projects/{p['id']}").json()
-    assert p2["stage"] == "preprocessing"
+    # ADR-0007 PR-5: project 无 stage；preprocess 状态由 job 派生
 
 
 def test_start_preprocess_rejects_unknown_mode(client: TestClient) -> None:
@@ -150,9 +147,7 @@ def test_status_no_job_returns_empty(client: TestClient) -> None:
     body = resp.json()
     assert body["job"] is None
     assert body["log_tail"] == ""
-    assert body["summary"] == {
-        "download_count": 0, "processed_count": 0, "pending_count": 0,
-    }
+    assert body["summary"] == {"image_count": 0}
 
 
 def test_list_files_returns_processed_and_pending(client: TestClient) -> None:
@@ -169,7 +164,7 @@ def test_list_files_returns_processed_and_pending(client: TestClient) -> None:
     body = resp.json()
     assert {it["name"] for it in body["processed"]} == {"a.png"}
     assert {it["name"] for it in body["pending"]} == {"b.png"}
-    assert body["summary"]["pending_count"] == 1
+    assert body["summary"]["image_count"] == 2
 
 
 # ---------------------------------------------------------------------------
@@ -198,6 +193,82 @@ def test_restore_preprocess_rejects_traversal(client: TestClient) -> None:
         json={"names": ["../etc/passwd"]},
     )
     assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# crop 端点
+# ---------------------------------------------------------------------------
+
+
+def test_start_crop_creates_pending_job(client: TestClient) -> None:
+    """POST /preprocess/crop 返回 pending job，params.stage=crop。"""
+    p = _make_project(client)
+    _seed_download_image(p, "a.png")
+    resp = client.post(
+        f"/api/projects/{p['id']}/preprocess/crop",
+        json={"crops": {"a.png": [{"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}]}},
+    )
+    assert resp.status_code == 200, resp.text
+    job = resp.json()
+    assert job["kind"] == "preprocess"
+    assert job["status"] == "pending"
+    assert job["params_decoded"]["stage"] == "crop"
+    # ADR-0007 PR-5: project 无 stage（params.stage="crop" 是 job 内部字段，无关）
+
+
+def test_start_crop_rejects_empty(client: TestClient) -> None:
+    p = _make_project(client)
+    resp = client.post(
+        f"/api/projects/{p['id']}/preprocess/crop", json={"crops": {}}
+    )
+    assert resp.status_code == 400
+
+
+def test_start_crop_rejects_unknown_project(client: TestClient) -> None:
+    resp = client.post(
+        "/api/projects/9999/preprocess/crop",
+        json={"crops": {"a.png": [{"x": 0, "y": 0, "w": 0.5, "h": 0.5}]}},
+    )
+    assert resp.status_code == 404
+
+
+def test_start_crop_rejects_traversal(client: TestClient) -> None:
+    p = _make_project(client)
+    resp = client.post(
+        f"/api/projects/{p['id']}/preprocess/crop",
+        json={
+            "crops": {"../etc/passwd": [{"x": 0, "y": 0, "w": 0.5, "h": 0.5}]}
+        },
+    )
+    assert resp.status_code == 400
+
+
+def test_crop_workspace_returns_dimensions(client: TestClient) -> None:
+    """workspace endpoint 返回 download + preprocess 的合并列表 + 每图像素尺寸。"""
+    from PIL import Image
+    p = _make_project(client)
+    pdir = projects.project_dir(p["id"], p["slug"])
+    (pdir / "download").mkdir(parents=True, exist_ok=True)
+    (pdir / "preprocess").mkdir(parents=True, exist_ok=True)
+    # download/A.png 未处理；download/B.jpg + preprocess/B.png 已处理
+    Image.new("RGB", (320, 240), (255, 0, 0)).save(pdir / "download" / "A.png")
+    Image.new("RGB", (200, 150), (0, 255, 0)).save(pdir / "download" / "B.jpg")
+    Image.new("RGB", (800, 600), (0, 0, 255)).save(pdir / "preprocess" / "B.png")
+    preprocess_manifest.add_processed(pdir, "B.png", {"source": "B.jpg"})
+
+    resp = client.get(f"/api/projects/{p['id']}/preprocess/crop/workspace")
+    assert resp.status_code == 200, resp.text
+    images = {it["name"]: it for it in resp.json()["images"]}
+    assert set(images.keys()) == {"A.png", "B.png"}
+    assert images["A.png"]["w"] == 320
+    assert images["A.png"]["h"] == 240
+    assert images["A.png"]["processed"] is False
+    assert images["A.png"]["source"] == "A.png"
+    # B.png 是 preprocess 产物，origin 是 download/B.jpg
+    assert images["B.png"]["w"] == 800
+    assert images["B.png"]["h"] == 600
+    assert images["B.png"]["processed"] is True
+    assert images["B.png"]["source"] == "B.jpg"
 
 
 # ---------------------------------------------------------------------------
@@ -236,3 +307,24 @@ def test_thumb_resolves_to_preprocess_when_processed(client: TestClient) -> None
     # 前端按原 download 名 a.jpg 请求 —— 后端应 resolve 到 preprocess/a.png
     resp = client.get(f"/api/projects/{p['id']}/thumb?name=a.jpg&size=8")
     assert resp.status_code == 200
+
+
+def test_thumb_handles_multi_crop_derivative_name_via_download_bucket(client: TestClient) -> None:
+    """筛选页 list_download 展开 multi-crop 派生（X_c0.png）后，缩略图请求经
+    bucket=download 走过来。原 resolve_origin 按 origin 找不到（origin 是
+    X.png），endpoint 兜底到 preprocess/{name} 直读。"""
+    from PIL import Image
+    p = _make_project(client)
+    pdir = projects.project_dir(p["id"], p["slug"])
+    (pdir / "preprocess").mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (8, 8), (0, 0, 255)).save(pdir / "preprocess" / "X_c0.png")
+    preprocess_manifest.replace_with_crops(
+        pdir,
+        source_name="X.png",
+        outputs=[
+            {"name": "X_c0.png", "origin": "X.png", "size": 1, "mtime": 1.0},
+        ],
+    )
+    # 用 bucket=download 默认 + 派生名直接请求；endpoint 应兜底 preprocess
+    resp = client.get(f"/api/projects/{p['id']}/thumb?name=X_c0.png&size=8")
+    assert resp.status_code == 200, resp.text

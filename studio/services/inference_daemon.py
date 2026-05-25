@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import base64
+import collections
 import json
 import logging
 import os
@@ -91,6 +92,11 @@ class InferenceDaemon:
         self._req_seq = 0
         # 全局 listener（用于 daemon 状态变化：loaded / unloaded / 进程崩溃）
         self._global_listeners: list[EventCallback] = []
+        # daemon stderr ring buffer + 增量 listener（UI 抽屉用，跨多次 start/stop 持续）
+        self._log_lock = threading.Lock()
+        self._log_buffer: collections.deque[dict[str, Any]] = collections.deque(maxlen=2000)
+        self._log_seq = 0
+        self._log_listeners: list[EventCallback] = []
 
     # ---------------------------------------------------------------- 状态
     @property
@@ -139,6 +145,7 @@ class InferenceDaemon:
 
         cmd = [sys.executable, str(self._script)]
         logger.info("spawning inference daemon: %s", " ".join(cmd))
+        self._append_log(f"$ {' '.join(cmd)}")
 
         try:
             proc = subprocess.Popen(
@@ -262,6 +269,28 @@ class InferenceDaemon:
             raise RuntimeError(f"daemon write failed: {e}") from e
         return req_id
 
+    def cancel_active_task(self, task_id: int) -> bool:
+        """请求取消当前 generate task；daemon 保持常驻，模型缓存不卸载。"""
+        with self._lock:
+            active = self._active
+            if self._state != STATE_BUSY or active is None or active.task_id != task_id:
+                return False
+            assert self._proc is not None and self._proc.stdin is not None
+            stdin = self._proc.stdin
+            req_id = active.request_id
+
+        try:
+            stdin.write(json.dumps({
+                "id": f"cancel-{task_id}",
+                "action": "cancel",
+                "target_id": req_id,
+            }) + "\n")
+            stdin.flush()
+        except Exception:
+            logger.exception("failed to send cancel")
+            return False
+        return True
+
     def request_unload(self) -> None:
         """通知 daemon 卸载模型（释放 VRAM）。daemon 处理完会推 unloaded 事件。
 
@@ -303,15 +332,56 @@ class InferenceDaemon:
             self._handle_proc_exit(proc)
 
     def _read_stderr_loop(self, proc: subprocess.Popen) -> None:
-        """daemon stderr → 本进程 logger.info（保留原日志层级前缀）。"""
+        """daemon stderr → ring buffer + log listeners。
+
+        不打 terminal —— 通过 UI 抽屉查看（/api/generate/daemon/logs 拉历史，
+        daemon_log_line SSE 推增量）。terminal 安静、需要时再开抽屉。
+        """
         assert proc.stderr is not None
         try:
             for raw_line in proc.stderr:
                 line = raw_line.rstrip()
                 if line:
-                    logger.info("[daemon] %s", line)
+                    self._append_log(line)
         except Exception:
             logger.exception("daemon stderr reader crashed")
+
+    # ----------------------------------------------------------- log buffer
+    def _append_log(self, line: str) -> None:
+        """收 daemon stderr 一行 → ring buffer + 推给 listeners（线程安全）。"""
+        entry = {"ts": time.time(), "line": line}
+        with self._log_lock:
+            self._log_buffer.append(entry)
+            seq = self._log_seq
+            self._log_seq += 1
+            listeners = list(self._log_listeners)
+        entry_out = {**entry, "seq": seq}
+        for cb in listeners:
+            try:
+                cb(entry_out)
+            except Exception:
+                logger.exception("daemon log listener failed")
+
+    def read_logs(self, since_seq: int = 0, limit: int = 2000) -> dict[str, Any]:
+        """返回 ring buffer 历史。since_seq>0 时只返新于该 seq 的行（增量）。"""
+        with self._log_lock:
+            # buffer 里存的没带 seq，按 buffer 末尾 = _log_seq - 1 反推
+            total = self._log_seq
+            start_seq = max(0, total - len(self._log_buffer))
+            entries = []
+            for i, item in enumerate(self._log_buffer):
+                s = start_seq + i
+                if s < since_seq:
+                    continue
+                entries.append({**item, "seq": s})
+        if limit and len(entries) > limit:
+            entries = entries[-limit:]
+        return {"entries": entries, "next_seq": total}
+
+    def add_log_listener(self, cb: EventCallback) -> None:
+        """注册 daemon log 增量 listener；cb(entry) 收到 {ts, line, seq}。"""
+        with self._log_lock:
+            self._log_listeners.append(cb)
 
     def _handle_event(self, msg: dict[str, Any]) -> None:
         """分发协议消息。task 事件路由到 _active.on_event；全局事件给 listeners。"""
@@ -357,9 +427,9 @@ class InferenceDaemon:
                 logger.exception("cache_image failed for %s", filename)
             forward_msg = {k: v for k, v in msg.items() if k != "image_b64"}
 
-        # done/error 先切状态，再回调 —— 让 callback 内查询 is_busy/state 时
+        # done/error/canceled 先切状态，再回调 —— 让 callback 内查询 is_busy/state 时
         # 看到准确的 IDLE 状态（commit 13 daemon_state_changed 依赖这个顺序）
-        if kind in ("done", "error"):
+        if kind in ("done", "error", "canceled"):
             with self._lock:
                 self._active = None
                 self._state = STATE_IDLE

@@ -396,7 +396,7 @@ export default function QueuePage() {
         </>
       }
     >
-      <div className="flex flex-col gap-2.5">
+      <div className="flex flex-col gap-2.5 flex-1 min-h-0 overflow-y-auto">
         {/* ADR §4.1 队列挂起 banner — 仅 held=true 时显示，sticky 顶部。 */}
         {holdState?.held && (
           <div
@@ -481,7 +481,7 @@ export default function QueuePage() {
                         <span>{task.config_name}</span>
                         {hasProject && (
                           <Link
-                            to={`/projects/${task.project_id}/v/${task.version_id}/train`}
+                            to={`/projects/${task.project_id}?version=${task.version_id}`}
                             onClick={(e) => e.stopPropagation()}
                             className="text-accent text-xs no-underline hover:underline shrink-0"
                           >

@@ -1,31 +1,13 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useNavigate } from 'react-router-dom'
-import { api, type ProjectStage, type ProjectSummary } from '../api/client'
+import { api, type BundleImportResult, type ProjectSummary } from '../api/client'
 import PageHeader from '../components/PageHeader'
-import StageBadge from '../components/StageBadge'
+import PathPicker from '../components/PathPicker'
+import VersionStatusBadge from '../components/VersionStatusBadge'
 import { useDialog } from '../components/Dialog'
 import { useToast } from '../components/Toast'
 import { useEventStream } from '../lib/useEventStream'
-
-function relativeTime(ts: number): string {
-  const diff = Date.now() / 1000 - ts
-  if (diff < 60) return '刚刚'
-  if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`
-  if (diff < 86400) return `${Math.floor(diff / 3600)} 小时前`
-  if (diff < 604800) return `${Math.floor(diff / 86400)} 天前`
-  return new Date(ts * 1000).toLocaleDateString('zh-CN')
-}
-
-// stage → step path for quick-open nav
-const STAGE_STEP: Partial<Record<ProjectStage, string>> = {
-  downloading:  'download',
-  curating:     'curate',
-  tagging:      'tag',
-  regularizing: 'reg',
-  configured:   'train',
-  training:     'train',
-}
 
 export default function ProjectsPage() {
   const { t } = useTranslation()
@@ -35,7 +17,8 @@ export default function ProjectsPage() {
   const [creating, setCreating] = useState(false)
   const [busy, setBusy] = useState(false)
   const [importing, setImporting] = useState(false)
-  const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const [showImportDialog, setShowImportDialog] = useState(false)
+  const [showImportPicker, setShowImportPicker] = useState(false)
   const navigate = useNavigate()
   const { toast } = useToast()
   const { confirm } = useDialog()
@@ -92,22 +75,40 @@ export default function ProjectsPage() {
     }
   }
 
-  const handleImportFile = async (file: File) => {
+  const finishBundleImport = (result: BundleImportResult) => {
+    const stats = result.stats
+    toast(
+      t('projects.importedBundle', {
+        title: result.project.title,
+        train_count: stats.train_image_count,
+        reg_count: stats.reg_image_count,
+        preset_count: stats.preset_count,
+      }),
+      'success',
+    )
+    navigate(`/projects/${result.project.id}`)
+  }
+
+  const runBundleImport = async (job: () => Promise<BundleImportResult>) => {
     setImporting(true)
     try {
-      const result = await api.importTrainProject(file)
-      const stats = result.stats
-      toast(
-        t('projects.imported', { title: result.project.title, image_count: stats.image_count, tagged_count: stats.tagged_count }),
-        'success',
-      )
-      navigate(`/projects/${result.project.id}`)
+      finishBundleImport(await job())
     } catch (e) {
       toast(t('projects.importFailed', { e }), 'error')
     } finally {
       setImporting(false)
-      if (fileInputRef.current) fileInputRef.current.value = ''
     }
+  }
+
+  const handleImportPath = async (path: string) => {
+    setShowImportPicker(false)
+    await runBundleImport(() => api.importBundleFromPath(path))
+  }
+
+  const handleImportUpload = async (file: File | null | undefined) => {
+    if (!file) return
+    setShowImportDialog(false)
+    await runBundleImport(() => api.importBundleUpload(file))
   }
 
   const openProject = (p: ProjectSummary) => {
@@ -121,21 +122,11 @@ export default function ProjectsPage() {
         subtitle={t('projects.description')}
         actions={
           <>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".zip,application/zip"
-              style={{ display: 'none' }}
-              onChange={(e) => {
-                const f = e.target.files?.[0]
-                if (f) void handleImportFile(f)
-              }}
-            />
             <button
               className="btn btn-secondary btn-sm"
-              onClick={() => fileInputRef.current?.click()}
+              onClick={() => setShowImportDialog(true)}
               disabled={importing}
-              title={importing ? t('projects.uploadingZip') : t('projects.importZipHint')}
+              title={importing ? t('projects.importing') : t('projects.importZipHint')}
             >
               {importing ? t('projects.importing') : t('projects.importZip')}
             </button>
@@ -169,7 +160,7 @@ export default function ProjectsPage() {
             <div className="text-sm">{t('projects.noProjectsHint')}</div>
           </div>
         ) : (
-          <div className="grid gap-4" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))' }}>
+          <div className="grid gap-4 auto-rows-fr" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))' }}>
             {items.map((p) => (
               <ProjectCard
                 key={p.id}
@@ -189,6 +180,90 @@ export default function ProjectsPage() {
           onSubmit={handleCreate}
         />
       )}
+
+      {showImportDialog && (
+        <BundleImportDialog
+          importing={importing}
+          onUpload={handleImportUpload}
+          onPickPath={() => {
+            setShowImportDialog(false)
+            setShowImportPicker(true)
+          }}
+          onCancel={() => setShowImportDialog(false)}
+        />
+      )}
+
+      {showImportPicker && (
+        <PathPicker
+          dirOnly={false}
+          onClose={() => setShowImportPicker(false)}
+          onPick={(path) => { void handleImportPath(path) }}
+        />
+      )}
+    </div>
+  )
+}
+
+function BundleImportDialog({
+  importing,
+  onUpload,
+  onPickPath,
+  onCancel,
+}: {
+  importing: boolean
+  onUpload: (file: File | null | undefined) => void
+  onPickPath: () => void
+  onCancel: () => void
+}) {
+  const { t } = useTranslation()
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      className="fixed inset-0 z-40 flex items-center justify-center bg-black/50"
+      onMouseDown={(e) => { if (e.target === e.currentTarget) onCancel() }}
+    >
+      <div className="bg-elevated border border-dim rounded-lg w-[90%] max-w-[560px] p-6 flex flex-col gap-4 shadow-xl">
+        <div>
+          <h2 className="m-0 text-lg font-semibold text-fg-primary">
+            {t('projects.importBundleTitle')}
+          </h2>
+          <p className="mt-1 mb-0 text-sm text-fg-secondary">
+            {t('projects.importBundleHint')}
+          </p>
+        </div>
+
+        <div className="grid gap-3 md:grid-cols-2">
+          <label className={`card p-4 cursor-pointer ${importing ? 'opacity-60 pointer-events-none' : ''}`}>
+            <div className="font-medium text-fg-primary mb-1">{t('projects.importUpload')}</div>
+            <div className="text-xs text-fg-tertiary mb-3">{t('projects.importUploadHint')}</div>
+            <input
+              type="file"
+              accept=".zip,application/zip"
+              className="text-xs text-fg-secondary w-full"
+              disabled={importing}
+              onChange={(e) => onUpload(e.target.files?.[0])}
+            />
+          </label>
+
+          <button
+            type="button"
+            className="card p-4 text-left cursor-pointer hover:border-dim disabled:opacity-60"
+            disabled={importing}
+            onClick={onPickPath}
+          >
+            <div className="font-medium text-fg-primary mb-1">{t('projects.importPath')}</div>
+            <div className="text-xs text-fg-tertiary">{t('projects.importPathHint')}</div>
+          </button>
+        </div>
+
+        <div className="flex justify-end">
+          <button type="button" className="btn btn-secondary" onClick={onCancel} disabled={importing}>
+            {t('common.cancel')}
+          </button>
+        </div>
+      </div>
     </div>
   )
 }
@@ -205,8 +280,6 @@ function ProjectCard({
   const { t } = useTranslation()
   const [hovered, setHovered] = useState(false)
 
-  const stepPath = p.stage in STAGE_STEP ? STAGE_STEP[p.stage] : undefined
-
   return (
     <button
       onClick={onClick}
@@ -215,6 +288,7 @@ function ProjectCard({
       className={`p-[18px] text-left rounded-lg cursor-pointer flex flex-col gap-3.5 relative w-full ${hovered ? 'border-dim shadow-sm bg-surface' : 'border border-subtle bg-surface'}`}
       style={{ transition: 'border-color 0.15s, box-shadow 0.15s' }}
     >
+      {/* ADR-0007 §11.8-E: 右上角 = active version status；去 stage badge / 时间 / 产物 */}
       <div className="flex justify-between items-start gap-2">
         <div className="flex-1 min-w-0">
           <div className="text-md font-semibold overflow-hidden text-ellipsis whitespace-nowrap" style={{ letterSpacing: '-0.01em' }}>
@@ -224,7 +298,7 @@ function ProjectCard({
             {p.slug}
           </div>
         </div>
-        <StageBadge stage={p.stage} />
+        <VersionStatusBadge status={p.active_version_status} />
       </div>
 
       {p.note && (
@@ -234,16 +308,13 @@ function ProjectCard({
       )}
 
       <div className="flex gap-4 text-sm text-fg-secondary mt-auto items-center">
-        <StatPair label={t('nav.download')} value={p.download_image_count ?? 0} />
-        <span className="flex-1" />
-        {stepPath && (
-          <span className="text-xs text-accent font-mono">
-            {t('projects.continueBtn')}
-          </span>
+        {/* active version 名（直接版本，无前缀文本） */}
+        {p.active_version_label ? (
+          <span className="font-mono text-fg-primary">{p.active_version_label}</span>
+        ) : (
+          <span className="text-fg-tertiary italic text-xs">{t('projects.noActiveVersion')}</span>
         )}
-        <span className="text-fg-tertiary text-xs">
-          {relativeTime(p.updated_at)}
-        </span>
+        <span className="flex-1" />
         <button
           onClick={onDelete}
           className="bg-transparent border-none px-1.5 py-0.5 rounded-sm text-fg-tertiary text-xs cursor-pointer"
@@ -253,15 +324,6 @@ function ProjectCard({
         </button>
       </div>
     </button>
-  )
-}
-
-function StatPair({ label, value }: { label: string; value: number }) {
-  return (
-    <span className="inline-flex gap-1.5 items-baseline">
-      <span className="font-mono font-semibold text-fg-primary">{value}</span>
-      <span className="text-xs text-fg-tertiary uppercase tracking-wider">{label}</span>
-    </span>
   )
 }
 

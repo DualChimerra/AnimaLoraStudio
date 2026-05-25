@@ -55,7 +55,7 @@ def test_create_creates_directory_layout(isolated) -> None:
     assert (pdir / "preprocess").is_dir()  # 预处理阶段产物目录
     assert (pdir / "versions").is_dir()
     assert (pdir / "project.json").exists()
-    assert p["stage"] == "created"
+    # ADR-0007 PR-5: project 无 stage 字段（DB 列还在但会随 v9 destructive 删）
     assert p["note"] == "abc"
 
 
@@ -75,14 +75,6 @@ def test_stats_counts_download_and_preprocess(isolated) -> None:
     assert s["preprocess_image_count"] == 1
 
 
-def test_preprocessing_stage_is_valid(isolated) -> None:
-    """update_project 接受 stage='preprocessing'，介于 downloading 和 curating 之间。"""
-    with db.connection_for(isolated["db"]) as conn:
-        p = projects.create_project(conn, title="StageTest")
-        p2 = projects.update_project(conn, p["id"], stage="preprocessing")
-    assert p2["stage"] == "preprocessing"
-
-
 def test_create_rejects_empty_title(isolated) -> None:
     with db.connection_for(isolated["db"]) as conn:
         with pytest.raises(projects.ProjectError, match="title"):
@@ -90,20 +82,13 @@ def test_create_rejects_empty_title(isolated) -> None:
 
 
 def test_update_writes_project_json(isolated) -> None:
+    """ADR-0007 PR-5: stage 已删；只剩 note / title / active_version_id 可 PATCH。"""
     with db.connection_for(isolated["db"]) as conn:
         p = projects.create_project(conn, title="X")
-        projects.update_project(conn, p["id"], note="updated", stage="curating")
+        projects.update_project(conn, p["id"], note="updated")
     pdir = projects.project_dir(p["id"], p["slug"])
     text = (pdir / "project.json").read_text(encoding="utf-8")
     assert "updated" in text
-    assert "curating" in text
-
-
-def test_update_rejects_invalid_stage(isolated) -> None:
-    with db.connection_for(isolated["db"]) as conn:
-        p = projects.create_project(conn, title="X")
-        with pytest.raises(projects.ProjectError, match="stage"):
-            projects.update_project(conn, p["id"], stage="bogus")
 
 
 # ---------------------------------------------------------------------------

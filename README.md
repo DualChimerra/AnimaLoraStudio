@@ -1,6 +1,6 @@
 # AnimaLoraStudio
 
-[![中文](https://img.shields.io/badge/lang-%E4%B8%AD%E6%96%87-blue)](README.md) [![English](https://img.shields.io/badge/lang-English-lightgrey)](README.en.md) [![Version](https://img.shields.io/badge/version-0.9.1-blue)](CHANGELOG.md)
+[![中文](https://img.shields.io/badge/lang-%E4%B8%AD%E6%96%87-blue)](README.md) [![English](https://img.shields.io/badge/lang-English-lightgrey)](README.en.md) [![Version](https://img.shields.io/badge/version-0.10.0-blue)](CHANGELOG.md)
 
 **端到端流水线**：从 Booru 抓图 → 筛选 → 打标 → 正则集 → 训练 → 出图测试，全流程在一个浏览器面板里推进。专为 [Anima](https://huggingface.co/circlestone-labs/Anima)（Cosmos DiT 二次元特调）训练优化。
 
@@ -12,6 +12,7 @@
 - **正则集自动生成**：基于训练集 tag 分布的 Booru 反向搜索 + 长宽比聚类；或使用底模直接生成（无需 LoRA）
 - **三种打标器**：WD14（本地 ONNX）、CLTagger（外部贡献，本地 ONNX）、LLM（OpenAI 兼容 API，支持长 caption）
 - **触发词自动注入**：在打标步骤填写一次，自动写入每张 caption 与训练采样图 prompt
+- **训练前去重审核**：基于 perceptual hash 扫描相似 / 差分图，按组人工审核保留 / 移除，软删图可恢复
 
 ### 训练与实验管理
 
@@ -19,6 +20,7 @@
 - **预设双向流**：训练配置可在 version 私有 config 与全局预设池之间互相 fork
 - **多任务队列**：支持任务排队、暂停（从最近 epoch 末保存进度）、恢复、队列调度挂起
 - **内置出图测试**：训练完成后直接在 Studio 内进行单图测试或 XY 矩阵评测，常驻推理 daemon 减少模型加载开销
+- **训练集打包**：bundle 一键导出 / 导入（本地下载或服务器路径），便于跨机器迁移项目
 
 ### 训练算法
 
@@ -27,6 +29,7 @@
 - **InfoNoise 自适应采样（可选）**：基于 I-MMSE 的反 CDF 时间步采样器
 - **优化器**：AdamW / Prodigy / Prodigy+ScheduleFree
 - **Adapter**：LoRA + LyCORIS LoKr（走 [lycoris-lora](https://github.com/KohakuBlueleaf/LyCORIS) 官方库，含 DoRA / rs-LoRA / dropout）
+- **分层 rank**：`lora_rank_rules` 按层名正则配不同 rank，便于按模块重要性差异化分配参数预算
 - **Attention backend**：xformers / flash_attn / PyTorch SDPA
 
 ### 工程体验
@@ -48,7 +51,7 @@
 流水线 8 步 + 工具页：
 
 1. **下载** — Booru 抓取 / 本地 jpg / png / zip 上传
-2. **预处理**（可选）— 图片放大流水线：ESRGAN / Real-ESRGAN 等多放大器预设，支持 ModelScope / HF 双源
+2. **预处理**（可选）— 多工具流水线：总览（多选 + 一键撤销）+ 去重审核（perceptual hash 分组人工审核）+ 放大（ESRGAN / Real-ESRGAN 等多预设，ModelScope / HF 双源）+ 裁剪（手动框选 + 智能 AR 聚类预填，跟 sd-scripts 训练桶对齐）+ 涂抹
 3. **筛选** — download / train 双面板，多选复制 / 移除，子文件夹管理
 4. **打标** — WD14 / CLTagger / LLM 三选，GPU EP 自动 fallback；顶部 trigger_word 输入
 5. **标签编辑** — 缓存模式 + 还原点，批量加 / 删 / 替换
@@ -251,7 +254,7 @@ AnimaLoraStudio/
 
 ## 版本
 
-当前版本 **0.9.1**。完整变更历史见 [CHANGELOG.md](CHANGELOG.md)。Studio 内 Settings → 系统 → 版本卡片可一键升级到最新版本。
+当前版本 **0.10.0**。完整变更历史见 [CHANGELOG.md](CHANGELOG.md)。Studio 内 Settings → 系统 → 版本卡片可一键升级到最新版本。
 
 ---
 

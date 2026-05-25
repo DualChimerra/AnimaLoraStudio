@@ -1,6 +1,6 @@
 # AnimaLoraStudio
 
-[![中文](https://img.shields.io/badge/lang-%E4%B8%AD%E6%96%87-lightgrey)](README.md) [![English](https://img.shields.io/badge/lang-English-blue)](README.en.md) [![Version](https://img.shields.io/badge/version-0.9.1-blue)](CHANGELOG.md)
+[![中文](https://img.shields.io/badge/lang-%E4%B8%AD%E6%96%87-lightgrey)](README.md) [![English](https://img.shields.io/badge/lang-English-blue)](README.en.md) [![Version](https://img.shields.io/badge/version-0.10.0-blue)](CHANGELOG.md)
 
 **End-to-end pipeline**: scrape from Booru → curate → tag → reg set → train → image testing, all driven from a single browser panel. Optimized for [Anima](https://huggingface.co/circlestone-labs/Anima) (Cosmos DiT, anime-tuned) training.
 
@@ -12,6 +12,7 @@
 - **Automatic regularization set generation**: Booru reverse search based on training tag distribution + aspect-ratio clustering; or direct generation from the base model (no LoRA required)
 - **Three taggers**: WD14 (local ONNX), CLTagger (external contribution, local ONNX), LLM (OpenAI-compatible API with long captions)
 - **Automatic trigger word injection**: enter once at the tagging step, automatically written into every caption and the training sample prompt
+- **Pre-training duplicate review**: perceptual-hash scan groups similar / near-duplicate images for manual keep / remove review; soft-deleted entries remain recoverable
 
 ### Training and experiment management
 
@@ -19,6 +20,7 @@
 - **Bidirectional preset flow**: training configurations can fork between a version's private config and the global preset pool
 - **Multi-task queue**: task queueing, pause (saves progress at the most recent epoch end), resume, and queue hold
 - **Built-in image testing**: single-image testing and XY matrix evaluation directly in Studio after training, with a long-lived inference daemon to avoid repeated model loading
+- **Training set bundles**: one-click export / import (local download or server path), for moving projects between machines
 
 ### Training algorithms
 
@@ -27,6 +29,7 @@
 - **InfoNoise adaptive sampling (optional)**: inverse-CDF timestep sampler based on I-MMSE
 - **Optimizers**: AdamW / Prodigy / Prodigy+ScheduleFree
 - **Adapter**: LoRA + LyCORIS LoKr (via the [lycoris-lora](https://github.com/KohakuBlueleaf/LyCORIS) library, including DoRA / rs-LoRA / dropout)
+- **Per-layer rank**: `lora_rank_rules` assigns different ranks per layer-name regex, useful for biasing parameter budget by module importance
 - **Attention backends**: xformers / flash_attn / PyTorch SDPA
 
 ### Engineering experience
@@ -48,7 +51,7 @@
 8-step pipeline + tool pages:
 
 1. **Download** — Booru scraping / local jpg / png / zip upload
-2. **Preprocess** (optional) — image upscaling pipeline: ESRGAN / Real-ESRGAN and other presets, supports both ModelScope and HF sources
+2. **Preprocess** (optional) — multi-tool pipeline: overview (multi-select + one-click undo) + duplicate review (perceptual-hash grouped manual review) + upscale (ESRGAN / Real-ESRGAN presets via ModelScope / HF) + crop (manual rect drawing + smart AR-clustered prefill aligned with sd-scripts training buckets) + inpaint
 3. **Curate** — dual download / train panels with multi-select copy / remove and subfolder management
 4. **Tag** — choose from WD14 / CLTagger / LLM with automatic GPU EP fallback; trigger_word input at the top
 5. **Tag editor** — cached mode with restore points, bulk add / delete / replace
@@ -257,7 +260,7 @@ Documentation entry: [docs/README.md](docs/README.md). Three sections:
 
 ## Version
 
-Current version is **0.9.1**. See [CHANGELOG.md](CHANGELOG.md) for the full history. The Settings → System → version card inside Studio allows one-click upgrade to the latest version.
+Current version is **0.10.0**. See [CHANGELOG.md](CHANGELOG.md) for the full history. The Settings → System → version card inside Studio allows one-click upgrade to the latest version.
 
 ---
 

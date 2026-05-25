@@ -20,10 +20,128 @@ from typing import Any, Optional
 from . import projects
 from .datasets import IMAGE_EXTS
 
-VALID_STAGES: frozenset[str] = frozenset({
-    "curating", "tagging", "regularizing",
-    "ready", "training", "done",
-})
+# ADR-0007 §11.3-B：versions 状态机用 status + phase 两个正交字段。
+# 老 stage 已在 PR-5 移除（PR-5 commit 2 删 VALID_STAGES / advance_stage）。
+
+
+class VersionStatus:
+    """版本运行态状态机（5 enum，ADR-0007 §11.3-B）。"""
+
+    PREPARING = "preparing"
+    TRAINING = "training"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELED = "canceled"
+
+    VALUES: frozenset[str] = frozenset({
+        PREPARING, TRAINING, COMPLETED, FAILED, CANCELED,
+    })
+
+
+class VersionPhase:
+    """版本准备 cursor，仅 status=preparing 时有业务语义（ADR-0007 §11.3-B / §11.5-A）。
+
+    顺序：curating → tagging → editing → regularizing → ready。
+    regularizing 可跳过（SKIPPABLE），其余必经。
+    """
+
+    CURATING = "curating"
+    TAGGING = "tagging"
+    EDITING = "editing"
+    REGULARIZING = "regularizing"
+    READY = "ready"
+
+    ORDER: tuple[str, ...] = (
+        CURATING, TAGGING, EDITING, REGULARIZING, READY,
+    )
+    VALUES: frozenset[str] = frozenset(ORDER)
+    SKIPPABLE: frozenset[str] = frozenset({REGULARIZING})
+
+
+def get_status(v: dict[str, Any]) -> str:
+    """读 version.status；None / 缺字段 fallback → preparing。"""
+    return str(v.get("status") or VersionStatus.PREPARING)
+
+
+def get_phase(v: dict[str, Any]) -> str:
+    """读 version.phase；None / 缺字段 fallback → curating。"""
+    return str(v.get("phase") or VersionPhase.CURATING)
+
+
+# ---------------------------------------------------------------------------
+# ADR-0007 §11.3-C / §6.9: version.status 派生 + 一致性校验
+# ---------------------------------------------------------------------------
+
+
+_TASK_TO_VERSION_STATUS: dict[str, str] = {
+    "done":     VersionStatus.COMPLETED,
+    "failed":   VersionStatus.FAILED,
+    "canceled": VersionStatus.CANCELED,
+}
+
+
+def derive_status_from_tasks(
+    conn: sqlite3.Connection, version_id: int
+) -> str:
+    """按 ADR §11.3-C 派生 version.status：
+
+    - 有 active task（pending / running / paused）→ training
+    - 无 active 看最近终态 task → completed / failed / canceled
+    - 从未有 task → preparing
+    """
+    row = conn.execute(
+        "SELECT 1 FROM tasks "
+        "WHERE version_id = ? AND status IN ('pending', 'running', 'paused') "
+        "LIMIT 1",
+        (version_id,),
+    ).fetchone()
+    if row:
+        return VersionStatus.TRAINING
+
+    row = conn.execute(
+        "SELECT status FROM tasks "
+        "WHERE version_id = ? AND status IN ('done', 'failed', 'canceled') "
+        "ORDER BY created_at DESC LIMIT 1",
+        (version_id,),
+    ).fetchone()
+    if row:
+        return _TASK_TO_VERSION_STATUS.get(str(row[0]), VersionStatus.PREPARING)
+
+    return VersionStatus.PREPARING
+
+
+def reconcile_version_status(
+    conn: sqlite3.Connection, version_id: int
+) -> tuple[Optional[dict[str, Any]], bool]:
+    """读 version + 校正 status 不一致；返回 (version, was_corrected)。
+
+    ADR §6.9 安全网：双写过渡期 supervisor 偶尔漏写时，此函数能让
+    任意 read 路径自愈。
+    - 计算 derive_status_from_tasks
+    - 与存储值不一致 → log warning + UPDATE + 返回 corrected version + True
+    - 一致 → 直接返回 (version, False)
+    - version 不存在 → (None, False)
+
+    本函数不发 SSE（保持纯 db 操作），调用方根据 was_corrected 决定要不要 publish。
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    v = get_version(conn, version_id)
+    if not v:
+        return None, False
+
+    derived = derive_status_from_tasks(conn, version_id)
+    stored = get_status(v)
+    if stored == derived:
+        return v, False
+
+    logger.warning(
+        "version %d status mismatch: stored=%r derived=%r → correcting",
+        version_id, stored, derived,
+    )
+    update_version(conn, version_id, status=derived)
+    return get_version(conn, version_id), True
 
 # label 必须是路径安全的：字母 / 数字 / 下划线 / 连字符 / 点
 _VALID_LABEL = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -279,13 +397,6 @@ def list_versions(
     ]
 
 
-# PP10.1 — fork 时源 stage 落到新 version 的映射。
-# done / training 的 version 已经训完或在训，新 version 重新进入待训练态；
-# 其他 stage（curating / tagging / regularizing / ready）原样跟随，让用户从
-# 副本所处的同一 step 接着干。
-_FORK_STAGE_RESET: frozenset[str] = frozenset({"done", "training"})
-
-
 def create_version(
     conn: sqlite3.Connection,
     *,
@@ -301,7 +412,9 @@ def create_version(
     输出类（output/、samples/、monitor_state.json）一律不复制。
     复制 config.yaml 后立即重写一次，把 data_dir / reg_data_dir / output_dir /
     output_name 强制刷成新 version 的路径。
-    stage 跟随源（done/training → ready；其他原样）。
+
+    ADR-0007 PR-5: fork 不再继承 stage / status / phase；新 version 始终从
+    preparing / curating 默认值开始。用户 fork 后从筛选 phase 接着干。
     """
     p = projects.get_project(conn, project_id)
     if not p:
@@ -318,7 +431,6 @@ def create_version(
         raise VersionError(f"label 已存在: {label!r}")
 
     src_config_name: Optional[str] = None
-    src_stage: str = "curating"
     if fork_from_version_id is not None:
         src = get_version(conn, fork_from_version_id)
         if not src or src["project_id"] != project_id:
@@ -326,13 +438,12 @@ def create_version(
                 f"fork 源不存在或不属于当前项目: id={fork_from_version_id}"
             )
         src_config_name = src["config_name"]
-        src_stage = "ready" if src["stage"] in _FORK_STAGE_RESET else src["stage"]
 
     now = time.time()
     cur = conn.execute(
-        "INSERT INTO versions(project_id, label, config_name, stage, created_at, note) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (project_id, label, src_config_name, src_stage, now, note),
+        "INSERT INTO versions(project_id, label, config_name, created_at, note) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (project_id, label, src_config_name, now, note),
     )
     conn.commit()
     vid = int(cur.lastrowid)
@@ -395,7 +506,10 @@ def _copytree(src: Path, dst: Path) -> None:
             shutil.copy2(sub, target)
 
 
-_UPDATABLE = {"note", "stage", "config_name", "output_lora_path", "trigger_word"}
+_UPDATABLE = {
+    "note", "config_name", "output_lora_path", "trigger_word",
+    "status", "phase", "last_failure_reason",
+}
 
 
 def update_version(
@@ -403,8 +517,10 @@ def update_version(
 ) -> dict[str, Any]:
     v = _must_get(conn, version_id)
     keep = {k: val for k, val in fields.items() if k in _UPDATABLE}
-    if "stage" in keep and keep["stage"] not in VALID_STAGES:
-        raise VersionError(f"非法 stage: {keep['stage']!r}")
+    if "status" in keep and keep["status"] not in VersionStatus.VALUES:
+        raise VersionError(f"非法 status: {keep['status']!r}")
+    if "phase" in keep and keep["phase"] not in VersionPhase.VALUES:
+        raise VersionError(f"非法 phase: {keep['phase']!r}")
     if not keep:
         return v
     cols = ", ".join(f"{k} = ?" for k in keep)
@@ -450,14 +566,6 @@ def activate_version(
     v = _must_get(conn, version_id)
     projects.update_project(conn, v["project_id"], active_version_id=version_id)
     return v
-
-
-def advance_stage(
-    conn: sqlite3.Connection, version_id: int, target: str
-) -> dict[str, Any]:
-    if target not in VALID_STAGES:
-        raise VersionError(f"非法 stage: {target!r}")
-    return update_version(conn, version_id, stage=target)
 
 
 # ---------------------------------------------------------------------------

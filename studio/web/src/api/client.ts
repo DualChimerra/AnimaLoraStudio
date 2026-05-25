@@ -517,24 +517,40 @@ export interface ModelsCatalog {
 
 // ---- projects / versions (PP1) -------------------------------------------
 
-export type ProjectStage =
-  | 'created'
-  | 'downloading'
-  | 'preprocessing'
-  | 'curating'
-  | 'tagging'
-  | 'regularizing'
-  | 'configured'
-  | 'training'
-  | 'done'
+// ADR-0007 PR-5: 老 ProjectStage / VersionStage 已删（DB 列也由 v9 destructive 删）。
+// 用 VersionStatus + VersionPhase 替代。
 
-export type VersionStage =
+/** ADR-0007 §11.3-B 新模型：version 运行态状态机（5 enum）。 */
+export type VersionStatus =
+  | 'preparing'
+  | 'training'
+  | 'completed'
+  | 'failed'
+  | 'canceled'
+
+/** ADR-0007 §11.3-B 新模型：version 准备 cursor（仅 status=preparing 时有意义）。
+ *  按 PHASE_ORDER 顺序：curating → tagging → editing → regularizing → ready。 */
+export type VersionPhase =
   | 'curating'
   | 'tagging'
+  | 'editing'
   | 'regularizing'
   | 'ready'
-  | 'training'
-  | 'done'
+
+export const PHASE_ORDER: VersionPhase[] = [
+  'curating', 'tagging', 'editing', 'regularizing', 'ready',
+]
+
+export const PHASE_SKIPPABLE: VersionPhase[] = ['regularizing']
+
+/** ADR-0007 §11.5-A: advance / skip phase endpoint response。 */
+export interface PhaseAdvanceResult {
+  advanced: boolean
+  ok: boolean
+  reason: string
+  new_phase: VersionPhase | null
+  version: Version | null
+}
 
 export interface VersionStats {
   train_image_count: number
@@ -550,7 +566,11 @@ export interface Version {
   project_id: number
   label: string
   config_name: string | null
-  stage: VersionStage
+  /** ADR-0007 §11.3-B: 运行态主状态机（5 enum）。 */
+  status: VersionStatus
+  /** ADR-0007 §11.3-B: phase cursor，仅 status=preparing 时有意义。 */
+  phase: VersionPhase
+  last_failure_reason: string | null
   created_at: number
   output_lora_path: string | null
   note: string | null
@@ -563,8 +583,10 @@ export interface ProjectSummary {
   id: number
   slug: string
   title: string
-  stage: ProjectStage
   active_version_id: number | null
+  /** ADR-0007 §11.8-E: 项目卡片右上角 status badge / 卡片显 version 名（list 端点 enrich）。 */
+  active_version_label: string | null
+  active_version_status: VersionStatus | null
   created_at: number
   updated_at: number
   note: string | null
@@ -609,6 +631,24 @@ export interface UploadResult {
   skipped: { name: string; reason: string }[]
 }
 
+export interface DataExportItem {
+  filename: string
+  path: string
+  size: number
+  mtime: number
+}
+
+export interface BundleImportResult {
+  project: ProjectDetail
+  version: Version
+  stats: {
+    train_image_count: number
+    train_tagged_count: number
+    reg_image_count: number
+    preset_count: number
+  }
+}
+
 // ---- preprocess (放大第一阶段) ---------------------------------------------
 
 /** 已处理图：manifest 里 kind=processed 的 entry 拼上磁盘 stat。
@@ -619,23 +659,61 @@ export interface PreprocessedItem {
   name: string
   mtime: number
   size: number
+  /** 实际像素宽 / 高（后端 PIL 读图头）。损坏 / 不存在时为 null。 */
+  w: number | null
+  h: number | null
+  /** 派生根：download/ 下原始文件名。multi-crop 同一 origin 出 N 张 entry。
+   *  老 schema 字段叫 `source`，后端两个都填同样的值，前端优先读 origin。 */
+  origin: string | null
+  /** @deprecated 兼容 0.9.x 字段名；新代码读 origin。后端两个字段值相同。 */
   source: string | null
+  /** 以下字段都仅老 schema entry 才有，新 schema entry 一律 null。 */
   model: string | null
   scale: number | null
-  /** 'resize' | 'upscale' | 'upscale+resize'，老 entry 可能为 null。 */
+  /** 'resize' | 'upscale' | 'upscale+resize'，新 entry 为 null。 */
   action: string | null
-  /** 目标像素面积；null = 关闭智能模式（老路径 4×）。 */
+  /** 目标像素面积；null = 关闭智能模式（老路径 4×）或新 schema。 */
   target_area: number | null
   src_size: [number, number] | null
   dst_size: [number, number] | null
   elapsed_seconds: number | null
-  /** 源图（download/{source}）已被删 → orphan=true。 */
+  /** 源图（download/{origin}）已被删 → orphan=true。 */
   orphan: boolean
 }
 
 /** 未处理图：download/ 存在、manifest 没记的图（隐式 original）。 */
 export interface PreprocessPendingItem {
   name: string
+  mtime: number
+  size: number
+  /** download/ 下原图像素尺寸（PIL 读图头）。损坏 / 读不到时 null。前端
+   *  像素分布 histogram 需要把 pending 一起统计 — 不然 200 张里只有几张
+   *  被放大的会让 histogram 看起来空荡荡。 */
+  w: number | null
+  h: number | null
+}
+
+/** 裁剪页工作集一项：preprocess/ 当前文件名 + 像素尺寸 + 是否已处理。 */
+export interface CropWorkspaceItem {
+  name: string
+  /** download/ 下原图名（origin）；下游还原走这个名。 */
+  source: string
+  w: number
+  h: number
+  mtime: number
+  size: number
+  processed: boolean
+}
+
+/** 总览页「已删除」tab 一项：被去重审核标记的 entry。物理图仍在 download/{source}。 */
+export interface DuplicateRemovedItem {
+  /** manifest entry 的 key（一般 == source）。restore 时按这个名传。 */
+  name: string
+  /** download/ 下原图名（origin）。缩略图按 source + bucket=download 取。 */
+  source: string
+  /** 像素尺寸 — origin 文件不存在时 null。 */
+  w: number | null
+  h: number | null
   mtime: number
   size: number
 }
@@ -664,6 +742,78 @@ export interface CopyResult {
   copied: string[]
   skipped: string[]
   missing: string[]
+}
+
+export interface DuplicateScanOptions {
+  match_scope: 'strict' | 'both'
+  hash_size: number
+  hash_workers: number
+  tile_grids: number[]
+  structure_threshold: number
+  variant_score: number
+  aspect_tolerance: number
+  min_close_tiles: number
+  tile_median: number
+  min_gray_close: number
+}
+
+export interface DuplicateMetrics {
+  score: number
+  match_type: 'keep' | 'strict-duplicate' | 'same-scene-variant' | 'linked-indirectly' | string
+  structure_diff: number
+  phash_diff: number
+  soft_phash_diff: number
+  dhash_diff: number
+  ahash_diff: number
+  edge_diff: number
+  color_diff: number
+  tile_median: number
+  tile_mean: number
+  tile_close_ratio: number
+  gray_diff: number
+  gray_close_ratio: number
+  aspect_delta: number
+  note: string
+}
+
+export interface DuplicateItem {
+  name: string
+  keep: boolean
+  width: number
+  height: number
+  filesize_kb: number
+  metrics: DuplicateMetrics | null
+}
+
+export interface DuplicateGroup {
+  group_id: number
+  keep: string
+  items: DuplicateItem[]
+  best: DuplicateMetrics | null
+}
+
+export interface DuplicateScanResult {
+  target: 'preprocess' | 'download'
+  match_scope: DuplicateScanOptions['match_scope']
+  total_images: number
+  readable_images: number
+  group_count: number
+  candidate_count: number
+  elapsed_seconds: number
+  options: DuplicateScanOptions
+  stats: {
+    total_pairs: number
+    aspect_skipped_pairs: number
+    prefiltered_pairs: number
+    compared_pairs: number
+  }
+  groups: DuplicateGroup[]
+}
+
+export interface DuplicateApplyResult {
+  removed: string[]
+  missing: string[]
+  skipped: string[]
 }
 
 // ---- tagging (PP4) --------------------------------------------------------
@@ -819,7 +969,6 @@ export interface RegAiRequest {
   seed?: number
   incremental?: boolean
   mixed_precision?: string
-  attention_backend?: AttentionBackend
 }
 
 /** PR-9 — 测试出图（独立工具页，多 LoRA + multi-prompt）。 */
@@ -1011,8 +1160,10 @@ export interface MonitorState {
 
 export interface TaskOutputFile {
   name: string
+  path: string
   size: number
   mtime: number
+  kind: 'lora' | 'training_state' | 'pause_state' | 'auto_epoch_state' | 'other'
   is_lora: boolean
 }
 
@@ -1120,6 +1271,20 @@ export const api = {
     req<{ name: string; path: string }>(`/api/presets/${src}/duplicate`, {
       method: 'POST',
       body: JSON.stringify({ new_name: newName }),
+    }),
+  exportPresetToDataExports: (name: string, config: ConfigData) =>
+    req<DataExportItem>(`/api/presets/${encodeURIComponent(name)}/export`, {
+      method: 'POST',
+      body: JSON.stringify({ config }),
+    }),
+  /** 端到端 yaml 文件下载直链，server FileResponse 已设 Content-Disposition。
+   *  <a href={...} download> 触发即可，不发 fetch。 */
+  presetDownloadUrl: (name: string) =>
+    `/api/presets/${encodeURIComponent(name)}/download`,
+  importPresetFromPath: (path: string) =>
+    req<{ name: string; path: string }>('/api/presets/import-from-path', {
+      method: 'POST',
+      body: JSON.stringify({ path }),
     }),
   /** 端到端文件上传：把 .yaml/.yml/.json 文件给后端解析 + schema 校验 + 直接落盘,
    *  返回 {name, path}。前端拿到 name 直接 refreshList + setSelected(name) 即可。
@@ -1240,7 +1405,6 @@ export const api = {
     body: Partial<{
       title: string
       note: string
-      stage: ProjectStage
       active_version_id: number | null
     }>
   ) =>
@@ -1274,7 +1438,8 @@ export const api = {
     vid: number,
     body: Partial<{
       note: string
-      stage: VersionStage
+      status: VersionStatus
+      phase: VersionPhase
       config_name: string | null
     }>
   ) =>
@@ -1290,6 +1455,25 @@ export const api = {
     req<ProjectDetail>(
       `/api/projects/${pid}/versions/${vid}/activate`,
       { method: 'POST' }
+    ),
+
+  // Phase cursor 推进 / 跳过 (ADR-0007 §11.5-A) --------------------------
+  advanceVersionPhase: (pid: number, vid: number) =>
+    req<PhaseAdvanceResult>(
+      `/api/projects/${pid}/versions/${vid}/advance-phase`,
+      { method: 'POST' }
+    ),
+
+  skipVersionPhase: (pid: number, vid: number) =>
+    req<PhaseAdvanceResult>(
+      `/api/projects/${pid}/versions/${vid}/skip-phase`,
+      { method: 'POST' }
+    ),
+
+  // Task config snapshot (ADR-0007 §11.7) --------------------------------
+  getTaskSnapshotConfig: (taskId: number) =>
+    req<{ yaml: string; config: Record<string, unknown> }>(
+      `/api/queue/${taskId}/snapshot/config`
     ),
 
   // Download / jobs (PP2) ------------------------------------------------
@@ -1345,6 +1529,11 @@ export const api = {
     }
     return (await resp.json()) as UploadResult
   },
+  uploadProjectFileFromPath: (pid: number, path: string) =>
+    req<UploadResult>(`/api/projects/${pid}/upload-from-path`, {
+      method: 'POST',
+      body: JSON.stringify({ path }),
+    }),
   listFiles: (pid: number, bucket = 'download') =>
     req<{ items: DownloadFile[]; count: number }>(
       `/api/projects/${pid}/files?bucket=${encodeURIComponent(bucket)}`
@@ -1358,8 +1547,25 @@ export const api = {
         body: JSON.stringify({ names }),
       }
     ),
-  projectThumbUrl: (pid: number, name: string, bucket = 'download', size = 256) =>
-    `/api/projects/${pid}/thumb?bucket=${encodeURIComponent(bucket)}&name=${encodeURIComponent(name)}&size=${size}`,
+  /** `v`：文件 mtime（unix s），仅用作浏览器端 cache-buster。**服务端忽略**该参数
+   *  （后端 cache key 仍按 src+mtime+size 计算）；目的是让 in-place 覆盖后的图
+   *  （裁剪 / 放大同名输出）URL 变化，浏览器不再命中 memory image cache 复用旧
+   *  decoded 像素。`Cache-Control: no-cache` 对 disk cache 强制 revalidate，
+   *  但 CSS `background-image` 的 in-memory decoded image 不受其约束，必须
+   *  靠 URL 唯一性来失效 — 见 PreprocessCrop bug 修复。 */
+  projectThumbUrl: (
+    pid: number,
+    name: string,
+    bucket = 'download',
+    size = 256,
+    v?: number,
+    /** raw=true（仅 bucket=download 有效）：跳过 resolve_origin，强制 download/{name}
+     *  原始字节。给「对比预览」左 pane 用 —— 不能被 preprocess 派生 hijack。 */
+    raw?: boolean,
+  ) =>
+    `/api/projects/${pid}/thumb?bucket=${encodeURIComponent(bucket)}&name=${encodeURIComponent(name)}&size=${size}`
+    + (v ? `&v=${v}` : '')
+    + (raw ? '&raw=1' : ''),
 
   // Preprocess (放大 / 裁剪 / 涂抹) ----------------------------------------
   startPreprocess: (
@@ -1383,13 +1589,13 @@ export const api = {
     req<{
       job: Job | null
       log_tail: string
-      summary: { download_count: number; processed_count: number; pending_count: number }
+      summary: { image_count: number }
     }>(`/api/projects/${pid}/preprocess/status`),
   listPreprocessFiles: (pid: number) =>
     req<{
       processed: PreprocessedItem[]
       pending: PreprocessPendingItem[]
-      summary: { download_count: number; processed_count: number; pending_count: number }
+      summary: { image_count: number }
     }>(`/api/projects/${pid}/preprocess/files`),
   /** 还原指定产物：删 manifest entry + 删 preprocess/{name} PNG。
    *  还原后图回到「未处理」（隐式 original）。ADR 0004。 */
@@ -1398,6 +1604,35 @@ export const api = {
       `/api/projects/${pid}/preprocess/files/restore`,
       { method: 'POST', body: JSON.stringify({ names }) },
     ),
+  /** 整项目预处理状态归零：删 manifest 所有 entry + 删 preprocess/ 所有 PNG。
+   *  「总览」tab 的「撤销全部」走这个。 */
+  resetPreprocessFiles: (pid: number) =>
+    req<{ ok: boolean }>(`/api/projects/${pid}/preprocess/files/reset`, {
+      method: 'POST',
+    }),
+  /** 裁剪页工作集：所有可裁剪的图 + 像素尺寸（来自 PIL 读头）。
+   *  preprocess/ 里已处理 + download/ 里未处理的合并列表。 */
+  listCropWorkspace: (pid: number) =>
+    req<{ images: CropWorkspaceItem[] }>(
+      `/api/projects/${pid}/preprocess/crop/workspace`,
+    ),
+  /** 总览页「已删除」tab：被去重审核标记 (kind=duplicate_removed) 的 entry 列表。
+   *  恢复走 restorePreprocessFiles（restore 对 duplicate_removed entry 也 work）。 */
+  listPreprocessDuplicatesRemoved: (pid: number) =>
+    req<{ images: DuplicateRemovedItem[] }>(
+      `/api/projects/${pid}/preprocess/duplicates/removed`,
+    ),
+  /** 开始裁剪 job。`crops` 为 `{源文件名: [{x,y,w,h,label?}]}`，归一化 [0..1]。
+   *  N=1 覆盖 stem.png；N>1 输出 stem_c{0..N-1}.png 并删原 stem.png。
+   *  详见 docs/design/preprocess-crop-design.md。 */
+  startPreprocessCrop: (
+    pid: number,
+    crops: Record<string, { x: number; y: number; w: number; h: number; label?: string }[]>,
+  ) =>
+    req<Job>(`/api/projects/${pid}/preprocess/crop`, {
+      method: 'POST',
+      body: JSON.stringify({ crops }),
+    }),
 
   getJob: (jid: number) => req<Job>(`/api/jobs/${jid}`),
   getJobLog: (jid: number, tail?: number) => {
@@ -1582,6 +1817,11 @@ export const api = {
   unloadDaemon: () => req<{ ok: boolean; noop?: boolean }>(
     '/api/generate/daemon/unload', { method: 'POST' }
   ),
+  /** daemon stderr ring buffer。since_seq>0 时只返增量。 */
+  getDaemonLogs: (sinceSeq = 0, limit = 2000) =>
+    req<{ entries: Array<{ ts: number; seq: number; line: string }>; next_seq: number }>(
+      `/api/generate/daemon/logs?since_seq=${sinceSeq}&limit=${limit}`,
+    ),
   /** Phase 2 commit 14 — TAEFlux 状态。 */
   getTaeFluxStatus: () => req<TaeFluxStatus>('/api/generate/taeflux/status'),
   /** Phase 2 commit 14 — 同步下载 TAEFlux（~1.6MB，秒级）。已存在 noop。 */
@@ -1646,6 +1886,16 @@ export const api = {
   ) =>
     req<Record<string, unknown>>(
       `/api/projects/${pid}/versions/${vid}/curation/folder`,
+      { method: 'POST', body: JSON.stringify(body) }
+    ),
+  scanDuplicates: (pid: number, body: DuplicateScanOptions) =>
+    req<DuplicateScanResult>(
+      `/api/projects/${pid}/preprocess/duplicates/scan`,
+      { method: 'POST', body: JSON.stringify(body) }
+    ),
+  applyDuplicateAction: (pid: number, body: { names: string[] }) =>
+    req<DuplicateApplyResult>(
+      `/api/projects/${pid}/preprocess/duplicates/apply`,
       { method: 'POST', body: JSON.stringify(body) }
     ),
   versionThumbUrl: (
@@ -1713,10 +1963,10 @@ export const api = {
   getTaskOutputs: (id: number) =>
     req<TaskOutputs>(`/api/queue/${id}/outputs`),
   /** 下载单个 output 文件的直链，不发请求。<a href={...} download> 即可。 */
-  taskOutputDownloadUrl: (id: number, filename: string) =>
-    `/api/queue/${id}/output/${encodeURIComponent(filename)}`,
+  taskOutputDownloadUrl: (id: number, path: string) =>
+    `/api/queue/${id}/output/${path.split('/').map(encodeURIComponent).join('/')}`,
   /** output 目录打包 zip 下载直链。
-   * 不传 files → 全量；传文件名数组 → 仅打包这些（后端 whitelist 校验）。
+   * 不传 files → 全量；传相对路径数组 → 仅打包这些（后端 whitelist 校验）。
    * 配合 <a href download> 触发，浏览器原生接管下载条；后端 zip 写完会
    * publish task_outputs_zip_ready / task_outputs_zip_failed 事件供前端清 loading。 */
   taskOutputsZipUrl: (id: number, files?: ReadonlyArray<string>) => {
@@ -1724,6 +1974,11 @@ export const api = {
     const q = files.map((n) => encodeURIComponent(n)).join(',')
     return `/api/queue/${id}/outputs.zip?files=${q}`
   },
+  exportTaskOutputs: (id: number, files?: ReadonlyArray<string>) =>
+    req<DataExportItem>(`/api/queue/${id}/export-outputs`, {
+      method: 'POST',
+      body: JSON.stringify({ files: files && files.length > 0 ? Array.from(files) : null }),
+    }),
 
   // PP8 — WD14 运行时 / GPU 装包 ------------------------------------------
   /** 当前 onnxruntime 状态：包名 / 版本 / providers / nvidia-smi 检测结果。 */
@@ -1774,6 +2029,77 @@ export const api = {
    * 后端 publish version_train_zip_ready/_failed SSE 供前端清 "打包中..." 状态。 */
   versionTrainZipUrl: (pid: number, vid: number) =>
     `/api/projects/${pid}/versions/${vid}/train.zip`,
+
+  /** 当前 version 的 bundle.zip 直链。<a href download> 触发浏览器下载。 */
+  versionBundleZipUrl: (
+    pid: number,
+    vid: number,
+    opts: {
+      train?: boolean
+      trainCaptions?: boolean
+      reg?: boolean
+      regCaptions?: boolean
+      includeConfig?: boolean
+    },
+  ): string => {
+    const p = new URLSearchParams()
+    p.set('train', opts.train !== false ? '1' : '0')
+    p.set('train_captions', opts.trainCaptions !== false ? '1' : '0')
+    p.set('reg', opts.reg ? '1' : '0')
+    p.set('reg_captions', opts.regCaptions ? '1' : '0')
+    p.set('include_config', opts.includeConfig ? '1' : '0')
+    return `/api/projects/${pid}/versions/${vid}/bundle.zip?${p.toString()}`
+  },
+  exportBundleToDataExports: (
+    pid: number,
+    vid: number,
+    opts: {
+      train?: boolean
+      trainCaptions?: boolean
+      reg?: boolean
+      regCaptions?: boolean
+      includeConfig?: boolean
+    },
+  ) =>
+    req<DataExportItem>(`/api/projects/${pid}/versions/${vid}/export-bundle`, {
+      method: 'POST',
+      body: JSON.stringify({
+        train: opts.train !== false,
+        train_captions: opts.trainCaptions !== false,
+        reg: opts.reg === true,
+        reg_captions: opts.regCaptions === true,
+        include_config: opts.includeConfig === true,
+      }),
+    }),
+  listDataExports: () => req<DataExportItem[]>('/api/data-exports'),
+
+  /** 从 PathPicker 选中的 zip 路径导入 bundle（v1/v2 均支持）→ 新建 project + v1。 */
+  importBundleFromPath: (path: string) =>
+    req<BundleImportResult>('/api/projects/import-bundle', {
+      method: 'POST',
+      body: JSON.stringify({ path }),
+    }),
+  importBundleFromDataExports: (filename: string) =>
+    req<BundleImportResult>('/api/projects/import-bundle', {
+      method: 'POST',
+      body: JSON.stringify({ filename }),
+    }),
+  importBundleUpload: async (file: File): Promise<BundleImportResult> => {
+    const fd = new FormData()
+    fd.append('file', file, file.name)
+    const resp = await fetch('/api/projects/import-bundle/upload', { method: 'POST', body: fd })
+    if (!resp.ok) {
+      let detail = `${resp.status} ${resp.statusText}`
+      try {
+        const body = await resp.json()
+        if (body?.detail) detail = body.detail
+      } catch {
+        // ignore
+      }
+      throw new Error(detail)
+    }
+    return resp.json()
+  },
   /** 上传训练集 zip → 新建 project + v1，返回新项目。 */
   importTrainProject: async (file: File): Promise<{
     project: ProjectDetail

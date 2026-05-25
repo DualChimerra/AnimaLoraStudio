@@ -5,6 +5,306 @@
 #
 # 顺序：最新版本在 list 顶。
 
+- version: "0.10.0"
+  date: "2026-05-25"
+  summary: "项目 / 版本 / 任务生命周期重构（ADR 0007）+ 预处理多工具化 + 训练前去重审核"
+  entries:
+    - kind: changed
+      summary: "项目 / 版本 / 任务状态模型升级 + 侧栏改 cursor 推进（#115, #117, #119）"
+      pr_refs: [115, 117, 119, 120, 121]
+      detail: |
+        把项目—版本—任务的状态模型从单一 `stage` 字段升级为 `status` 与 `phase` 双字段。`status` 5 态：preparing / training / completed / failed / canceled；`phase` 5 态 cursor：curating / tagging / editing / regularizing / ready。
+
+        - 侧栏成为 cursor 推进主通道：项目展开后 phase 列表显示进度，cursor+1 整行可点直接 advance / skip，独立 PhaseHeaderNav 删除。
+        - 完成的 phase 数字变绿；当前 phase 用红色编号高亮；cursor 之后的 phase disabled。
+        - DB 升级 v9 destructive 删除 `projects.stage` / `versions.stage` 列（recreate-table 模式兼容 SQLite < 3.35）。
+        - 设计 / 决策 / 迁移策略全文见 [ADR 0007](docs/adr/0007-project-version-task-lifecycle.md)。
+
+    - kind: changed
+      summary: "项目详情页 v2 重做（StatusBanner / VersionRail / 数据集缩略图卡）（#121）"
+      pr_refs: [121]
+      detail: |
+        按 design v2 重做项目详情页：
+
+        - Identity strip + VersionRail（横向版本切换）+ 5 态 StatusBanner（preparing / training / completed / failed / canceled 各自 CTA）+ 2+3 不对称 detail grid。
+        - 训练集卡片用 ImageGrid + ImagePreviewModal + folder chips；与「训练集筛选」面板同款。
+        - 标签分布卡内嵌进度条，触发词用 ★ 标记并 accent 高亮。
+        - 像素分布卡复用 BarHistogram，与放大页 sidebar 同源数据。
+        - 完成态项目的 LoRA 文件 tab 复用队列详情页 OutputsTab，含下载 / 打包 / 打开文件夹。
+        - 所有 CTA 接现有 API：fork version → 走 NewVersionDialog 预填；加载 LoRA → 跳测试页 prefill；查看日志 → 跳队列详情 #log。
+
+    - kind: added
+      summary: "任务详情新增「关联配置」tab + 一键套用此配置（#117, #119）"
+      pr_refs: [117, 119]
+      detail: |
+        Task 启动时把当时的训练 config 冻结到 `studio_data/tasks/{tid}/snapshot/config.yaml`，与 version 当前 config 心智分离。
+
+        - 任务详情页新 tab「关联配置」显示该任务跑时的完整 yaml（只读）。
+        - 提供「套用此配置」按钮，把 snapshot 写回新建 / 现有 version，方便复刻历史训练参数。
+        - 用户后续改 version / preset / yaml 不影响历史 task 的 snapshot，跨设备 / 跨平台都能复读出当时跑的参数。
+
+    - kind: added
+      summary: "训练前去重审核工具：按组人工审核保留 / 移除（#111, #126）"
+      pr_refs: [111, 126]
+      detail: |
+        预处理工具栏新增「去重审核」（路由 `/preprocess?tool=dedupe`）。扫描当前工作集，相似 / 差分图按组展示，逐张审核后只写入 manifest 的 `duplicate_removed` 跳过状态，不移动 / 不删除 `download/` 原图。
+
+        - 参数区独立顶部 OperationPanel：常用项（匹配范围 / 差分分数 / 线程）外露；高级算法参数（hash 边长 / 结构阈值 / 宽高比容差 / 分块网格）默认折叠。
+        - 工作区按组展示具体缩略图 + 建议保留 badge + 每图 match type / score / 尺寸 / 大小。
+        - 二态自由选择（绿 = 保留 / 黄 = 去除），每张图独立切换，不限制组内最少留几张。
+        - 「选中建议项」按钮一键应用系统建议。
+        - 确认弹窗要求用户已审核具体分组图片。
+        - 新增依赖 `ImageHash >= 4.3.0`。
+
+    - kind: changed
+      summary: "预处理改多工具结构：总览 / 放大 / 裁剪 / 涂抹（#112）"
+      pr_refs: [112]
+      detail: |
+        预处理从单一放大页演进成多工具结构，路由 `/projects/:pid/preprocess?tool=overview|upscale|crop|inpaint`。
+
+        - 工具栏：总览 / 去重审核 / 放大 / 裁剪 / 涂抹，共享同一外框。
+        - 总览页：所有 preprocess workspace 图 grid + ctrl/shift 多选 + 单图预览 modal + 撤销选中 / 撤销全部。
+        - 放大页：filter chips 改像素 bin（< 512² / 512²–768² / 768²–1024² / 1024²–1536² / 1536²–2048² / > 2048²），与 sidebar 像素分布同源；JobStrip 无 live job 时整块隐藏。
+        - 裁剪页：filmstrip 从底部横排改左侧竖排 3-col 正方 cover thumbs；FreeCropEditor 用 ResizeObserver 自适应。
+
+    - kind: added
+      summary: "一图多框裁剪派生独立图 + 聚类裁剪自动对齐训练分辨率（#112）"
+      pr_refs: [112]
+      detail: |
+        - **一图多框 fan-out**：裁剪页一张图可拉多个矩形框，确认后拆出独立派生 `X_c0.png` / `X_c1.png`；筛选 / `copy_to_train` / 缩略图全链路按派生名寻址，原图不再单独占位。
+        - **聚类裁剪对齐训练桶**：新增 `lib/trainBuckets.ts`，1:1 mirror `runtime/training/dataset.py:BucketManager`（37 桶严格 sync 断言）；聚类内部 snap 到训练桶 AR，裁出的图刚好命中训练桶，trainer 不二次 resize。UI label 仍用易读 AR（4:3 / 16:9）。
+
+    - kind: changed
+      summary: "裁剪后再放大 / 放大后再裁剪打通，链路顺序自由（#114, #124）"
+      pr_refs: [114, 124]
+      detail: |
+        按 [ADR 0004 Addendum 1「Stage 不强制时序」](docs/adr/0004-preprocess-manifest.md) 对齐：preprocess worker 不再因 manifest 已有 entry 跳过，是否跑模型由 `upscaler.SKIP_MODEL_RATIO` 按源像素判断。
+
+        - 用户明确选中 cropped 派生再点放大 → 放行（之前被 mode='all' skip）。
+        - 用户再次放大已放大产物 → 放行。
+        - 「放大全部 N」按钮 N 现在是当前 grid 全部图数（包含 cropped 派生），不再只算 download 未派生。
+
+    - kind: added
+      summary: "训练集 bundle 导出 / 导入：本地下载或服务器路径选择（#108）"
+      pr_refs: [108]
+      detail: |
+        训练集打包导出新流程：
+
+        - 导出可下载到本地或导出到项目目录。
+        - 导入对话框支持浏览器上传与服务器路径选择。
+        - 旧 `data_exports` 单独导入入口移除（服务器路径已覆盖该场景）。
+        - 训练集页旧「下载训练集」按钮移除（功能并入 bundle 导出）。
+
+    - kind: added
+      summary: "分层 rank `lora_rank_rules`：按层名正则指定不同 rank（#108）"
+      pr_refs: [108]
+      detail: |
+        训练 config 新增可选字典字段 `lora_rank_rules`，键为层名正则、值为 rank，例：
+
+        ```yaml
+        lora_rank_rules:
+          "lora_unet_.*double.*": 16
+          "lora_unet_.*single.*": 8
+        ```
+
+        未命中任何规则的层走全局 `lora_rank`。便于按模块重要性差异化分配参数预算。
+
+    - kind: added
+      summary: "标签编辑新增多文件夹切换 tab（#108, #113）"
+      pr_refs: [108, 113]
+      detail: |
+        标签编辑页顶部按 folder 切分 tab，多 folder 项目可快速切到任一 folder 视图，每个 tab 独立计数。
+
+    - kind: changed
+      summary: "标签编辑批量操作面板重做行式 + 表头排序 + 行内确认（#113）"
+      pr_refs: [113]
+      detail: |
+        按设计稿 V2 重排批量操作面板：四个操作（添加 / 删除 / 替换 / 去重）各占一行，按钮对齐到同一条竖线。
+
+        - 添加 / 删除 各有独立 input，不再共享一个输入框抢归属。
+        - 「首部 / 尾部」toggle 只挂在「添加」行内，归属明确。
+        - 只有「添加」是 filled primary；删除 / 替换 / 去重 均为 outline；删除走 err 着色（红边 + 红字，不再 filled）。
+        - 标签分布面板 sort dropdown 换成可点击表头，同列点击切换方向，跨列默认 desc，活跃列旁带 ↑ / ↓ 箭头。
+        - 行内 `×` / `✎` 删 / 改单 tag 与批量操作对齐，统一过 confirm modal 显示精确影响张数。
+        - 进入单图编辑时自动收起 BulkActionBar 让侧栏让位给 TagEditor。
+
+    - kind: added
+      summary: "预处理总览三 tab：所有图片 / 经过处理 / 已删除（#126）"
+      pr_refs: [126]
+      detail: |
+        预处理总览改成三 tab 视图：
+
+        - **所有图片**：当前工作集（不含 removed），只读浏览 + 点击放大。
+        - **经过处理**：preprocess 派生产物，沿用原有选中恢复 + 全部撤销。
+        - **已删除**：被去重标记为软删的图，可见缩略图（按 download/source 取），选中可一键恢复。
+
+    - kind: added
+      summary: "「经过处理」tab 点击放大改左右双图对比（原图 / 处理后）（#126）"
+      pr_refs: [126]
+      detail: |
+        预览 modal 新增 `compareSrc` 模式，传入时左右 split 双图对比（左 = download 原图、右 = preprocess 派生），便于看 multi-crop 派生与原图的对应关系。窄屏（< md）自动改垂直堆叠。不传 `compareSrc` 时行为完全不变。
+
+    - kind: added
+      summary: "测试页新增 daemon 实时日志抽屉（#128）"
+      pr_refs: [128]
+      detail: |
+        Generate 测试页加「日志」按钮（挂在「清理显存」右边），从底部向上 40vh 滑入抽屉显示推理 daemon 实时日志。
+
+        - terminal 默认不再打印 daemon 输出，统一走 UI 抽屉。
+        - 后端 `InferenceDaemon` 加 ring buffer（deque maxlen=2000）+ log listener，supervisor 转 SSE `daemon_log_line` 增量推送。
+        - 新接口 `GET /api/generate/daemon/logs?since_seq=N` 拉历史日志。
+        - 抽屉隐藏时 `translateY(100%)` + `pointerEvents:none`，完全不占 layout。
+
+    - kind: changed
+      summary: "推理热换同结构 LoRA + 取消生成保留 daemon + 生成参数持久化（#114）"
+      pr_refs: [114]
+      detail: |
+        测试页推理 daemon 三处行为改进：
+
+        - **热换同结构 LoRA**：切换同 base model / 同结构的 LoRA 不再重启 daemon，秒切。
+        - **取消生成保留 daemon**：单次生成任务取消后 daemon 仍存活可复用，不再被误杀。
+        - **生成参数持久化**：刷新页面后 prompt / 采样参数 / 选中 LoRA 等不再重置。
+
+    - kind: changed
+      summary: "输出文件页「下载」「导出」合并为单按钮 + 弹窗二选（#128）"
+      pr_refs: [128]
+      detail: |
+        输出文件页删独立「导出」按钮，「下载」点击后弹 `OutputsDownloadDialog`：radio 二选（本地 zip / 导出到 data_exports 目录）。风格对齐侧栏 `ExportBundleDialog`，但不带训练集 / 正则集 / caption / config 等无关选项。
+
+    - kind: changed
+      summary: "训练 save 字段加单位后缀：`save_every_epochs` / `save_state_every_steps`（#128）"
+      pr_refs: [128]
+      detail: |
+        重命名两个易混字段：
+
+        - `save_every` → `save_every_epochs`（保存 LoRA checkpoint 的 epoch 间隔）。
+        - `save_state_every` → `save_state_every_steps`（保存训练 state 的 step 间隔）。
+
+        `migrate_legacy_save_keys`（pydantic before-validator + `bootstrap.apply_yaml_config` 双层）自动迁移旧 yaml / 旧 preset，无需用户手改文件。同时修正 `save_state_every_epochs` 描述里「与 X 取先到者」错误说明（实际两个 state save 独立判断，文件名各带 `step{N}` / `epoch{N}` 不冲突）。
+
+    - kind: changed
+      summary: "`grad_clip_max_norm` 默认 0 → 1.0，防 LoRA mode collapse（#125）"
+      pr_refs: [125]
+      detail: |
+        训练默认梯度裁剪从「禁用」改为 `1.0`。
+
+        近期一次 Qwen-image LoRA 训练在 step ~1220 mode collapse（loss 从 0.1 飙到 0.9 ~ 1.0、prediction latent std 从 0.99 收缩到 0.68）。5 个算法 expert 跨方向 audit 后确认 `grad_clip = 0` 在 Prodigy + ScheduleFree / DoRA + LoKr / bf16 + flow matching 多个 regime 下放大风险，主流 trainer（SimpleTuner / OneTrainer / ai-toolkit）默认均为 1.0。schema description 同步重写说明参数行为和场景化推荐值。
+
+    - kind: improved
+      summary: "训练集图像网格虚拟滚动 + 主导色占位淡入（#113）"
+      pr_refs: [113]
+      detail: |
+        ImageGrid 改虚拟滚动，大数据集（数百~数千张）上下滑动不再卡。缩略图未到位前用图像主导色块占位，到位后淡入。
+
+    - kind: improved
+      summary: "项目概览页 UI 细节修正 + 窄屏单点适配（#122）"
+      pr_refs: [122]
+      detail: |
+        - `DetailGrid` 外层从 flex column 改 grid `1.4fr 1fr`，empty version 时两行不再塌缩。
+        - `PhaseTimeline` 当前 phase 去掉 accent-soft 背景 + accent border，只保留红色编号，视觉更干净。
+        - `StatusBanner` / `PhaseTimeline` 窄屏（< 1280px）适配：收紧 padding / icon 尺寸 / 隐藏 phase label。
+        - 新建 `styles/responsive.css` 集中所有媒体查询，方便未来全局响应式落地时统一升级。
+
+    - kind: improved
+      summary: "推理 daemon 启动预热避免文本编码器加载卡数分钟（#128）"
+      pr_refs: [128]
+      detail: |
+        用户报告推理 daemon 启动时卡 6+ 分钟在 `loading text encoders`。py-spy 抓到调用链 `transformers.generation.candidate_generator → sklearn → scipy.special.__init__` —— scipy cold import 在 Windows + Python 3.13 + 已加载 GB 级模型（system RAM 紧张）时要几分钟。
+
+        改成 daemon 启动时提前 import `transformers.generation`，等加载 text encoder 时秒过。
+
+    - kind: improved
+      summary: "标签编辑未保存改动切页时弹确认拦截（#128）"
+      pr_refs: [128]
+      detail: |
+        之前只有 `beforeunload` 拦关闭浏览器 / 刷新，应用内 React-Router 导航静默丢失改动。改造：
+
+        - App.tsx 从经典 `BrowserRouter` 迁到 `createBrowserRouter + RouterProvider`（DataRouter），解锁 v6 `useBlocker`。
+        - TagEdit 用 `useBlocker(dirty)` + useDialog 红色 confirm（放弃 / 留下）拦截。
+        - Sidebar + Topbar 拆出 RootLayout 包业务路由进 `<Outlet />`，结构等价。
+
+    - kind: fixed
+      summary: "修复 4 处 UI 滚动溢出（队列 / 监控 / 队列详情 / 项目卡片）（#110）"
+      pr_refs: [110]
+      detail: |
+        4 处父层 `overflow-hidden` 锁视窗高度但子层缺 `flex-1 min-h-0`，子内容超出后被父层裁掉、`overflow-y-auto` 不触发：
+
+        - `/queue` 任务多到撑爆视窗后无法下拉。
+        - `/tools/monitor` running 任务时面板内容超视窗被裁。
+        - `/queue/:id#monitor` 同上（共用 MonitorDashboard）。
+        - `/queue/:id#overview` 长 error_msg / 路径无法滚动。
+
+        以及项目主页卡片 grid 缺 `auto-rows-fr`，带 note 的卡片把同行其它卡片撑成不齐。
+
+    - kind: fixed
+      summary: "项目概览继续按钮显示当前阶段（之前误显示下一阶段）（#126）"
+      pr_refs: [126]
+      detail: |
+        `StatusBanner` 的「继续 X →」按钮原本按 `nextPhase = PHASE_ORDER_TIMELINE[ci + 1]` 渲染，当 version.phase = curating 且 train_image_count = 0 时按钮显示「继续 ② 打标」，让用户误以为当前阶段已完成。改为 `continueTarget = currentPhase`，按钮显示「继续 ① 训练集筛选 →」并跳 curate 页。cursor 推进的唯一入口仍在 Sidebar。
+
+    - kind: fixed
+      summary: "队列挂起 / 释放 / 重排接口偶发 422 错误（#114）"
+      pr_refs: [114]
+      detail: |
+        FastAPI 路由顺序问题：`/api/queue/hold` / `/api/queue/release` / `/api/queue/reorder` 等静态路径被 `/api/queue/{task_id}` 参数路由抢匹配，返回 422 unprocessable entity。重排路由顺序修复。
+
+    - kind: fixed
+      summary: "训练日志中内部协议行不再混进显示 + 自动备份日志独立分类（#114）"
+      pr_refs: [114]
+      detail: |
+        - `__EVENT__:` 开头的进程间协议行不再被当作训练日志显示。
+        - 自动 epoch 备份与手动 step / epoch 保存的日志提示分开，不再共用同一行（之前看不清是哪一种 save 触发）。
+
+    - kind: fixed
+      summary: "正则化预生成隐藏队列 + 日志移到 config tab + 自动选 attention backend（#114）"
+      pr_refs: [114]
+      detail: |
+        - 正则集预生成任务从队列页隐藏（之前混在训练任务列表里）。
+        - 预生成日志移到 version config tab 内（之前散落在主队列日志里）。
+        - attention backend 不再要求用户手动选择，会根据安装的库自动检测。
+
+    - kind: fixed
+      summary: "裁剪页 N=1 同名覆盖后缩略图错位 + 含括号文件名加载失败（#114, #124）"
+      pr_refs: [114, 124]
+      detail: |
+        - **N=1 同名覆盖**：单框裁剪后画布 + filmstrip 缩略图显示的图与裁剪框对应区域不一致（明显大很多），刷新页面后正常。根因是 React state 决定画布尺寸 + CSS `background-image cover` 拉伸的设计模式 state stale 时图被拉伸。改为 wrapper `aspect-ratio` 来自 `img.naturalSize`、img `object-fit:contain`，显示永远等于文件内容。
+        - **含括号文件名**：CSS `url()` 加引号，文件名含 `(` `)` 的图正常加载。
+
+    - kind: fixed
+      summary: "队列页只显示当前任务训练状态 + 嵌套训练输出正确渲染（#114）"
+      pr_refs: [114]
+      detail: |
+        队列页主行不再混入历史任务的训练 metric；任务下方的嵌套输出（每 epoch 采样图 / 中间状态）按所属任务正确分组渲染，不再串行错位。
+
+    - kind: fixed
+      summary: "预设导出修复并改走 server 直发 yaml + 提供一次性迁移工具（#122）"
+      pr_refs: [122]
+      detail: |
+        2026-05-21 ~ 24 约 3 天窗口期：前端 `downloadCurrentPreset` 调 `generateToml` 生成手写 TOML 但标 `.yaml` 后缀 + `application/yaml` MIME，导致再上传被拒（"顶层不是 mapping"）。
+
+        - 改走 server `GET /api/presets/{name}/download`（FileResponse 直发磁盘原 yaml）。
+        - 加 `isNew / hasAnyChange` 校验，未保存或有改动时点下载先弹 toast「请先保存」。
+        - `generateToml` 保留给 TOML 预览（sd-scripts 兼容格式）。
+        - 一次性迁移工具 `tools/preset_toml_to_yaml.py` 救活窗口期内已破损的文件（处理多行 `{...}` → inline / drop 空值 key / tomllib 解析 + TrainingConfig 校验 → yaml 落盘）。
+
+    - kind: fixed
+      summary: "任务详情「关联配置」tab 长 yaml 无法滚动到底（#128）"
+      pr_refs: [128]
+      detail: |
+        `SnapshotConfigTab` 父级 flex 链没传 `min-h-0`，长 yaml 被裁剪。给外层加 `flex-1 min-h-0`、header `shrink-0`、pre `flex-1 min-h-0 overflow-auto`。
+
+    - kind: fixed
+      summary: "项目概览标签分布卡硬截断 11 条 + bar 高度被 flex 压扁（#128）"
+      pr_refs: [128]
+      detail: |
+        删 `setTags(arr.slice(0, 11))` 硬截断显示全部标签；inner 容器加 `flex-1 min-h-0` 让 `overflowY:auto` 生效；每条 bar 加 `minHeight:22` + `flexShrink:0`，1000+ 条标签不会被 flex 平分压扁。header 文案从「唯一 · X 显示」改「标签」。
+
+    - kind: fixed
+      summary: "测试页数据集 prompt 选择器关闭时未清空已选 tag（#128）"
+      pr_refs: [128]
+      detail: |
+        Generate 测试页数据集 prompt picker 之前 `×` 关闭只关 UI 不动 `datasetPick` 状态，已选 caption.tags 仍被 `handleGenerate` 拼到 prompt，用户以为没选还在生效。改成 `onClose` 同时 `setDatasetPick(null)`。
+
 - version: "0.9.1"
   date: "2026-05-20"
   summary: "依赖修正 + 发布流水线 version 一致性校验"
@@ -27,200 +327,106 @@
       summary: "UI 暂停 / 恢复训练 + 队列挂起调度（ADR 0006）（#100, #101, #105）"
       pr_refs: [98, 99, 100, 101, 105]
       detail: |
-        Queue / QueueDetail 页加 4 个新交互（详见
-        [ADR 0006](docs/adr/0006-queue-pause-resume.md) 全文 + Addendum 1
-        + design doc 三轮 review）：
+        Queue / QueueDetail 页加 4 个新交互（详见 [ADR 0006](docs/adr/0006-queue-pause-resume.md) 全文 + Addendum 1 + design doc 三轮 review）：
 
-        - **任务暂停**：running task 点暂停 → 先弹 PauseConfirmModal 提醒
-          语义（按 Addendum 1：暂停 = cancel + 立即释放 GPU，恢复点从最近
-          一次 epoch 末 auto-backup 起），确认后子进程收 `CTRL_BREAK_EVENT`
-          / `SIGINT`，handle_interrupt 保 LoRA "interrupted" + 写 pause
-          snapshot freeze 当前 args → 子进程 exit 0 → task 标 paused。
-          UI 全程锁 PauseProgressModal 引导（保存中 / 30s 超时三选一 /
-          失败兜底）。
-        - **任务恢复**：paused 行点恢复 → status 回 pending → supervisor
-          下次 dispatch 用 `--resume-state <auto_epoch_state.pt>` 拉起，
-          bootstrap_phase 读 sibling config snapshot 覆盖 args（snapshot
-          是 ADR §5.7 frozen 真相，跟用户后续改 version / preset / yaml
-          完全解耦） → load_training_state 成功 emit
-          `resume_state_loaded` → supervisor 清 pause 文件对。
-        - **队列挂起 / 恢复调度**：banner sticky 顶部；挂起 confirmation
-          modal 检测 running task 多问一句 "让它跑完" / "同时暂停"，
-          主按钮文案随 radio 联动。
-        - **取消 paused task**：paused 行有 "彻底取消"，删 pause 文件 +
-          清 db 字段。
+        - **任务暂停**：running task 点暂停 → 先弹 PauseConfirmModal 提醒语义（按 Addendum 1：暂停 = cancel + 立即释放 GPU，恢复点从最近一次 epoch 末 auto-backup 起），确认后子进程收 `CTRL_BREAK_EVENT` / `SIGINT`，handle_interrupt 保 LoRA "interrupted" + 写 pause snapshot freeze 当前 args → 子进程 exit 0 → task 标 paused。UI 全程锁 PauseProgressModal 引导（保存中 / 30s 超时三选一 / 失败兜底）。
+        - **任务恢复**：paused 行点恢复 → status 回 pending → supervisor 下次 dispatch 用 `--resume-state <auto_epoch_state.pt>` 拉起，bootstrap_phase 读 sibling config snapshot 覆盖 args（snapshot 是 ADR §5.7 frozen 真相，跟用户后续改 version / preset / yaml 完全解耦） → load_training_state 成功 emit `resume_state_loaded` → supervisor 清 pause 文件对。
+        - **队列挂起 / 恢复调度**：banner sticky 顶部；挂起 confirmation modal 检测 running task 多问一句 "让它跑完" / "同时暂停"，主按钮文案随 radio 联动。
+        - **取消 paused task**：paused 行有 "彻底取消"，删 pause 文件 + 清 db 字段。
 
-        信号链路（#96 spike 端到端验证）：supervisor `CTRL_BREAK_EVENT` /
-        POSIX `SIGINT` → 子进程 SIGBREAK / SIGINT handler → handle_interrupt
-        保 state + emit `__EVENT__:pause_state` → supervisor `_finish_slot`
-        三元分流（paused / canceled / done / failed），pause_pending 但
-        state_path 空 → 兜底 canceled。db migration v6 加 4 个 NULLABLE 列
-        + `queue_settings` kv 表持久化 hold 开关（老库零 backfill）。
+        信号链路（#96 spike 端到端验证）：supervisor `CTRL_BREAK_EVENT` / POSIX `SIGINT` → 子进程 SIGBREAK / SIGINT handler → handle_interrupt 保 state + emit `__EVENT__:pause_state` → supervisor `_finish_slot` 三元分流（paused / canceled / done / failed），pause_pending 但 state_path 空 → 兜底 canceled。db migration v6 加 4 个 NULLABLE 列 + `queue_settings` kv 表持久化 hold 开关（老库零 backfill）。
 
     - kind: changed
       summary: "暂停后从最近 epoch 末接续训练，不会丢半个 epoch 进度（ADR 0006 Addendum 1）（#105）"
       pr_refs: [105]
       detail: |
-        合 PR-1~PR-4 后三方算法专家深度 audit dev 训练栈，翻盘初版 ADR 的
-        mid-epoch save 路径——grad_accum 周期未守 / dataloader 5% double-
-        train / `current_epoch` 二义性 / cosine restart `T_cur` 漂移都是
-        mid-epoch 无法 freeze 的根因。改为：
+        合 PR-1~PR-4 后三方算法专家深度 audit dev 训练栈，翻盘初版 ADR 的 mid-epoch save 路径——grad_accum 周期未守 / dataloader 5% double-train / `current_epoch` 二义性 / cosine restart `T_cur` 漂移都是 mid-epoch 无法 freeze 的根因。改为：
 
-        - **Pause = Cancel + 立即释放 GPU**：handle_interrupt 不再尝试
-          freeze mid-epoch 训练状态，直接 LoRA "interrupted" 落盘 + 子进程
-          exit。
-        - **Epoch 末 auto-backup**：每个 epoch 末覆盖式写一份
-          `state/task_<TID>/auto_epoch_state.pt`，下次 resume 就从这个最近
-          完整 epoch 边界起，零中段误差。
-        - **UI is_pausable 升级**：首 epoch 内 / 还没有 auto-backup 时暂停
-          按钮完全隐藏（避免点了 "暂停" 实际没有可恢复 state 的 footgun）。
+        - **Pause = Cancel + 立即释放 GPU**：handle_interrupt 不再尝试 freeze mid-epoch 训练状态，直接 LoRA "interrupted" 落盘 + 子进程 exit。
+        - **Epoch 末 auto-backup**：每个 epoch 末覆盖式写一份 `state/task_<TID>/auto_epoch_state.pt`，下次 resume 就从这个最近完整 epoch 边界起，零中段误差。
+        - **UI is_pausable 升级**：首 epoch 内 / 还没有 auto-backup 时暂停按钮完全隐藏（避免点了 "暂停" 实际没有可恢复 state 的 footgun）。
 
-        详细 audit 流程 / 三方专家评审 / 拒绝方案 A/B/C 的理由见
-        [docs/adr/0006-queue-pause-resume.md](docs/adr/0006-queue-pause-resume.md)
-        Addendum 1。
+        详细 audit 流程 / 三方专家评审 / 拒绝方案 A/B/C 的理由见 [docs/adr/0006-queue-pause-resume.md](docs/adr/0006-queue-pause-resume.md) Addendum 1。
 
     - kind: fixed
       summary: "Prodigy+ScheduleFree / InfoNoise 训练恢复后不再崩溃 / 丢进度（#105）"
       pr_refs: [105]
       detail: |
-        - `prodigy_plus_schedulefree`（PPSF）依赖 `optimizer.train()` 切
-          训练模式，`load_training_state` 后没调，resume 立即抛 `Not in
-          train mode!`。修：`load_training_state` 末尾
-          `if hasattr(optimizer, 'train'): optimizer.train()`。
-        - InfoNoise 9 个内部 state（EMA / K / B / FIFO / cdf / hist / step
-          counters）之前不进 state_dict，resume 后冷启动重走 N_warm（默认
-          5000 步）。修：加 `state_dict` / `load_state_dict` 序列化 + K/B
-          mismatch 退冷启动 warning 不抛。
-        - 14 个新单测（baseline no-op / InfoNoise roundtrip / sample bit-
-          exact / K/B mismatch / FIFO maxlen / ckpt 损坏 warning）codify。
+        - `prodigy_plus_schedulefree`（PPSF）依赖 `optimizer.train()` 切训练模式，`load_training_state` 后没调，resume 立即抛 `Not in train mode!`。修：`load_training_state` 末尾 `if hasattr(optimizer, 'train'): optimizer.train()`。
+        - InfoNoise 9 个内部 state（EMA / K / B / FIFO / cdf / hist / step counters）之前不进 state_dict，resume 后冷启动重走 N_warm（默认 5000 步）。修：加 `state_dict` / `load_state_dict` 序列化 + K/B mismatch 退冷启动 warning 不抛。
+        - 14 个新单测（baseline no-op / InfoNoise roundtrip / sample bit-exact / K/B mismatch / FIFO maxlen / ckpt 损坏 warning）codify。
 
     - kind: changed
       summary: "同一 version 下连跑多个训练任务不再互相覆盖进度文件（#97）"
       pr_refs: [97]
       detail: |
-        `save_state_every` / `save_state_every_epochs` / `handle_interrupt`
-        全部改写到 `output_dir/state/task_<TID>/` 下，不再写 output_dir
-        顶层。同一 version 下连跑多个 task 时再也不会互相覆盖 state 文件
-        （latent bug 直接修）。
+        `save_state_every` / `save_state_every_epochs` / `handle_interrupt` 全部改写到 `output_dir/state/task_<TID>/` 下，不再写 output_dir 顶层。同一 version 下连跑多个 task 时再也不会互相覆盖 state 文件（latent bug 直接修）。
 
         - supervisor 启动 training 时通过 env `LORA_TASK_ID` 注入 task id
         - CLI 直接跑（无 env）fallback 到 `state/task_unknown/` 子目录
-        - `list_state_ckpts`（ResumeFieldPicker 后端）同时扫旧顶层 + 新
-          子目录，**老用户的现存 .pt 不丢**
+        - `list_state_ckpts`（ResumeFieldPicker 后端）同时扫旧顶层 + 新子目录，**老用户的现存 .pt 不丢**
         - 顺手修了 `list_state_ckpts` 之前只扫 step 不扫 epoch 的小 bug
 
     - kind: added
       summary: "打标页加触发词输入，启动后自动写进每张 caption 和采样图 prompt（#103）"
       pr_refs: [103]
       detail: |
-        终结「忘记加触发词导致白训」footgun。Step 4 (Tagging) 顶部加一个
-        紧凑输入框，启动打标时把 trigger 落库到 `versions.trigger_word`
-        （migration v7），tag worker 把 trigger 作为第一个 tag 注入每张
-        caption：
+        终结「忘记加触发词导致白训」footgun。Step 4 (Tagging) 顶部加一个紧凑输入框，启动打标时把 trigger 落库到 `versions.trigger_word`（migration v7），tag worker 把 trigger 作为第一个 tag 注入每张 caption：
 
-        - `.txt` / 简单 list `.json`：trigger 作为 `tags[0]`（case-
-          insensitive 去重）
-        - LLM `documented_full` `.json`：顶层 `meta.trigger` 注入（不污染
-          `ai_output` / `fixed` / `character` 等业务字段）
+        - `.txt` / 简单 list `.json`：trigger 作为 `tags[0]`（case-insensitive 去重）
+        - LLM `documented_full` `.json`：顶层 `meta.trigger` 注入（不污染 `ai_output` / `fixed` / `character` 等业务字段）
         - caption_text 模式：`f"{trigger}, {text}"` prepend
-        - 训练 runtime `bootstrap.py` 自动把 trigger 注入 sample_prompt，
-          采样图天然带触发词（token 级 case-insensitive 匹配，"art" 不会
-          误判 "artist"）
-        - TagEdit 页 actions 区显示 trigger badge（read-only）缩短"忘记
-          什么是 trigger"的 cognitive distance
+        - 训练 runtime `bootstrap.py` 自动把 trigger 注入 sample_prompt，采样图天然带触发词（token 级 case-insensitive 匹配，"art" 不会误判 "artist"）
+        - TagEdit 页 actions 区显示 trigger badge（read-only）缩短"忘记什么是 trigger"的 cognitive distance
 
-        其他主流 trainer 对比：Civitai 在线 trainer 项目创建必填 → 强制；
-        AI-Toolkit `[trigger]` runtime 替换 → 不可移植；本 PR 走 "作者
-        写时规范化"路线，caption 文件即真相，切 trainer 也带得走。
+        其他主流 trainer 对比：Civitai 在线 trainer 项目创建必填 → 强制；AI-Toolkit `[trigger]` runtime 替换 → 不可移植；本 PR 走 "作者写时规范化"路线，caption 文件即真相，切 trainer 也带得走。
 
     - kind: added
       summary: "Studio 全前端中英双语 + 首次启动弹语言选择（#76, #89）"
       pr_refs: [76, 89]
       detail: |
-        - **#76**：Studio 前端 Regularization / Settings / Generate /
-          Testing / Presets / Project Overview / LLM Tagger 全页本地化；
-          schema 暴露字段改为 frontend-owned i18n key（后端 enum / 字段名
-          稳定，UI 渲染本地化 label / description / disable hint）；
-          Settings 模型 / upscaler 目录描述 + LLM Tagger builtin preset /
-          message editor copy 一并本地化；恢复 + 扩展 schema-driven
-          takeover（PPSF 禁 scheduler / InfoNoise 禁 timestep / Prodigy
-          / PPSF 锁 LR=1）。
-        - **#89**：首启语言选择从 `studio.bat/sh` CLI prompt（cmd.exe
-          默认 codepage 显示不了汉字）改成前端 modal。`localStorage
-          ['studio.lang']` 为 null 时自动弹出，"English / 中文" 两张卡
-          + 各自语言副标题，键盘焦点初始落到 `navigator.language` 命中
-          那张但视觉不引导。fresh install 不再有阻塞 prompt，CI / 无人
-          值守部署直通。
+        - **#76**：Studio 前端 Regularization / Settings / Generate / Testing / Presets / Project Overview / LLM Tagger 全页本地化；schema 暴露字段改为 frontend-owned i18n key（后端 enum / 字段名稳定，UI 渲染本地化 label / description / disable hint）；Settings 模型 / upscaler 目录描述 + LLM Tagger builtin preset / message editor copy 一并本地化；恢复 + 扩展 schema-driven takeover（PPSF 禁 scheduler / InfoNoise 禁 timestep / Prodigy / PPSF 锁 LR=1）。
+        - **#89**：首启语言选择从 `studio.bat/sh` CLI prompt（cmd.exe 默认 codepage 显示不了汉字）改成前端 modal。`localStorage['studio.lang']` 为 null 时自动弹出，"English / 中文" 两张卡 + 各自语言副标题，键盘焦点初始落到 `navigator.language` 命中那张但视觉不引导。fresh install 不再有阻塞 prompt，CI / 无人值守部署直通。
 
     - kind: changed
       summary: "导出训练集 / 队列改用浏览器原生下载，大文件不再卡内存（#104）"
       pr_refs: [104]
       detail: |
-        outputs.zip 那套 `<a>` 直链 + 后端 `*_ready/_failed` SSE 标杆推
-        广到剩下的下载入口（train.zip / queue 导出），浏览器原生下载条
-        + app-side 小 spinner 收尾。SSH 隧道 / 大文件场景下不再吃 JS
-        heap、看得到进度、切 tab 不中断。
+        outputs.zip 那套 `<a>` 直链 + 后端 `*_ready/_failed` SSE 标杆推广到剩下的下载入口（train.zip / queue 导出），浏览器原生下载条 + app-side 小 spinner 收尾。SSH 隧道 / 大文件场景下不再吃 JS heap、看得到进度、切 tab 不中断。
 
         - 删 `downloadBlob` (fetch→blob，静默吃内存)
-        - 新事件：`version_train_zip_ready/_failed` / `queue_export_ready/
-          _failed`
-        - 预设 yaml 导入语义改对齐："上传即入池 + 自动选中"，同名冲突
-          弹三选一 dialog（覆盖 / 另存为 `{name}-2` / 取消），不再走"切
-          新建模式预填表单等用户改名"的二步式
+        - 新事件：`version_train_zip_ready/_failed` / `queue_export_ready/_failed`
+        - 预设 yaml 导入语义改对齐："上传即入池 + 自动选中"，同名冲突弹三选一 dialog（覆盖 / 另存为 `{name}-2` / 取消），不再走"切新建模式预填表单等用户改名"的二步式
 
     - kind: added
       summary: "训练新增 huber loss 选项，对极端样本更鲁棒（#75, #86, #87）"
       pr_refs: [75, 86, 87]
       detail: |
-        - Schema 新增 `loss_type: Literal["mse", "huber"]` + `huber_c`
-          专属字段；默认 `mse`，旧 yaml / preset 行为 bit-for-bit 一致
-          （MseLoss.compute 跟 `F.mse_loss(reduction='none')` codify 严格
-          相等）。
-        - 按 ADR 0003 plugin registry 模式落子包：BUILDERS + build_loss
-          + validate_schema_consistency 三件套 + `LossProtocol`
-          (runtime_checkable Protocol)。
-        - **HuberLoss** 简化为单 constant δ（#86 删 PR #75 引入的
-          snr/sigma schedule —— 数学退化为 MSE，且无 paper / 主流 trainer
-          出处；触发 [feedback_verify_paper_before_fixing_algo]）。
-        - InfoNoise 的 `_raw_mse` 跟训练 loss 解耦，始终单独算一次
-          `F.mse_loss`（保证 huber 启用时 InfoNoise paper I-MMSE 假设
-          不被破坏），有 `test_infonoise_raw_mse_decoupled_from_loss_type`
-          守这条边界。
+        - Schema 新增 `loss_type: Literal["mse", "huber"]` + `huber_c` 专属字段；默认 `mse`，旧 yaml / preset 行为 bit-for-bit 一致（MseLoss.compute 跟 `F.mse_loss(reduction='none')` codify 严格相等）。
+        - 按 ADR 0003 plugin registry 模式落子包：BUILDERS + build_loss + validate_schema_consistency 三件套 + `LossProtocol` (runtime_checkable Protocol)。
+        - **HuberLoss** 简化为单 constant δ（#86 删 PR #75 引入的 snr/sigma schedule —— 数学退化为 MSE，且无 paper / 主流 trainer 出处；触发 [feedback_verify_paper_before_fixing_algo]）。
+        - InfoNoise 的 `_raw_mse` 跟训练 loss 解耦，始终单独算一次 `F.mse_loss`（保证 huber 启用时 InfoNoise paper I-MMSE 假设不被破坏），有 `test_infonoise_raw_mse_decoupled_from_loss_type` 守这条边界。
 
     - kind: added
       summary: "新增 mixed_uniform timestep 采样模式 + 后置 schedule shift（#73, #85）"
       pr_refs: [73, 85, 87]
       detail: |
-        - `timestep_sampling` Literal 加 `mixed_uniform_low` /
-          `mixed_uniform_logit` 两个 mode，在 uniform 全覆盖基础上按
-          `timestep_mix_low_prob` 比例混入 `logit_normal_low` /
-          `logit_normal` 的偏置端分布。
-        - 新字段 `timestep_schedule_shift: float = 1.0`：跟
-          `timestep_shift`（logit-normal 内部）不同，是对采样**完成后**
-          的 t 做一次额外 `t' = (t·s) / (1 + (s-1)·t)` 偏移。1536
-          训练用 1.12 比单独调 `timestep_shift` 更稳。
-        - 默认值 `timestep_mix_low_prob=0.0` / `timestep_schedule_shift
-          =1.0` 下输出 bit-for-bit 等价历史 sample_t（s==1.0 short-
-          circuit）。InfoNoise CDF 正式阶段不读 baseline shift（codify
-          `test_infonoise_cdf_path_ignores_baseline_timestep_schedule_shift`）。
-        - 字段命名 PR #85 把 `schedule_shift` → `timestep_schedule_shift`
-          对齐 `timestep_*` 一族（合并 24h 内 zero-cost 重命名）。
+        - `timestep_sampling` Literal 加 `mixed_uniform_low` / `mixed_uniform_logit` 两个 mode，在 uniform 全覆盖基础上按 `timestep_mix_low_prob` 比例混入 `logit_normal_low` / `logit_normal` 的偏置端分布。
+        - 新字段 `timestep_schedule_shift: float = 1.0`：跟 `timestep_shift`（logit-normal 内部）不同，是对采样**完成后**的 t 做一次额外 `t' = (t·s) / (1 + (s-1)·t)` 偏移。1536 训练用 1.12 比单独调 `timestep_shift` 更稳。
+        - 默认值 `timestep_mix_low_prob=0.0` / `timestep_schedule_shift=1.0` 下输出 bit-for-bit 等价历史 sample_t（s==1.0 short-circuit）。InfoNoise CDF 正式阶段不读 baseline shift（codify `test_infonoise_cdf_path_ignores_baseline_timestep_schedule_shift`）。
+        - 字段命名 PR #85 把 `schedule_shift` → `timestep_schedule_shift` 对齐 `timestep_*` 一族（合并 24h 内 zero-cost 重命名）。
 
     - kind: added
       summary: "loss_weighting=detail_inv_t 的权重上下限现在可在 UI 调（#72, #87）"
       pr_refs: [72, 86, 87]
       detail: |
-        `loss_weighting=detail_inv_t` 原 clamp 范围 hardcode `[1, 5]`，
-        现在改 schema 两个参数 `detail_inv_t_min=1.0` / `detail_inv_t_max
-        =5.0`（show_when + advanced），默认值等价历史 hardcode（旧 yaml
-        行为零变化）。
+        `loss_weighting=detail_inv_t` 原 clamp 范围 hardcode `[1, 5]`，现在改 schema 两个参数 `detail_inv_t_min=1.0` / `detail_inv_t_max=5.0`（show_when + advanced），默认值等价历史 hardcode（旧 yaml 行为零变化）。
 
         - 雾蒙蒙 / 低饱和画风：max 降到 3，缓解"低 t 反复学"的偏置
         - 高对比 / 硬朗画风：维持默认 [1, 5]
         - 激进细节：max 升到 8（Prodigy d 估计注意单样本主导风险）
 
-        Schema validator 守 `min > max` 启动期 fail-fast；下限 ≥ 1.0
-        （描述补"<1.0 因 1/t>1 恒成立故无效"防配置死区）。
+        Schema validator 守 `min > max` 启动期 fail-fast；下限 ≥ 1.0（描述补"<1.0 因 1/t>1 恒成立故无效"防配置死区）。
 
     - kind: added
       summary: "Settings 加「统一模型路径」toggle，关后预设可携带绝对路径（#93）"
@@ -228,34 +434,24 @@
       detail: |
         默认 ON（沿用旧行为，多数用户自动同步全局模型路径）；OFF 后：
 
-        | | toggle ON（默认） | toggle OFF |
-        |---|---|---|
-        | 预设页 / 项目页 4 字段 UI | disabled + 跳转 Settings hint | 可编辑 + picker + ↺ reset |
-        | fork preset → version | 用全局值覆盖 | 拷预设值不覆盖 |
-        | 保存为预设 | 4 字段清成 Settings 全局值 | 原样保留绝对路径 |
-        | yaml 落盘 | 一律绝对 POSIX 路径 | 同上 |
+        | | toggle ON（默认） | toggle OFF | |---|---|---| | 预设页 / 项目页 4 字段 UI | disabled + 跳转 Settings hint | 可编辑 + picker + ↺ reset | | fork preset → version | 用全局值覆盖 | 拷预设值不覆盖 | | 保存为预设 | 4 字段清成 Settings 全局值 | 原样保留绝对路径 | | yaml 落盘 | 一律绝对 POSIX 路径 | 同上 |
 
-        老相对路径 yaml read/write 兜底转绝对（基于 REPO_ROOT，反斜杠 →
-        POSIX `/`）。独立 PUT 端点不进全局 dirty 流程。
+        老相对路径 yaml read/write 兜底转绝对（基于 REPO_ROOT，反斜杠 → POSIX `/`）。独立 PUT 端点不进全局 dirty 流程。
 
     - kind: fixed
       summary: "路径选择器 3 处修：外部路径浏览 / 文件起点 / Windows 路径分隔符（#93）"
       pr_refs: [93]
       detail: |
-        - 端点放开外部绝对路径浏览（之前 `list_dir` 默认拒外部，
-          PathPicker 设计本就是给选外部模型路径用的）
+        - 端点放开外部绝对路径浏览（之前 `list_dir` 默认拒外部，PathPicker 设计本就是给选外部模型路径用的）
         - 文件路径作起点时自动回退到父目录并高亮该文件（之前直接 404）
-        - 后端统一 `as_posix()` 输出，前端 `childPath` 拼接不再混用 `\`
-          / `/`
-        - 模型根目录输入框默认值预填实际绝对路径；之前 placeholder 文案
-          错写 `REPO_ROOT/anima/`（实际默认 `REPO_ROOT/models/`）
+        - 后端统一 `as_posix()` 输出，前端 `childPath` 拼接不再混用 `\` / `/`
+        - 模型根目录输入框默认值预填实际绝对路径；之前 placeholder 文案错写 `REPO_ROOT/anima/`（实际默认 `REPO_ROOT/models/`）
 
     - kind: fixed
       summary: "LLM 打标兼容更多服务商响应格式 + 加并发节流（#88）"
       pr_refs: [88]
       detail: |
-        - 解析 SSE 兼容响应（部分 OpenAI 兼容服务商即使 stream=false 也
-          回 `text/event-stream`，需要按行 + `[DONE]` 终止符解析）
+        - 解析 SSE 兼容响应（部分 OpenAI 兼容服务商即使 stream=false 也回 `text/event-stream`，需要按行 + `[DONE]` 终止符解析）
         - 每分钟并发请求节流（serial mode 也生效）
         - 非流式响应路径单独 retry
 
@@ -264,28 +460,16 @@
       pr_refs: [94]
       detail: |
         - Settings 自定义放大器下载按钮漏 `common.download` zh/en i18n
-        - 设置页保存按钮 dirty 着色改 `btn-secondary` 灰 / `btn-primary`
-          橙 切换（之前一直橙色靠 disabled 区分弱）
-        - `SensitiveInput`（api_key / user_id 等）+ 配对 `username`
-          加 `autoComplete=new-password` + `data-lpignore` / `data-1p-
-          ignore` / `data-form-type=other`，阻止 Chrome / 1Password /
-          LastPass 自动填充触发 dirty
+        - 设置页保存按钮 dirty 着色改 `btn-secondary` 灰 / `btn-primary` 橙 切换（之前一直橙色靠 disabled 区分弱）
+        - `SensitiveInput`（api_key / user_id 等）+ 配对 `username` 加 `autoComplete=new-password` + `data-lpignore` / `data-1p-ignore` / `data-form-type=other`，阻止 Chrome / 1Password / LastPass 自动填充触发 dirty
         - 项目 step header 删 Download / Preprocess 的重复"设置"入口
-        - Generate XY 轴 LoRA picker：`InlineLoraPicker` 加 `live` 模式，
-          chip toggle / 权重变 / pid-vid 切换都即时 `onPick`，axis card
-          里常驻 picker 不再渲染"添加 N 个"commit footer
+        - Generate XY 轴 LoRA picker：`InlineLoraPicker` 加 `live` 模式，chip toggle / 权重变 / pid-vid 切换都即时 `onPick`，axis card 里常驻 picker 不再渲染"添加 N 个"commit footer
 
     - kind: changed
       summary: "zip 安装包用户「启用自动更新」后不再被本地修改卡住（#84）"
       pr_refs: [84]
       detail: |
-        v0.8.1 zip 用户实测：解压后跑过 `studio.bat run`，npm install 改
-        `studio/web/package-lock.json` 几行依赖元数据 → `git reset
-        --mixed` 路径 init 完就 dirty → 版本面板 pre-flight 卡更新。改
-        `--hard` 强制覆盖 working tree 对齐 anchor tag。zip 用户场景下
-        "启用自动更新"潜台词就是"对齐上游稳定版"，强制覆盖比保留随机改
-        动符合预期。Settings banner 文案显式改为「本地源码会同步到上游
-        v{X.Y.Z}，zip 目录里的本地修改会被覆盖」。
+        v0.8.1 zip 用户实测：解压后跑过 `studio.bat run`，npm install 改 `studio/web/package-lock.json` 几行依赖元数据 → `git reset --mixed` 路径 init 完就 dirty → 版本面板 pre-flight 卡更新。改 `--hard` 强制覆盖 working tree 对齐 anchor tag。zip 用户场景下"启用自动更新"潜台词就是"对齐上游稳定版"，强制覆盖比保留随机改动符合预期。Settings banner 文案显式改为「本地源码会同步到上游 v{X.Y.Z}，zip 目录里的本地修改会被覆盖」。
 
 - version: "0.8.3"
   date: "2026-05-19"
@@ -294,40 +478,21 @@
     - kind: fixed
       summary: "ARB 桶尾不足 batch_size 张图时整桶被丢的 bug 修复（短 batch 保留，对齐 kohya / ai-toolkit）"
       detail: |
-        `BucketBatchSampler` 默认 `drop_last=True`：每个 ARB 桶里
-        `len(bucket) % batch_size` 张图被丢。最严重的是
-        **桶 size < batch_size 时整桶被丢**，例如 batch_size=2
-        时所有单图奇形比例的桶都永远训不到。
+        `BucketBatchSampler` 默认 `drop_last=True`：每个 ARB 桶里 `len(bucket) % batch_size` 张图被丢。最严重的是 **桶 size < batch_size 时整桶被丢**，例如 batch_size=2 时所有单图奇形比例的桶都永远训不到。
 
-        排查 git history：`drop_last=True` 是 ARB 初版（commit
-        `6774079` "feat: add arb"，2026-02-08）默认写下的，没有
-        commit message / ADR 解释设计意图，应是沿用 PyTorch
-        `DataLoader` 的卫生默认 —— 但 ARB 场景下 trade-off 已经
-        翻转：普通 DataLoader 一个 epoch 丢 1 个零头，ARB 是
-        **每个桶各丢一个零头**，丢失量随桶数线性放大。
+        排查 git history：`drop_last=True` 是 ARB 初版（commit `6774079` "feat: add arb"，2026-02-08）默认写下的，没有 commit message / ADR 解释设计意图，应是沿用 PyTorch `DataLoader` 的卫生默认 —— 但 ARB 场景下 trade-off 已经翻转：普通 DataLoader 一个 epoch 丢 1 个零头，ARB 是 **每个桶各丢一个零头**，丢失量随桶数线性放大。
 
-        - `phases/dataset.py`：`drop_last=False`，对齐 kohya
-          `sd-scripts`（`math.ceil(len/bs)`）与 ostris `ai-toolkit`
-          （`min(end_idx, len(bucket))`）的「短 batch 不丢」语义
-        - diffusion DiT 用 LayerNorm/GroupNorm，对动态 batch
-          不敏感；`loop.py` 已按 `latents.shape[0]` 动态读 bs，
-          短 batch 不会引入数值问题
+        - `phases/dataset.py`：`drop_last=False`，对齐 kohya `sd-scripts`（`math.ceil(len/bs)`）与 ostris `ai-toolkit` （`min(end_idx, len(bucket))`）的「短 batch 不丢」语义
+        - diffusion DiT 用 LayerNorm/GroupNorm，对动态 batch 不敏感；`loop.py` 已按 `latents.shape[0]` 动态读 bs，短 batch 不会引入数值问题
 
     - kind: fixed
       summary: "每 epoch 步数现在按 ARB 桶精确算（之前偏小导致 LR scheduler 末尾不对齐）"
       detail: |
-        `__len__` 之前用全局 `n // batch_size`（或 `ceil(n/bs)`），
-        但 ARB 实际 batch 数 = `Σ_b f(n_b, bs)`，每桶各自有零头。
-        全局公式低估 batch 数 → `steps_per_epoch` 偏 → scheduler
-        `total_steps` 偏 → 末尾几步 LR 不对齐。
+        `__len__` 之前用全局 `n // batch_size`（或 `ceil(n/bs)`），但 ARB 实际 batch 数 = `Σ_b f(n_b, bs)`，每桶各自有零头。全局公式低估 batch 数 → `steps_per_epoch` 偏 → scheduler `total_steps` 偏 → 末尾几步 LR 不对齐。
 
-        例：数据集 129 张 + batch_size=2，日志报「每 epoch 步数: 64」
-        （=129//2），但实际跑出来按桶 floor 求和会更小（每桶各掉一个
-        零头）。修后按桶遍历 `bucket_for_index` 分别 floor/ceil 求和。
+        例：数据集 129 张 + batch_size=2，日志报「每 epoch 步数: 64」（=129//2），但实际跑出来按桶 floor 求和会更小（每桶各掉一个零头）。修后按桶遍历 `bucket_for_index` 分别 floor/ceil 求和。
 
-        加 `tests/test_bucket_batch_sampler.py` 覆盖：小桶不丢 / 历史
-        drop_last=True 行为 / `__len__` 按桶算 / `__len__` == 实际
-        yield 的 batch 数 / 无桶信息时退回全局公式。
+        加 `tests/test_bucket_batch_sampler.py` 覆盖：小桶不丢 / 历史 drop_last=True 行为 / `__len__` 按桶算 / `__len__` == 实际 yield 的 batch 数 / 无桶信息时退回全局公式。
 
 - version: "0.8.2"
   date: "2026-05-17"
@@ -337,84 +502,38 @@
       summary: "预设跟 version 改为完全脱钩，version yaml 直接作为「项目专属配置」"
       detail: |
         发现整个训练页预设系统的 mental model 是坏的：
-        - picker 顶部「预设 X · 已自定义」标签永远显示「已自定义」，即使
-          用户没改任何字段 —— 因为 fork 时 default_paths_for_new_version
-          把 4 个全局模型路径注入成绝对路径，跟全局预设 yaml 里的相对
-          路径 diff 永远存在。`stripProjectFields` 只剥了 6 个项目特定
-          字段，漏了 4 个模型字段
-        - fork 之后 version yaml 跟全局预设其实是脱钩的，但 UI 假装一直
-          绑定，导致用户对「换预设」「保存」语义混乱
-        - fork 后 `onForkPreset` / `saveNewPreset` 没调父级 `reload()`
-          刷新 `activeVersion`，picker 顶部标签停在旧预设名上，用户以为
-          fork 没生效（实际后端已写）
+        - picker 顶部「预设 X · 已自定义」标签永远显示「已自定义」，即使用户没改任何字段 —— 因为 fork 时 default_paths_for_new_version 把 4 个全局模型路径注入成绝对路径，跟全局预设 yaml 里的相对路径 diff 永远存在。`stripProjectFields` 只剥了 6 个项目特定字段，漏了 4 个模型字段
+        - fork 之后 version yaml 跟全局预设其实是脱钩的，但 UI 假装一直绑定，导致用户对「换预设」「保存」语义混乱
+        - fork 后 `onForkPreset` / `saveNewPreset` 没调父级 `reload()` 刷新 `activeVersion`，picker 顶部标签停在旧预设名上，用户以为 fork 没生效（实际后端已写）
 
         改成「version yaml = 项目专属配置」语义：
 
-        - **picker 顶部 button**：has_config=True 显示「项目专属配置」，
-          has_config=False 显示「未配置 — 选预设作为起点」。不再展示
-          来源预设名 + 「· 已自定义」标签
-        - **picker 列表卡片**：去掉 active 高亮（没有「当前绑定」概念了），
-          全部卡片视觉一致；副标题改为「重置为此预设」/「以此预设为起点」
-        - **confirm 文案**：从「换预设会覆盖当前 version 的配置」改成
-          「重置为预设 X 的配置？当前 version 的所有自定义内容会丢失」，
-          okText 改「重置」
-        - **删整套 baseline diff 逻辑**：`presetBaselineRef` /
-          `refreshPresetBaseline` / `stripProjectFields` / `customized`
-          全部移除，连带相关 useEffect
-        - **fork / saveNewPreset 之后调 reload()**：刷父级 activeVersion，
-          否则 picker 顶部跟主表单内容跟实际 yaml 脱节，需要 F5 才能看到
-        - `versions.config_name` db 字段保留作为 audit trail（informational
-          only），不再有 UI 用途
+        - **picker 顶部 button**：has_config=True 显示「项目专属配置」， has_config=False 显示「未配置 — 选预设作为起点」。不再展示来源预设名 + 「· 已自定义」标签
+        - **picker 列表卡片**：去掉 active 高亮（没有「当前绑定」概念了），全部卡片视觉一致；副标题改为「重置为此预设」/「以此预设为起点」
+        - **confirm 文案**：从「换预设会覆盖当前 version 的配置」改成「重置为预设 X 的配置？当前 version 的所有自定义内容会丢失」， okText 改「重置」
+        - **删整套 baseline diff 逻辑**：`presetBaselineRef` / `refreshPresetBaseline` / `stripProjectFields` / `customized` 全部移除，连带相关 useEffect
+        - **fork / saveNewPreset 之后调 reload()**：刷父级 activeVersion，否则 picker 顶部跟主表单内容跟实际 yaml 脱节，需要 F5 才能看到
+        - `versions.config_name` db 字段保留作为 audit trail（informational only），不再有 UI 用途
 
     - kind: fixed
       summary: "新建预设预览表单补齐项目路径（reg_data_dir / data_dir / 模型路径等）"
       detail: |
-        训练页「+ 新建预设」预览表单之前一律展示 schema 默认值
-        （`reg_data_dir=None`、`data_dir=./dataset`、相对模型路径），即使
-        项目已跑过 reg build、Settings 已配好模型，用户在预览里仍看到一片
-        相对路径 / 空白，误以为「fork 后不会自动带项目目录」。实际上
-        `fork_preset_for_version` 后端**早已**注入这些值到 version
-        config（实测验证），只是预览看不到，UX 误导。
+        训练页「+ 新建预设」预览表单之前一律展示 schema 默认值（`reg_data_dir=None`、`data_dir=./dataset`、相对模型路径），即使项目已跑过 reg build、Settings 已配好模型，用户在预览里仍看到一片相对路径 / 空白，误以为「fork 后不会自动带项目目录」。实际上 `fork_preset_for_version` 后端**早已**注入这些值到 version config（实测验证），只是预览看不到，UX 误导。
 
-        - **后端**：`GET /api/projects/{pid}/versions/{vid}/config` 在
-          `has_config=False` 分支新增 `project_specific_defaults` —— 合并
-          `project_specific_overrides()` + `default_paths_for_new_version()`，
-          含 reg/meta.json 检测结果
-        - **前端 startCreatePreset**：用 `project_specific_defaults` 覆盖
-          schema 默认，预览表单初始化即显示「fork 后会得到的值」（含 reg
-          目录 / 训练目录 / 输出目录 / 绝对模型路径）
-        - **前端预览表单**：与主表单一致挂 `disabledFields`（全局模型路径
-          灰显「自动 · 全局设置」）+ `autoHints`（项目特定字段标
-          「自动 · 项目设置」）+ `advancedMode`
-        - **前端 saveNewPreset**：savePreset 前过滤项目特定字段 + 全局模型
-          路径清回 schema 默认，全局预设池不带项目 / 机器数据（fork 时
-          后端会再注入，version config 仍正确）。与
-          `services/presets.py:save_version_config_as_preset` 的清理逻辑对齐
+        - **后端**：`GET /api/projects/{pid}/versions/{vid}/config` 在 `has_config=False` 分支新增 `project_specific_defaults` —— 合并 `project_specific_overrides()` + `default_paths_for_new_version()`，含 reg/meta.json 检测结果
+        - **前端 startCreatePreset**：用 `project_specific_defaults` 覆盖 schema 默认，预览表单初始化即显示「fork 后会得到的值」（含 reg 目录 / 训练目录 / 输出目录 / 绝对模型路径）
+        - **前端预览表单**：与主表单一致挂 `disabledFields`（全局模型路径灰显「自动 · 全局设置」）+ `autoHints`（项目特定字段标「自动 · 项目设置」）+ `advancedMode`
+        - **前端 saveNewPreset**：savePreset 前过滤项目特定字段 + 全局模型路径清回 schema 默认，全局预设池不带项目 / 机器数据（fork 时后端会再注入，version config 仍正确）。与 `services/presets.py:save_version_config_as_preset` 的清理逻辑对齐
 
     - kind: fixed
       summary: "HF 模型下载默认源从 hf-mirror.com 切回 huggingface.co 官方"
       detail: |
-        实测发现 `hf-mirror.com` 在所有已测 `huggingface_hub` 版本
-        （0.25 / 0.30 / 0.34 / 1.14）下下载均失败 —— hub 客户端
-        从 HEAD 响应里读不到 `commit_hash`，抛 `FileMetadataError:
-        Distant resource does not seem to be on huggingface.co`。
-        curl 跟 redirect 拿 bytes 没问题，说明 mirror 服务本身活着，
-        但 hub 期望的元数据 header 在 redirect 链里丢了 —— 怀疑是
-        mirror 服务端近期改动。这不是上游回归（0.25 requests 时代
-        也挂），且锁旧版 hub 会破 transformers 5.x。
+        实测发现 `hf-mirror.com` 在所有已测 `huggingface_hub` 版本（0.25 / 0.30 / 0.34 / 1.14）下下载均失败 —— hub 客户端从 HEAD 响应里读不到 `commit_hash`，抛 `FileMetadataError: Distant resource does not seem to be on huggingface.co`。 curl 跟 redirect 拿 bytes 没问题，说明 mirror 服务本身活着，但 hub 期望的元数据 header 在 redirect 链里丢了 —— 怀疑是 mirror 服务端近期改动。这不是上游回归（0.25 requests 时代也挂），且锁旧版 hub 会破 transformers 5.x。
 
-        - **默认 endpoint 改空串**（= huggingface_hub 默认 = 直连
-          `huggingface.co`）：`studio/secrets.py`、Settings.tsx、
-          Settings.test.tsx mock 同步
-        - **Settings UI 隐藏 `hf-mirror.com` preset**：endpoint 字段
-          本身仍接受任意 URL，用户可通过「自定义 URL」粘贴 hf-mirror
-          继续试，或切到 ModelScope
-        - **复查 doc**：`docs/todo/hf-mirror-recheck.md` 记录现象、
-          根因、复测命令、上游 PR #4071 跟踪点、复活后逆向回滚清单。
-          建议 2 周一次复查
-        - 默认 endpoint 字段类型 / 接受范围未变，已配置过自定义
-          endpoint 的用户不受影响
-
+        - **默认 endpoint 改空串**（= huggingface_hub 默认 = 直连 `huggingface.co`）：`studio/secrets.py`、Settings.tsx、 Settings.test.tsx mock 同步
+        - **Settings UI 隐藏 `hf-mirror.com` preset**：endpoint 字段本身仍接受任意 URL，用户可通过「自定义 URL」粘贴 hf-mirror 继续试，或切到 ModelScope
+        - **复查 doc**：`docs/todo/hf-mirror-recheck.md` 记录现象、根因、复测命令、上游 PR #4071 跟踪点、复活后逆向回滚清单。建议 2 周一次复查
+        - 默认 endpoint 字段类型 / 接受范围未变，已配置过自定义 endpoint 的用户不受影响
 
 - version: "0.8.1"
   date: "2026-05-16"
@@ -424,37 +543,23 @@
       summary: "Settings 版本面板改单视图 + 升级通道做成用户偏好而非 git 状态（ADR 0005）（#81）"
       pr_refs: [81]
       detail: |
-        ADR 0005：之前「通道」绑死在 git 工作树状态上（branch 名 + `git reset
-        --hard`），release 直后会出现「装的 v0.8.0」+「↑落后 2 commits」+
-        「切到 dev 没反应」的矛盾解读。新模型把通道理解为**用户视图偏好**：
+        ADR 0005：之前「通道」绑死在 git 工作树状态上（branch 名 + `git reset --hard`），release 直后会出现「装的 v0.8.0」+「↑落后 2 commits」+ 「切到 dev 没反应」的矛盾解读。新模型把通道理解为**用户视图偏好**：
 
-        - **同屏只显示当前通道**（不再 master + dev 并排），避免"两个通道
-          都活着"的视觉混乱
-        - **切 toggle 不动 git**，纯写 `system.update_channel` 到
-          `secrets.json`；真正"切到 dev HEAD" / "更新到 vX.Y.Z" 是独立按钮
-        - **后端新「装了什么」分类** `installed_kind`（stable / dev / custom），
-          按 commit hash + tree 比对推断，取代前端读 `branch` 做判断
-        - **文案脱离 git 词汇**：「↑落后 N commits」→「有新稳定版 vX.Y.Z」/
-          「已是最新」；不再出现 commits / sha / branch
-        - 旧 `show_dev_channel` 一次性迁移到 `update_channel`，写时双写
-          保持向下兼容
+        - **同屏只显示当前通道**（不再 master + dev 并排），避免"两个通道都活着"的视觉混乱
+        - **切 toggle 不动 git**，纯写 `system.update_channel` 到 `secrets.json`；真正"切到 dev HEAD" / "更新到 vX.Y.Z" 是独立按钮
+        - **后端新「装了什么」分类** `installed_kind`（stable / dev / custom），按 commit hash + tree 比对推断，取代前端读 `branch` 做判断
+        - **文案脱离 git 词汇**：「↑落后 N commits」→「有新稳定版 vX.Y.Z」/ 「已是最新」；不再出现 commits / sha / branch
+        - 旧 `show_dev_channel` 一次性迁移到 `update_channel`，写时双写保持向下兼容
 
     - kind: added
       summary: "zip 解压安装用户一键初始化 git 仓库（启用自动更新）"
       detail: |
-        ADR 0002 当时只支持 git clone 部署；zip 解压用户因为没有 `.git/`，
-        版本面板全员 unknown、自更新功能完全用不了。这版加自动 normalize：
+        ADR 0002 当时只支持 git clone 部署；zip 解压用户因为没有 `.git/`，版本面板全员 unknown、自更新功能完全用不了。这版加自动 normalize：
 
-        - **版本面板顶部 banner**：检测到 zip 模式时显示「启用自动更新」按钮
-          + 文案；没装 git 时改文案为「先安装 git」+ 官网链接
-        - **bootstrap 流程**：`git init` → `git remote add origin <URL>` →
-          `git fetch origin master --tags` → 优先 anchor 在 `v{__version__}`
-          tag（让 working tree 看上去干净）；reset `--mixed` 不动 working
-          tree，原 zip 文件原样保留
-        - **可配置上游 URL**：fork 维护者可通过 env var
-          `ANIMA_STUDIO_ORIGIN_URL` 覆盖默认值
-        - 不支持「dev 分支 zip」场景（端用户走的是 master zip，这是开发者
-          自测场景）
+        - **版本面板顶部 banner**：检测到 zip 模式时显示「启用自动更新」按钮 + 文案；没装 git 时改文案为「先安装 git」+ 官网链接
+        - **bootstrap 流程**：`git init` → `git remote add origin <URL>` → `git fetch origin master --tags` → 优先 anchor 在 `v{__version__}` tag（让 working tree 看上去干净）；reset `--mixed` 不动 working tree，原 zip 文件原样保留
+        - **可配置上游 URL**：fork 维护者可通过 env var `ANIMA_STUDIO_ORIGIN_URL` 覆盖默认值
+        - 不支持「dev 分支 zip」场景（端用户走的是 master zip，这是开发者自测场景）
 
     - kind: fixed
       summary: "版本面板 3 项修：切到 dev 按钮状态错 / 同版本号伪箭头 / 双按钮重复（#82）"
@@ -462,13 +567,9 @@
       detail: |
         ADR 0005 重做后续：
 
-        - rollback 文案在 stable / dev 两种 installed_kind 下分流，不再
-          一律显示「回滚到 vX.Y.Z」
-        - preflight panel 在通道偏好与 git 状态不一致时不再展示矛盾的
-          切换目标
-        - dev 卡 fetch race：`devCommits` 和 `devCheck` 拆独立 useEffect，
-          避免一个先 resolve 触发 re-render 跳过另一个的 fetch（症状：
-          "切到 dev HEAD"按钮看上去 enabled 但点了 no-op）
+        - rollback 文案在 stable / dev 两种 installed_kind 下分流，不再一律显示「回滚到 vX.Y.Z」
+        - preflight panel 在通道偏好与 git 状态不一致时不再展示矛盾的切换目标
+        - dev 卡 fetch race：`devCommits` 和 `devCheck` 拆独立 useEffect，避免一个先 resolve 触发 re-render 跳过另一个的 fetch（症状： "切到 dev HEAD"按钮看上去 enabled 但点了 no-op）
 
 - version: "0.8.0"
   date: "2026-05-16"
@@ -478,128 +579,85 @@
       summary: "新增「预处理」步骤（图片放大）+ 实时进度（#69）"
       pr_refs: [69]
       detail: |
-        流水线 ① 下载 → ② 筛选之间插入「② 预处理」step（旧 step 顺延），用户
-        可在进入筛选前对下载图统一放大；现有项目可选跳过（sidebar 标「（可选）」）。
+        流水线 ① 下载 → ② 筛选之间插入「② 预处理」step（旧 step 顺延），用户可在进入筛选前对下载图统一放大；现有项目可选跳过（sidebar 标「（可选）」）。
 
-        - **多放大器预设**：Settings → 预处理 tab 内置 ESRGAN / Real-ESRGAN 等
-          预设 + 自定义 repo 下载，HuggingFace / ModelScope 双源
+        - **多放大器预设**：Settings → 预处理 tab 内置 ESRGAN / Real-ESRGAN 等预设 + 自定义 repo 下载，HuggingFace / ModelScope 双源
         - **智能流水**：目标面积阈值，大图直接 resize 跳过放大模型，省时
-        - **GPU fp16 自动**：worker 启动期 device 诊断日志（看得到走 cuda 还是
-          cpu，是否 fp16）
-        - **进度反馈走 SSE**：每图完成事件实时推前端（不再轮询）；job 跑动时
-          3s 轮询 files 刷新 grid / 进度 / 盘占
+        - **GPU fp16 自动**：worker 启动期 device 诊断日志（看得到走 cuda 还是 cpu，是否 fp16）
+        - **进度反馈走 SSE**：每图完成事件实时推前端（不再轮询）；job 跑动时 3s 轮询 files 刷新 grid / 进度 / 盘占
         - **阶段缩略图预生成**：256/768 两档供 grid 用，切 filter 不卡
 
     - kind: added
       summary: "新增 InfoNoise 自适应 timestep 采样器（#63, #66）"
       pr_refs: [63, 66]
       detail: |
-        基于 I-MMSE 等价（`dH/dσ = mmse/σ³`）：跟踪 per-bin 去噪 MSE FIFO + EMA，
-        构造反 CDF 采样器把抽样集中在信息量大的噪声窗口；warmup 期回退到
-        logit-normal baseline。
+        基于 I-MMSE 等价（`dH/dσ = mmse/σ³`）：跟踪 per-bin 去噪 MSE FIFO + EMA，构造反 CDF 采样器把抽样集中在信息量大的噪声窗口；warmup 期回退到 logit-normal baseline。
 
         - **零默认侵入**：7 个 `infonoise_*` 字段，默认全关；存量训练行为不变
-        - **N_warm 自动**：`infonoise_N_warm = 0` 自动算
-          `max(200, total_steps × 1/5)` —— 短 run 不再被硬编码 5000 步卡住
-        - **plugin registry**：新 `runtime/training/timestep_samplers/` 子包，
-          baseline 与 infonoise 走同一份 protocol；后续加 sampler 不动 phases /
-          loop（沿用 ADR 0003 模式）
-        - **EMA 公式按论文 Algorithm 1**：`mse ← (1-β)·mse + β·ℓ̄`，docstring
-          顶部警告"不要按主观直觉翻转"（PR #65 误翻 → PR #66 恢复 + 16 个
-          regression test 把公式 codify）
-        - **冷启动 trip wire**：CDF 长期 not ready 时 warn 一次 + 提供
-          `status()` 给外部探测
+        - **N_warm 自动**：`infonoise_N_warm = 0` 自动算 `max(200, total_steps × 1/5)` —— 短 run 不再被硬编码 5000 步卡住
+        - **plugin registry**：新 `runtime/training/timestep_samplers/` 子包， baseline 与 infonoise 走同一份 protocol；后续加 sampler 不动 phases / loop（沿用 ADR 0003 模式）
+        - **EMA 公式按论文 Algorithm 1**：`mse ← (1-β)·mse + β·ℓ̄`，docstring 顶部警告"不要按主观直觉翻转"（PR #65 误翻 → PR #66 恢复 + 16 个 regression test 把公式 codify）
+        - **冷启动 trip wire**：CDF 长期 not ready 时 warn 一次 + 提供 `status()` 给外部探测
 
     - kind: added
       summary: "Train / Presets 页加 Simple / Advanced 模式切换（#63, #66）"
       pr_refs: [63, 66]
       detail: |
-        Train 页和 Presets 页右上角加 Simple / Advanced toggle。Simple 模式
-        默认隐藏 35 个高级字段（dropout / scheduler 微调 / PPSF 旋钮 / 噪声
-        schedule 细节等），新用户不被淹没。
+        Train 页和 Presets 页右上角加 Simple / Advanced toggle。Simple 模式默认隐藏 35 个高级字段（dropout / scheduler 微调 / PPSF 旋钮 / 噪声 schedule 细节等），新用户不被淹没。
 
-        - 状态走 `useAdvancedMode` hook + `localStorage`，同 tab 实时更新；
-          storage event 跨 tab 同步（开两个 tab 不会"漂"）
-        - schema 重新分组：新 `noise_schedule` 组（noise offset / pyramid noise /
-          timestep sampling / InfoNoise / loss weighting）；`kv_trim` /
-          `mixed_precision` / `attention_backend` / `num_workers` 移到 `system` 组
-        - 字段描述按上下文调整：InfoNoise 启用时 `timestep_sampling` disabled +
-          提示语；`timestep_shift` 显示 warm-up 上下文
+        - 状态走 `useAdvancedMode` hook + `localStorage`，同 tab 实时更新； storage event 跨 tab 同步（开两个 tab 不会"漂"）
+        - schema 重新分组：新 `noise_schedule` 组（noise offset / pyramid noise / timestep sampling / InfoNoise / loss weighting）；`kv_trim` / `mixed_precision` / `attention_backend` / `num_workers` 移到 `system` 组
+        - 字段描述按上下文调整：InfoNoise 启用时 `timestep_sampling` disabled + 提示语；`timestep_shift` 显示 warm-up 上下文
 
     - kind: added
       summary: "studio CLI 加 --torch / --fe-port flag + 默认子命令修复（#63）"
       pr_refs: [63]
       detail: |
-        - **`--torch <tag>`** (`cu128` / `cu126` / `cu124` / `cu118` / `cpu`)：
-          强制指定 CUDA torch wheel，CPU-only 租赁机 GPU torch 无法自动探测的
-          场景。Ctrl+C 可跳过；同时支持 `--skip-pending` 跳过 restart 时的
-          pending install
+        - **`--torch <tag>`** (`cu128` / `cu126` / `cu124` / `cu118` / `cpu`)：强制指定 CUDA torch wheel，CPU-only 租赁机 GPU torch 无法自动探测的场景。Ctrl+C 可跳过；同时支持 `--skip-pending` 跳过 restart 时的 pending install
         - **`--fe-port`**（仅 `dev` 子命令）：Vite dev server 端口，默认 5173
-        - **默认子命令修复**：`studio.sh --port 6006` 之前会失败
-          `invalid choice: '6006'`，现在未知 positional 正确 fallback 到 `run`
+        - **默认子命令修复**：`studio.sh --port 6006` 之前会失败 `invalid choice: '6006'`，现在未知 positional 正确 fallback 到 `run`
         - pip 安装期流式输出 + 优雅 Ctrl+C 中断 pending torch install
 
     - kind: changed
       summary: "预处理界面整合到单 grid，不再让用户区分「下载图 / 预处理图」（ADR 0004）（#74）"
       pr_refs: [74]
       detail: |
-        ADR 0004：「双 grid（待处理 / 已处理）」摊平成单 grid + 状态徽章；用户
-        视角图只有一份，处理状态是图的属性。
+        ADR 0004：「双 grid（待处理 / 已处理）」摊平成单 grid + 状态徽章；用户视角图只有一份，处理状态是图的属性。
 
-        - **状态唯一真理**：`projects/{id}/preprocess/manifest.json` 取代 per-image
-          `*.preprocess.json` sidecar
-        - **单一 ImagesPanel**：摘要头「共 N 张 · 未处理 X · 已处理 Y」+ filter
-          chips（全部 / 未处理 / 已处理）+ 图卡状态徽章（✓ upscale / ⊘ 未处理）
+        - **状态唯一真理**：`projects/{id}/preprocess/manifest.json` 取代 per-image `*.preprocess.json` sidecar
+        - **单一 ImagesPanel**：摘要头「共 N 张 · 未处理 X · 已处理 Y」+ filter chips（全部 / 未处理 / 已处理）+ 图卡状态徽章（✓ upscale / ⊘ 未处理）
         - **「⟲ 还原」按钮**替代「🗑 删除」：还原 = 删 preprocess 副本回未处理
-        - **接缝坍缩**：删 `left_source` 字段 + 双 URL 分支；前端永远走
-          `projectThumbUrl`，不感知 download / preprocess 差异
-        - **0 删除迁移**：第一次访问每个 project 时检测，无 manifest 但有老
-          sidecar → 聚合写出 manifest.json，老 sidecar **保留不删**（防御性
-          回滚）
+        - **接缝坍缩**：删 `left_source` 字段 + 双 URL 分支；前端永远走 `projectThumbUrl`，不感知 download / preprocess 差异
+        - **0 删除迁移**：第一次访问每个 project 时检测，无 manifest 但有老 sidecar → 聚合写出 manifest.json，老 sidecar **保留不删**（防御性回滚）
 
     - kind: changed
       summary: "LoRA picker 重写 + 三处图片网格点击交互统一（#77）"
       pr_refs: [77]
       detail: |
-        PR #70 因为 squash-merge 在 GitHub 上显示 Merged 但实际未进 dev（cherry-pick
-        经 #77 复活，详见 PR description）。
+        PR #70 因为 squash-merge 在 GitHub 上显示 Merged 但实际未进 dev（cherry-pick 经 #77 复活，详见 PR description）。
 
-        - **LoRA picker 重写**：扁平搜索 → 项目→版本→ckpt 三段下拉 + chip 列表；
-          single / multi 模式分离，权重 slider 按需显示
-        - **Download / Preprocess / Reg 三处图片网格点击交互统一**：点击 = 大图
-          预览（lightbox）；checkbox / Shift / Ctrl / ⌘ + 点击 = 多选（对齐
-          Curation / TagEdit 已有约定）
-        - **PromptFromDatasetPicker**：受控单选 + 常驻 + 只读 tags 区 +
-          `datasetSuffix` 拼到 prompt 末尾
-        - **XY 矩阵**：lora_ckpt 轴改多选 chip 「添加 N 个」；`lora_scale` 改为
-          全局轴（不再绑特定 LoRA）
+        - **LoRA picker 重写**：扁平搜索 → 项目→版本→ckpt 三段下拉 + chip 列表； single / multi 模式分离，权重 slider 按需显示
+        - **Download / Preprocess / Reg 三处图片网格点击交互统一**：点击 = 大图预览（lightbox）；checkbox / Shift / Ctrl / ⌘ + 点击 = 多选（对齐 Curation / TagEdit 已有约定）
+        - **PromptFromDatasetPicker**：受控单选 + 常驻 + 只读 tags 区 + `datasetSuffix` 拼到 prompt 末尾
+        - **XY 矩阵**：lora_ckpt 轴改多选 chip 「添加 N 个」；`lora_scale` 改为全局轴（不再绑特定 LoRA）
 
     - kind: changed
       summary: "预设导入导出改用 yaml 文件（取代 JSON）（#79）"
       pr_refs: [79]
       detail: |
-        后端落盘本就是 yaml，但前端导出却是 JSON + 一个 4 行手写 mini YAML
-        parser（只支持单行 scalar，遇到 list / nested / quoted 字段静默丢字段，
-        例如 `sample_prompts` / `timestep_samplers`）。本 PR 把传输模型换成
-        端到端 yaml 文件。
+        后端落盘本就是 yaml，但前端导出却是 JSON + 一个 4 行手写 mini YAML parser（只支持单行 scalar，遇到 list / nested / quoted 字段静默丢字段，例如 `sample_prompts` / `timestep_samplers`）。本 PR 把传输模型换成端到端 yaml 文件。
 
-        - 新 `GET /api/presets/{name}/download`：FileResponse 直接透传磁盘 yaml，
-          导出文件跟 `studio_data/presets/{name}.yaml` 字节级一致
-        - 新 `POST /api/presets/import`：multipart `UploadFile`，后端
-          `yaml.safe_load` + pydantic 校验，返回 `{config, suggested_name}` 给
-          前端 draftSeed flow（不写盘，等用户改名 + 确认）
-        - **旧 `.json` 导出仍能导入回来**：yaml.safe_load 是 JSON 的 superset，
-          零兼容包袱
-        - 工作流闭环：用户可直接编辑 `studio_data/presets/{name}.yaml` 然后
-          导回，schema 校验失败时错误信息从后端 `PresetError` 单一来源出
+        - 新 `GET /api/presets/{name}/download`：FileResponse 直接透传磁盘 yaml，导出文件跟 `studio_data/presets/{name}.yaml` 字节级一致
+        - 新 `POST /api/presets/import`：multipart `UploadFile`，后端 `yaml.safe_load` + pydantic 校验，返回 `{config, suggested_name}` 给前端 draftSeed flow（不写盘，等用户改名 + 确认）
+        - **旧 `.json` 导出仍能导入回来**：yaml.safe_load 是 JSON 的 superset，零兼容包袱
+        - 工作流闭环：用户可直接编辑 `studio_data/presets/{name}.yaml` 然后导回，schema 校验失败时错误信息从后端 `PresetError` 单一来源出
         - 按钮文案「导出 JSON」→「导出 YAML」
 
     - kind: improved
       summary: "标签编辑批量范围加「当前筛选 / 当前列表」选项（#71）"
       pr_refs: [71]
       detail: |
-        过去过滤后批量范围只有「当前选中」和「全部图片」：前者要先手动全选、
-        后者会改到筛选外的隐藏图。现在把"我正在看的这批"做成明确范围。
+        过去过滤后批量范围只有「当前选中」和「全部图片」：前者要先手动全选、后者会改到筛选外的隐藏图。现在把"我正在看的这批"做成明确范围。
 
         - 三个范围都带计数：「当前选中（K）」/「当前筛选（N）」/「全部图片（M）」
         - 批量加 / 删 / replace / dedupe 都支持范围切换
@@ -609,15 +667,11 @@
       summary: "Generate / Queue / XY 全屏交互一组改进（#64, #68）"
       pr_refs: [64, 68]
       detail: |
-        - **XY 全屏 cell 导航**：方向键 / PgUp / PgDn 切换；边缘 hint 动态显示
-          可走方向（不再撒谎承诺 4 方向）；input / textarea 内不抢焦点
+        - **XY 全屏 cell 导航**：方向键 / PgUp / PgDn 切换；边缘 hint 动态显示可走方向（不再撒谎承诺 4 方向）；input / textarea 内不抢焦点
         - **PreviewCompare 双图对比**：全屏后 ←/→ 切 A↔B（之前只能 ESC）
-        - **InlineLoraPicker header**：拆 2 行（搜索 / 操作 + project / version
-          dropdowns）；projects ≤ 1 时隐藏 dropdown 行
+        - **InlineLoraPicker header**：拆 2 行（搜索 / 操作 + project / version dropdowns）；projects ≤ 1 时隐藏 dropdown 行
         - **PromptFromDatasetPicker 持久化**：选过的数据集 prompt 跨刷新记忆
-        - **`useLocalStorageState` hook**：通用 JSON 序列化 + storage event
-          跨 tab 同步 + SSR 安全；旧 `anima.` localStorage key 自动迁移到
-          `studio:`
+        - **`useLocalStorageState` hook**：通用 JSON 序列化 + storage event 跨 tab 同步 + SSR 安全；旧 `anima.` localStorage key 自动迁移到 `studio:`
         - **ConfigSkeleton 公共组件**：Train + Presets 加载态视觉对齐
         - Generate sample 响应 `Cache-Control: no-store`（强制每次重抓最新）
 
@@ -625,11 +679,8 @@
       summary: "wandb 训练日志：epoch 度量重整 + log_samples 开关恢复（#63, #65, #66）"
       pr_refs: [63, 65, 66]
       detail: |
-        - 删 per-step `train/epoch`（step 轴本就够），加 `train/loss_epoch`
-          （epoch 均值）+ `train/epoch` 只在 epoch 边界发一次
-        - **`log_samples` 开关恢复**（PR #63 误删 → PR #65 修）：默认 True
-          （启用 wandb 即上传采样图，保持便利性）；NSFW / 私有数据集可在
-          Settings UI 关掉，只上传 metrics
+        - 删 per-step `train/epoch`（step 轴本就够），加 `train/loss_epoch` （epoch 均值）+ `train/epoch` 只在 epoch 边界发一次
+        - **`log_samples` 开关恢复**（PR #63 误删 → PR #65 修）：默认 True （启用 wandb 即上传采样图，保持便利性）；NSFW / 私有数据集可在 Settings UI 关掉，只上传 metrics
         - `wandb` 依赖从 optional 升级为 `requirements.txt` 硬依赖
 
     - kind: removed
@@ -638,14 +689,8 @@
       detail: |
         两个按钮共同问题：UI 暗示「可恢复 / 释放空间」，实际不兑现。
 
-        - **回收站**：之前删项目 / 版本是搬到 `studio_data/_trash/`，但
-          **没有恢复 UI** + 不自动清理 → UI 视角等同硬删，却 silently 累积
-          孤儿目录占磁盘。改为直接 `rmtree`；删除 confirm 文案强调「此操作
-          不可恢复」+ red danger tone
-        - **队列「清理已完成」按钮**：只删 `tasks` 表的 done 行（KB 级），
-          不动 `logs/{id}.log`（MB 级），不动 output（per-version，跟 task row
-          无关），还漏 `failed` / `canceled` 状态。删按钮（真要清理 log /
-          output 后续单独 feature 做）
+        - **回收站**：之前删项目 / 版本是搬到 `studio_data/_trash/`，但 **没有恢复 UI** + 不自动清理 → UI 视角等同硬删，却 silently 累积孤儿目录占磁盘。改为直接 `rmtree`；删除 confirm 文案强调「此操作不可恢复」+ red danger tone
+        - **队列「清理已完成」按钮**：只删 `tasks` 表的 done 行（KB 级），不动 `logs/{id}.log`（MB 级），不动 output（per-version，跟 task row 无关），还漏 `failed` / `canceled` 状态。删按钮（真要清理 log / output 后续单独 feature 做）
         - 顺手把 Sidebar / Stepper 的「② 预处理」「⑥ 正则集」标上「（可选）」
 
 - version: "0.7.0"
@@ -656,132 +701,66 @@
       summary: "支持 Anima 1.0 主模型（latest 默认指向 1.0）（#61）"
       pr_refs: [61]
       detail: |
-        上游 `circlestone-labs/Anima` 发布正式 1.0 版本
-        (`split_files/diffusion_models/anima-base-v1.0.safetensors`)。
+        上游 `circlestone-labs/Anima` 发布正式 1.0 版本 (`split_files/diffusion_models/anima-base-v1.0.safetensors`)。
 
         - `ANIMA_VARIANTS` 加 `"1.0"` 条目；`LATEST_ANIMA` 切到 `"1.0"`
-        - dict 顺序调整为「latest 在前」——保证 `find_anima_main` fallback +
-          `build_catalog` 给 UI 的 variants 列表顺序符合「最新优先」直觉
-          （之前 [LATEST] + [dict 插入序] 在 LATEST 不在磁盘时会先命中
-          最老变体）
-        - `schema` / `secrets` / `server` / `runtime/training/cli` / 前端
-          Settings 的默认值同步切到 1.0 —— **只影响新装用户 + 未写过
-          secrets.json 的**；已存 version 的 yaml 里 `transformer_path` 是
-          绝对路径不动，保证训练重现性
+        - dict 顺序调整为「latest 在前」——保证 `find_anima_main` fallback + `build_catalog` 给 UI 的 variants 列表顺序符合「最新优先」直觉（之前 [LATEST] + [dict 插入序] 在 LATEST 不在磁盘时会先命中最老变体）
+        - `schema` / `secrets` / `server` / `runtime/training/cli` / 前端 Settings 的默认值同步切到 1.0 —— **只影响新装用户 + 未写过 secrets.json 的**；已存 version 的 yaml 里 `transformer_path` 是绝对路径不动，保证训练重现性
 
     - kind: added
       summary: "webui 一键自更新：双通道升级面板 + 回滚 + dev 通道（ADR 0002）（#51, #52, #53）"
       pr_refs: [51, 52, 53]
       detail: |
-        实现 ADR 0002：Settings → 系统 → 版本卡片里完成 git pull / 重启 / 回滚
-        全流程，不用再回命令行。
+        实现 ADR 0002：Settings → 系统 → 版本卡片里完成 git pull / 重启 / 回滚全流程，不用再回命令行。
 
-        - **流派 A**（flag + shell wrapper loop，学 A1111 / SwarmUI）：
-          `tmp/restart` flag + `cli.py` inner loop + `studio.sh / studio.bat`
-          wrapper loop + `POST /api/system/restart`。强制约束：running task 时
-          拒绝 update / restart / rollback
-        - **主路径**：`studio/services/updater.py` + 4 个端点（`/version`
-          `/update_check` `/update` `/preflight`）+ 启动期 `apply_pending()` git
-          reset + 增量 pip / npm install + Topbar update badge
-        - **双通道升级面板**（#52 重设计）：master / dev 并排双卡 + container
-          query 响应式 + 通道徽章（稳定/绿 · 开发版/橙）+ inline preview 面板
-          取代所有 dialog 模态；CHANGELOG.md 解析嵌入卡片；dev 卡 commit
-          timeline 可点击任意 commit 切换
-        - **Pre-flight 4 项检查**：dirty working tree / running tasks /
-          requirements.txt diff / `.last_version` 预览；任一 err → 确认按钮
-          disabled
-        - **回滚 + 失败 banner**：`.update_status` / `.last_version` /
-          `.update_log` + `/api/system/rollback` + master 卡内红色失败 banner +
-          查看完整日志 modal
-        - **dev 通道 toggle**：`SystemConfig.show_dev_channel` 持久化；自动检查
-          只看 master（避免开发者被 dev 高频 commit 持续骚扰 badge），dev 必须
-          手动触发
-        - **installer 自检（exit 42 协议）**：`cli.py` / `studio.sh` /
-          `studio.bat` sha256 比对，任一变化 → cli.py 保留 flag + exit 42，
-          wrapper 看到 exit 42 + tmp/restart 走 exec self
-        - **历史版本显示 tag**（#54 内）：`updater.exact_tag_for(sha)` 用
-          `git describe --tags --exact-match`，命中 → 回滚按钮显示 `v0.6.0`，
-          未命中 fallback 到 sha[:8]
+        - **流派 A**（flag + shell wrapper loop，学 A1111 / SwarmUI）： `tmp/restart` flag + `cli.py` inner loop + `studio.sh / studio.bat` wrapper loop + `POST /api/system/restart`。强制约束：running task 时拒绝 update / restart / rollback
+        - **主路径**：`studio/services/updater.py` + 4 个端点（`/version` `/update_check` `/update` `/preflight`）+ 启动期 `apply_pending()` git reset + 增量 pip / npm install + Topbar update badge
+        - **双通道升级面板**（#52 重设计）：master / dev 并排双卡 + container query 响应式 + 通道徽章（稳定/绿 · 开发版/橙）+ inline preview 面板取代所有 dialog 模态；CHANGELOG.md 解析嵌入卡片；dev 卡 commit timeline 可点击任意 commit 切换
+        - **Pre-flight 4 项检查**：dirty working tree / running tasks / requirements.txt diff / `.last_version` 预览；任一 err → 确认按钮 disabled
+        - **回滚 + 失败 banner**：`.update_status` / `.last_version` / `.update_log` + `/api/system/rollback` + master 卡内红色失败 banner + 查看完整日志 modal
+        - **dev 通道 toggle**：`SystemConfig.show_dev_channel` 持久化；自动检查只看 master（避免开发者被 dev 高频 commit 持续骚扰 badge），dev 必须手动触发
+        - **installer 自检（exit 42 协议）**：`cli.py` / `studio.sh` / `studio.bat` sha256 比对，任一变化 → cli.py 保留 flag + exit 42， wrapper 看到 exit 42 + tmp/restart 走 exec self
+        - **历史版本显示 tag**（#54 内）：`updater.exact_tag_for(sha)` 用 `git describe --tags --exact-match`，命中 → 回滚按钮显示 `v0.6.0`，未命中 fallback 到 sha[:8]
 
     - kind: added
       summary: "训练栈内部重构（不影响用户行为，方便后续加自定义 adapter / scheduler）（ADR 0003）（#56, #57, #58）"
       pr_refs: [56, 57, 58]
       detail: |
-        实现 ADR 0003 全套：`runtime/anima_train.py` 从 2901 行 mega-script 拆到
-        `runtime/training/` 子包（25 个文件，128 行 thin entry）+ 4 个 plugin
-        registry + `AdapterProtocol` hook。**训练行为字节级等价**——LyCORIS 路径
-        所有 hook 都是 no-op；optimizer / scheduler 走同一份 kwargs 经 build
-        wrapper。
+        实现 ADR 0003 全套：`runtime/anima_train.py` 从 2901 行 mega-script 拆到 `runtime/training/` 子包（25 个文件，128 行 thin entry）+ 4 个 plugin registry + `AdapterProtocol` hook。**训练行为字节级等价**——LyCORIS 路径所有 hook 都是 no-op；optimizer / scheduler 走同一份 kwargs 经 build wrapper。
 
-        - **PR-A（#56）模块拆分**：bootstrap / observability / model_loading /
-          models / text_encoding / state / dataset / sampling / cli /
-          timestep_sampling / noise / loss_weighting 12 个模块。sister script
-          (anima_daemon / anima_generate / anima_reg_ai) 通过 re-export 契约
-          0 改动继续工作
-        - **PR-B（#57）main() 拆 phase**：793 行 main() → 6 个 phase function
-          (bootstrap / models / dataset / optimizer / resume / finalize) + 1 个
-          train_loop，靠 `TrainingContext` dataclass（43 字段 + 3 方法）串引用。
-          消掉 main() 里 3 处近 75 行重复的 sample 块到 `run_sample` helper
-        - **PR-C（#58）plugin registry + AdapterProtocol**：4 个 plugin 子包
-          (adapters / optimizers / schedulers / inference_samplers) + 显式
-          BUILDERS 字典；3 处 if-elif dispatch 替换成 registry 调用。
-          AdapterProtocol 含 3 个可选 hook（on_step_begin / regularization_loss
-          / excludes_weight_decay）给未来 T-LoRA / OFT / AdaLoRA 留位
-        - **schema↔registry 一致性自动校验**：3 个 plugin 子包暴露
-          `validate_schema_consistency()`，bootstrap_phase 启动期跑一次；漏注册
-          / 漏 schema 早 fail
-        - **加新变体步骤**（详见 [`runtime/training/README.md`](runtime/training/README.md)
-          + ADR 0003 Case 3-6）：写 `training/{plugin}/{variant}.py` 含 build
-          函数 + BUILDERS 字典加一行 + schema Literal 加值，phases / loop / main
-          0 改动
+        - **PR-A（#56）模块拆分**：bootstrap / observability / model_loading / models / text_encoding / state / dataset / sampling / cli / timestep_sampling / noise / loss_weighting 12 个模块。sister script (anima_daemon / anima_generate / anima_reg_ai) 通过 re-export 契约 0 改动继续工作
+        - **PR-B（#57）main() 拆 phase**：793 行 main() → 6 个 phase function (bootstrap / models / dataset / optimizer / resume / finalize) + 1 个 train_loop，靠 `TrainingContext` dataclass（43 字段 + 3 方法）串引用。消掉 main() 里 3 处近 75 行重复的 sample 块到 `run_sample` helper
+        - **PR-C（#58）plugin registry + AdapterProtocol**：4 个 plugin 子包 (adapters / optimizers / schedulers / inference_samplers) + 显式 BUILDERS 字典；3 处 if-elif dispatch 替换成 registry 调用。 AdapterProtocol 含 3 个可选 hook（on_step_begin / regularization_loss / excludes_weight_decay）给未来 T-LoRA / OFT / AdaLoRA 留位
+        - **schema↔registry 一致性自动校验**：3 个 plugin 子包暴露 `validate_schema_consistency()`，bootstrap_phase 启动期跑一次；漏注册 / 漏 schema 早 fail
+        - **加新变体步骤**（详见 [`runtime/training/README.md`](runtime/training/README.md) + ADR 0003 Case 3-6）：写 `training/{plugin}/{variant}.py` 含 build 函数 + BUILDERS 字典加一行 + schema Literal 加值，phases / loop / main 0 改动
 
     - kind: added
       summary: "训练稳定性扩展：NaN skip + 噪声 / loss / timestep 采样新选项 + cross-attn KV trim（#55）"
       pr_refs: [55]
       detail: |
-        Cherry-pick 自 PR #49（saltysalrua），三方 review 后保留 5 个低风险高价值
-        commit + 4 项我们的加固。**T-LoRA / Ortho-Hydra adapter / 手动 OrthoGrad
-        不进主仓**，放 `experimental/pr49-adapters` 长期 parking lot。
+        Cherry-pick 自 PR #49（saltysalrua），三方 review 后保留 5 个低风险高价值 commit + 4 项我们的加固。**T-LoRA / Ortho-Hydra adapter / 手动 OrthoGrad 不进主仓**，放 `experimental/pr49-adapters` 长期 parking lot。
 
-        - **ProdigyPlus 上游 version-compat filter** + `eps=None` 支持 +
-          StableAdamW（修上游 API 飘移 TypeError）
-        - **NaN detection**：loss / grad 非有限时跳过 step；bf16 + Prodigy 偶发
-          spike 不再炸整训练
-        - **时间步相关 loss weighting**：`min_snr` / `detail_inv_t` / `cosmap` +
-          `weight_cap_ratio`
-        - **可配置 timestep sampling**：`logit_normal` / `uniform` /
-          `logit_normal_low` / `mode` + shift
+        - **ProdigyPlus 上游 version-compat filter** + `eps=None` 支持 + StableAdamW（修上游 API 飘移 TypeError）
+        - **NaN detection**：loss / grad 非有限时跳过 step；bf16 + Prodigy 偶发 spike 不再炸整训练
+        - **时间步相关 loss weighting**：`min_snr` / `detail_inv_t` / `cosmap` + `weight_cap_ratio`
+        - **可配置 timestep sampling**：`logit_normal` / `uniform` / `logit_normal_low` / `mode` + shift
         - **noise_offset + pyramid_noise** 噪声增强
-        - **cross-attn KV trim**：手术拆 `c5e81c2`，只挑 kv_trim 部分（丢弃
-          T-LoRA 改动）；附带修 `_bucket = 512` 兜底（原代码 `_actual > 512` 时
-          NameError）
+        - **cross-attn KV trim**：手术拆 `c5e81c2`，只挑 kv_trim 部分（丢弃 T-LoRA 改动）；附带修 `_bucket = 512` 兜底（原代码 `_actual > 512` 时 NameError）
         - **死 T-LoRA dispatch 清理**：原 commit 顺带泄漏的隐性 ImportError 雷
-        - **9 个新字段 description 加簇前缀**：【噪声增强】/【时间步采样】/
-          【损失加权】/【性能】tooltip 看得出归属
-        - **`_filter_kwargs_by_signature` 加白名单**：schema 暴露的 ppsf_* 字段
-          被上游 drop 时显式 raise 而非 silent log（避免 8 小时训练后才发现
-          用户勾选悄悄失效）
+        - **9 个新字段 description 加簇前缀**：【噪声增强】/【时间步采样】/ 【损失加权】/【性能】tooltip 看得出归属
+        - **`_filter_kwargs_by_signature` 加白名单**：schema 暴露的 ppsf_* 字段被上游 drop 时显式 raise 而非 silent log（避免 8 小时训练后才发现用户勾选悄悄失效）
 
     - kind: added
       summary: "新增 Prodigy+ScheduleFree 优化器（解 Prodigy 训练中偶发「风格突变 epoch」问题）（#46）"
       pr_refs: [46]
       detail: |
-        Prodigy 内部 `d` 估计在 Flow Matching timestep 随机性 + 小数据集 + LoRA
-        低参数量三重噪声下会"跳档"——`d` 是不下降的累积量，一旦异常 batch 推上
-        档，后续整段训练就用更大有效步长。社区调研结论：Flux / Qwen-Image /
-        HiDream / 视频 DiT LoRA 已把 PPSF 作为事实默认（ai-toolkit / SimpleTuner
-        / sd-scripts 三家都接入）。
+        Prodigy 内部 `d` 估计在 Flow Matching timestep 随机性 + 小数据集 + LoRA 低参数量三重噪声下会"跳档"——`d` 是不下降的累积量，一旦异常 batch 推上档，后续整段训练就用更大有效步长。社区调研结论：Flux / Qwen-Image / HiDream / 视频 DiT LoRA 已把 PPSF 作为事实默认（ai-toolkit / SimpleTuner / sd-scripts 三家都接入）。
 
-        - **命名**：`prodigy_plus_schedulefree`（snake_case 全名，避免和未来 vanilla
-          Prodigy 撞名）
-        - **eval/train 切换**：context manager `optimizer_eval_mode()`，比
-          helper pair 更难漏掉一边；所有 `injector.save` 都在 ctx 内 →
-          保存的 .safetensors 是 averaged weights x，直接可用
-        - **scheduler 互斥三层防御**：(a) 前端 disable + 自动 reset → (b)
-          pydantic model_validator → (c) anima_train CLI 启动期 SystemExit
+        - **命名**：`prodigy_plus_schedulefree`（snake_case 全名，避免和未来 vanilla Prodigy 撞名）
+        - **eval/train 切换**：context manager `optimizer_eval_mode()`，比 helper pair 更难漏掉一边；所有 `injector.save` 都在 ctx 内 → 保存的 .safetensors 是 averaged weights x，直接可用
+        - **scheduler 互斥三层防御**：(a) 前端 disable + 自动 reset → (b) pydantic model_validator → (c) anima_train CLI 启动期 SystemExit
         - **依赖 pin >=2.0.0**：PPSF v1.9.2 ↔ v2.0.0 state_dict 不兼容
-        - **新 schema 元数据 `disable_when`**：复用 `show_when` 表达式语法；
-          SchemaForm 实现 disabled + hint + force value to default
+        - **新 schema 元数据 `disable_when`**：复用 `show_when` 表达式语法； SchemaForm 实现 disabled + hint + force value to default
 
     - kind: improved
       summary: "训练页：内联新建预设 + tag chip 拖拽排序 + 「导出训练集」按钮改名（#47）"
@@ -789,46 +768,29 @@
       detail: |
         4 个独立小 polish 合一 PR：
 
-        - **内联新建预设**：训练页 picker grid 加「+ 新建预设」虚线卡片，
-          点击切到 SchemaForm 内联表单（名字默认 `<slug>_<label>`，描述存
-          localStorage）。之前用户只能跳走 `/tools/presets` 创建再跳回来
-        - **tag chip 拖拽重排**：dnd-kit PointerSensor + 6px 启动距离 → 拖拽
-          不跟「点 × 删除」冲突；`addTag` 改加到末尾（跟拖拽心智一致）
-        - **「导出给 CNB」→「下载训练集」**：按钮文字 / toast / title / 函数名
-          (`exportForCnb` → `downloadTrainZip`) 全部去 CNB 绑定
-        - **optimizer description 清理**：删「需 pip install prodigyopt」字样
-          （两个包都已在 requirements.txt）
+        - **内联新建预设**：训练页 picker grid 加「+ 新建预设」虚线卡片，点击切到 SchemaForm 内联表单（名字默认 `<slug>_<label>`，描述存 localStorage）。之前用户只能跳走 `/tools/presets` 创建再跳回来
+        - **tag chip 拖拽重排**：dnd-kit PointerSensor + 6px 启动距离 → 拖拽不跟「点 × 删除」冲突；`addTag` 改加到末尾（跟拖拽心智一致）
+        - **「导出给 CNB」→「下载训练集」**：按钮文字 / toast / title / 函数名 (`exportForCnb` → `downloadTrainZip`) 全部去 CNB 绑定
+        - **optimizer description 清理**：删「需 pip install prodigyopt」字样（两个包都已在 requirements.txt）
 
     - kind: improved
       summary: "弹窗统一改用应用样式（不再用浏览器原生 confirm/prompt）+ topbar/sidebar polish（#48）"
       pr_refs: [48]
       detail: |
-        - **`useDialog()` hook**：`src/components/Dialog.tsx` 命令式 confirm /
-          prompt / alert，promise-based；tone (default / danger / warn) 控制
-          确认按钮颜色；ESC + 点遮罩 = 取消；prompt 含同步 validate
-        - **22 处替换**：Train / Settings / Queue / Projects / Layout / Presets
-          / SaveBar / Regularization / Curation / Download；危险操作（不可逆
-          删除）走 danger，大动作（装包等系统级）走 warn
+        - **`useDialog()` hook**：`src/components/Dialog.tsx` 命令式 confirm / prompt / alert，promise-based；tone (default / danger / warn) 控制确认按钮颜色；ESC + 点遮罩 = 取消；prompt 含同步 validate
+        - **22 处替换**：Train / Settings / Queue / Projects / Layout / Presets / SaveBar / Regularization / Curation / Download；危险操作（不可逆删除）走 danger，大动作（装包等系统级）走 warn
         - **topbar 搜索 icon 移最右**：有训练任务时不再被胶囊推得左右跳
         - **sidebar 进项目不再自动折叠**：手动折叠走 sessionStorage 持久
-        - **overview 选版本跳 download + 复用 NewVersionDialog**：
-          删 `window.prompt`，支持 fork from + 自动 activate
+        - **overview 选版本跳 download + 复用 NewVersionDialog**：删 `window.prompt`，支持 fork from + 自动 activate
 
     - kind: changed
       summary: "Settings 减法：长 help text 折进 ⓘ tooltip + 历史版本卡显示 tag 而非 commit sha（#54）"
       pr_refs: [54]
       detail: |
-        - **`InfoButton` 组件**：click-toggle ⓘ 弹层，外部 click / Esc 关；
-          button stopPropagation 防止放在 `<summary>` 里触发外层 toggle；新
-          `styles/info-button.css` 中性 `.info-btn-*` 前缀
-        - **应用 tooltip 化**：ServiceSection 重启说明 / WD14 / CLTagger /
-          anima_main 模型卡 description / xformers 互斥说明 / Layer 1 长 desc
-          7 项（hf endpoint / wandb 节流等）全部从 inline `<p>` / `desc=` 移到
-          label / title 旁的 ⓘ
-        - **`SettingsField` / `ModelGroupCard` 加 `helpTooltip` slot**；
-          `SettingsSection` 已有 `headerExtras` slot（PR #53）
-        - **删冗余**：wandb「需要训练环境已安装 wandb 包」提示删除（错误位置，
-          该提示应在 wandb 实际报错时显示）
+        - **`InfoButton` 组件**：click-toggle ⓘ 弹层，外部 click / Esc 关； button stopPropagation 防止放在 `<summary>` 里触发外层 toggle；新 `styles/info-button.css` 中性 `.info-btn-*` 前缀
+        - **应用 tooltip 化**：ServiceSection 重启说明 / WD14 / CLTagger / anima_main 模型卡 description / xformers 互斥说明 / Layer 1 长 desc 7 项（hf endpoint / wandb 节流等）全部从 inline `<p>` / `desc=` 移到 label / title 旁的 ⓘ
+        - **`SettingsField` / `ModelGroupCard` 加 `helpTooltip` slot**； `SettingsSection` 已有 `headerExtras` slot（PR #53）
+        - **删冗余**：wandb「需要训练环境已安装 wandb 包」提示删除（错误位置，该提示应在 wandb 实际报错时显示）
 
 - version: "0.6.0"
   date: "2026-05-12"
@@ -839,12 +801,10 @@
       pr_refs: [18, 34, 35]
       detail: |
         - 支持 OpenRouter / vLLM / Ollama 等任何 OpenAI Chat Completions 兼容端点
-        - 训练 WandB 集成：`tracker_project` / `tracker_run_name` / `wandb_api_key`
-          串到 sd-scripts，run url + 关键 metric 同步贴回项目页
+        - 训练 WandB 集成：`tracker_project` / `tracker_run_name` / `wandb_api_key` 串到 sd-scripts，run url + 关键 metric 同步贴回项目页
         - 默认 opt-in：不配 endpoint 不调 LLM；wandb 默认关（用户显式开才上传）
         - JoyCaption 退化为 builtin preset，`JoyCaptionConfig` 删除
-        - Prompt → messages 序列：`LLMMessage` 类型 + dnd-kit 拖拽编辑，支持
-          multi-turn / few-shot 对话格式
+        - Prompt → messages 序列：`LLMMessage` 类型 + dnd-kit 拖拽编辑，支持 multi-turn / few-shot 对话格式
         - Settings UI 双栏 grid + 4 张 section 合并大 card + composer 高度撑满
 
     - kind: added
@@ -852,41 +812,31 @@
       pr_refs: [37, 42]
       detail: |
         - Topbar 4 个等宽 pill（CPU / GPU / MEM / VRAM，min-w 96px）+ 两端对齐
-        - 从 `nvidia-ml-py`（pynvml 已停维护）拉，backend `_StatsThread` 2.5s
-          间隔通过 SSE `system_stats_updated` 推到前端
-        - Monitor 改增量协议：步进式 delta 取代每秒 full snapshot，10k 步训练
-          payload O(N) → O(1)
-        - Cold-start 拉全量历史：`/api/state` 默认 `max_points=0` 不降采样；
-          前端 `MAX_LOSSES / MAX_LR` 5000 → 50000 对齐 backend `train_monitor`
-        - `_SelectiveGZipMiddleware`：10k 步 `/api/state` ~500KB → ~100KB（5x），
-          `/api/events` SSE + `/samples/*` 图片白名单跳过
+        - 从 `nvidia-ml-py`（pynvml 已停维护）拉，backend `_StatsThread` 2.5s 间隔通过 SSE `system_stats_updated` 推到前端
+        - Monitor 改增量协议：步进式 delta 取代每秒 full snapshot，10k 步训练 payload O(N) → O(1)
+        - Cold-start 拉全量历史：`/api/state` 默认 `max_points=0` 不降采样；前端 `MAX_LOSSES / MAX_LR` 5000 → 50000 对齐 backend `train_monitor`
+        - `_SelectiveGZipMiddleware`：10k 步 `/api/state` ~500KB → ~100KB（5x）， `/api/events` SSE + `/samples/*` 图片白名单跳过
 
     - kind: added
       summary: "新增 ModelScope（魔搭社区）作为模型下载源（#25）"
       pr_refs: [25]
       detail: |
-        - HF 拉不下来时切 ModelScope；Settings 加 `download_source` 选项，默认
-          仍 `huggingface`
-        - `_get_download_source()` 优先级：`MODELSCOPE_SOURCE` env > secrets >
-          `'huggingface'`
+        - HF 拉不下来时切 ModelScope；Settings 加 `download_source` 选项，默认仍 `huggingface`
+        - `_get_download_source()` 优先级：`MODELSCOPE_SOURCE` env > secrets > `'huggingface'`
         - 有映射的模型走魔搭 CLI 下载；无映射自动回退 HF
-        - onnxruntime 安装失败时自动 fallback 到腾讯 pypi 镜像（仅 fallback，
-          不改默认源）
+        - onnxruntime 安装失败时自动 fallback 到腾讯 pypi 镜像（仅 fallback，不改默认源）
 
     - kind: changed
       summary: "Settings 重排：新增监控 tab + 面包屑跳转 + sticky 锚点（#36）"
       pr_refs: [36]
       detail: |
         - 新增「监控」tab，WandB 从「训练」搬过去
-        - HF / ModelScope 在「训练」合并成「模型下载源」section，按 `download_source`
-          条件渲染
+        - HF / ModelScope 在「训练」合并成「模型下载源」section，按 `download_source` 条件渲染
         - PageHeader 加 `tabs` slot；全局移除 eyebrow（与 Topbar 面包屑功能重复）
         - Topbar 面包屑改 React-Router `Link`，可点击跳转
-        - 右侧 sticky section index：`IntersectionObserver(rootMargin: -20% 0px -70% 0px)`
-          高亮 + 平滑滚动
+        - 右侧 sticky section index：`IntersectionObserver(rootMargin: -20% 0px -70% 0px)` 高亮 + 平滑滚动
         - LLM tagger 采样参数 + 图片预处理合并成默认折叠的「高级参数」面板
-        - URL routing 不变（`/tools/settings`），tab 走 React state，旧浏览器
-          书签照常工作
+        - URL routing 不变（`/tools/settings`），tab 走 React state，旧浏览器书签照常工作
 
     - kind: improved
       summary: "队列输出页面改直链下载 + 批量 zip + 按 step/seed 排序（#33）"
@@ -901,11 +851,8 @@
       detail: |
         PR #18 P0 followups 4 项：
 
-        - **caption 重复**：`utils/caption_utils.py` 与 `studio/services/caption_format.py`
-          各有一份 `normalize_caption_json`，merge 逻辑微妙不同（lowercase 去重
-          vs 简单 extend）。改为单源 re-export，避免 schema 调整时双份漂移
-        - **WandB 默认关**：PR #18 默认 `log_with_wandb=True` 导致用户必装 wandb
-          才能跑；改 opt-in
+        - **caption 重复**：`utils/caption_utils.py` 与 `studio/services/caption_format.py` 各有一份 `normalize_caption_json`，merge 逻辑微妙不同（lowercase 去重 vs 简单 extend）。改为单源 re-export，避免 schema 调整时双份漂移
+        - **WandB 默认关**：PR #18 默认 `log_with_wandb=True` 导致用户必装 wandb 才能跑；改 opt-in
         - **训练采样图缩图**：原 1024×1024 PNG 直塞前端 → 后端缩到 256 thumbnail
         - **自定义 `output_format`**：之前硬编码 PNG，加用户可选字段
 
@@ -913,17 +860,14 @@
       summary: "Danbooru estimate API 403 漏修（0.5.2 hotfix 当时只修了 search）（#41）"
       pr_refs: [41]
       detail: |
-        - 0.5.2 当时只修了 search，estimate 走单独路径仍裸 UA；这次一并加上
-          `AnimaLoraStudio/<version>` UA + `Accept: application/json`
+        - 0.5.2 当时只修了 search，estimate 走单独路径仍裸 UA；这次一并加上 `AnimaLoraStudio/<version>` UA + `Accept: application/json`
         - 配套 `tests/test_downloader.py` 加 estimate 回归用例
 
     - kind: fixed
       summary: "AI 先验生成因变量名错误 500 报错修复（#42 内）"
       pr_refs: [42]
       detail: |
-        `reg_generate_prior` 写 cfg 用 `STUDIO_DATA / "reg_ai_configs"`，但
-        `server.py` 顶部 `from .paths import (...)` 漏掉 `STUDIO_DATA`，路由
-        一调即崩。一行 import 修复。
+        `reg_generate_prior` 写 cfg 用 `STUDIO_DATA / "reg_ai_configs"`，但 `server.py` 顶部 `from .paths import (...)` 漏掉 `STUDIO_DATA`，路由一调即崩。一行 import 修复。
 
 - version: "0.5.2"
   date: "2026-05-12"
@@ -934,20 +878,16 @@
       detail: |
         Danbooru 挂 Cloudflare 后 search API 全部 403（`Just a moment...` 挑战页）。
 
-        - `services/booru_api.search_posts` 之前没设 `headers`，requests 默认 UA
-          `python-requests/X.Y.Z` 被 CF 直接拦
-        - 用应用名 UA `AnimaLoraStudio/0.5.2` 而不是浏览器伪装（实测 Chrome UA
-          也照 403，CF 把它当作"浏览器但不跑 JS"的爬虫）
+        - `services/booru_api.search_posts` 之前没设 `headers`，requests 默认 UA `python-requests/X.Y.Z` 被 CF 直接拦
+        - 用应用名 UA `AnimaLoraStudio/0.5.2` 而不是浏览器伪装（实测 Chrome UA 也照 403，CF 把它当作"浏览器但不跑 JS"的爬虫）
         - 加 `Accept: application/json` 让中间件路由更确定
         - `pynvml` → `nvidia-ml-py`（PR #37 已加过，这版统一）
 
     - kind: improved
       summary: "Danbooru 现强制账号绑定，不再支持匿名（UA 同时带 by username 标识）"
       detail: |
-        - UA 带 `(by username)`：符合 danbooru TOS 推荐格式；CF 收紧时按账户
-          白名单比按匿名 UA 更安全
-        - `secrets.has_credentials_for("danbooru")` 现在校 `username + api_key`；
-          与 gelbooru 行为一致
+        - UA 带 `(by username)`：符合 danbooru TOS 推荐格式；CF 收紧时按账户白名单比按匿名 UA 更安全
+        - `secrets.has_credentials_for("danbooru")` 现在校 `username + api_key`；与 gelbooru 行为一致
         - 之前注释说"匿名也能跑"已不再属实（CF 时代匿名 = 0），改为明确强制
         - Settings UI placeholder 改为"必填 — danbooru 挂了 Cloudflare 后不再支持匿名"
 
@@ -967,17 +907,11 @@
       summary: "onnxruntime-gpu 在 Windows / Linux 静默降级 CPU（#29, #30）"
       pr_refs: [29, 30]
       detail: |
-        根因：onnxruntime 在 CUDA EP dlopen 失败时**不抛异常**，会内部 silently
-        fallback 到 CPU；`ort.get_available_providers()` 仍报 CUDA 可用，UI 显示
-        一切正常，用户只看到 CPU 占用飙升。
+        根因：onnxruntime 在 CUDA EP dlopen 失败时**不抛异常**，会内部 silently fallback 到 CPU；`ort.get_available_providers()` 仍报 CUDA 可用，UI 显示一切正常，用户只看到 CPU 占用飙升。
 
-        - 加监控：`_create_session` 比对实际 `session.get_providers()`，请求
-          过 CUDA 但实际不在 → 上报 `cuda_load_error` 让 UI 可见
-        - Windows：Python 3.8+ 废除 PATH 自动加载 DLL，新增 `os.add_dll_directory(torch/lib)`
-          让 onnxruntime 找得到 torch 自带的 `cublasLt64_12.dll` / `cudnn_*.dll`
-        - Linux：worker subprocess 顶层显式 `import onnxruntime_setup` 触发 preload；
-          修 `_has_system_cuda_libs()` 误判（云镜像装 CUDA Toolkit 但没装 cuDNN
-          → 之前被误判为完整系统 CUDA → 跳过 preload）
+        - 加监控：`_create_session` 比对实际 `session.get_providers()`，请求过 CUDA 但实际不在 → 上报 `cuda_load_error` 让 UI 可见
+        - Windows：Python 3.8+ 废除 PATH 自动加载 DLL，新增 `os.add_dll_directory(torch/lib)` 让 onnxruntime 找得到 torch 自带的 `cublasLt64_12.dll` / `cudnn_*.dll`
+        - Linux：worker subprocess 顶层显式 `import onnxruntime_setup` 触发 preload；修 `_has_system_cuda_libs()` 误判（云镜像装 CUDA Toolkit 但没装 cuDNN → 之前被误判为完整系统 CUDA → 跳过 preload）
         - 新增 `tools/diagnose_onnx_gpu.py` 诊断脚本
 
 - version: "0.5.0"
@@ -1005,17 +939,11 @@
     - kind: added
       summary: "断点续训：现有训练 state / LoRA ckpt 在 UI 直接选不用敲路径"
       detail: |
-        - `resume_state` / `resume_lora` 字段旁边的「📁 浏览本项目」按钮：弹出
-          dropdown 贴字段，按 version 分组列出项目所有可用文件，用户看的是
-          「baseline / step 2476」这种语义 label，不暴露
-          `studio_data/projects/.../output/...` 深路径
+        - `resume_state` / `resume_lora` 字段旁边的「📁 浏览本项目」按钮：弹出 dropdown 贴字段，按 version 分组列出项目所有可用文件，用户看的是「baseline / step 2476」这种语义 label，不暴露 `studio_data/projects/.../output/...` 深路径
         - 选中后写绝对路径回字段（schema 字段值仍是真路径，后端协议不变）
-        - 外部文件 / 别项目的 ckpt 用户直接在字段 input 手填即可（不弹 picker，
-          留空白逃生口）
-        - 后端：`versions.list_project_state_ckpts()` / `list_project_lora_ckpts()`
-          + `/api/projects/{pid}/state_ckpts` / `/lora_ckpts` 端点
-        - 解决 UX 根因：之前用户必须从 REPO_ROOT 5 层深挖到
-          `output/training_state_step*.pt` 才能续训
+        - 外部文件 / 别项目的 ckpt 用户直接在字段 input 手填即可（不弹 picker，留空白逃生口）
+        - 后端：`versions.list_project_state_ckpts()` / `list_project_lora_ckpts()` + `/api/projects/{pid}/state_ckpts` / `/lora_ckpts` 端点
+        - 解决 UX 根因：之前用户必须从 REPO_ROOT 5 层深挖到 `output/training_state_step*.pt` 才能续训
 
     - kind: added
       summary: "Setup 重写：GPU-aware torch 首装 + venv stale check + --reinstall 救命"

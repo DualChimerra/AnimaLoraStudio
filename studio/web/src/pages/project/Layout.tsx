@@ -6,6 +6,7 @@ import { useProjectCtxSetter } from '../../context/ProjectContext'
 import { useDialog } from '../../components/Dialog'
 import { useToast } from '../../components/Toast'
 import { useEventStream } from '../../lib/useEventStream'
+import ExportBundleDialog, { type BundleExportOpts } from '../../components/ExportBundleDialog'
 
 export default function ProjectLayout() {
   const { t } = useTranslation()
@@ -17,9 +18,10 @@ export default function ProjectLayout() {
   const setCtx = useProjectCtxSetter()
   const [project, setProject] = useState<ProjectDetail | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [creating, setCreating] = useState(false)
+  const [creating, setCreating] = useState<{ forkFrom: number | null } | null>(null)
   const [creatingBusy, setCreatingBusy] = useState(false)
   const [exporting, setExporting] = useState(false)
+  const [showExportDialog, setShowExportDialog] = useState(false)
   const projectRef = useRef<ProjectDetail | null>(null)
   projectRef.current = project
 
@@ -45,20 +47,22 @@ export default function ProjectLayout() {
     ) {
       void reload()
     } else if (
-      // train.zip 打包完成 / 失败 —— 后端 publish 后清 app-side "打包中..."
-      // 状态。<a> 直链已经把传输交给浏览器原生下载条；这里只管 prep 阶段反馈。
-      (evt.type === 'version_train_zip_ready' || evt.type === 'version_train_zip_failed') &&
+      (
+        evt.type === 'version_train_zip_ready' ||
+        evt.type === 'version_train_zip_failed' ||
+        evt.type === 'version_bundle_zip_ready' ||
+        evt.type === 'version_bundle_zip_failed'
+      ) &&
       evt.project_id === projectId
     ) {
       setExporting(false)
-      if (evt.type === 'version_train_zip_failed') {
+      if (evt.type === 'version_train_zip_failed' || evt.type === 'version_bundle_zip_failed') {
         const err = typeof evt.error === 'string' ? evt.error : '?'
         toast(t('layout.exportFailed', { error: err }), 'error')
       }
     }
   })
 
-  // 兜底：SSE 事件丢失 / 后端进程挂了的时候,60s 后强制清 exporting 不让按钮卡死。
   useEffect(() => {
     if (!exporting) return
     const tid = window.setTimeout(() => setExporting(false), 60_000)
@@ -84,22 +88,43 @@ export default function ProjectLayout() {
 
   const handleExportTrain = useCallback(() => {
     if (!projectRef.current || exporting) return
+    setShowExportDialog(true)
+  }, [exporting])
+
+  const handleExportBundleConfirm = useCallback(async (opts: BundleExportOpts) => {
+    setShowExportDialog(false)
+    if (!projectRef.current) return
     const av = projectRef.current.versions.find(
       (v) => v.id === projectRef.current!.active_version_id
     ) ?? projectRef.current.versions[0] ?? null
     if (!av) return
     setExporting(true)
-    // <a download> 直链 —— 浏览器原生接管下载（进度条 / 暂停 / 切 tab 不中断）。
-    // app-side "打包中..." 由 version_train_zip_ready/_failed SSE 清。
-    // download 属性是兜底,后端 Content-Disposition.filename 优先。
-    const filename = `${projectRef.current.slug}-${av.label}.train.zip`
-    const a = document.createElement('a')
-    a.href = api.versionTrainZipUrl(projectRef.current.id, av.id)
-    a.download = filename
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
-  }, [exporting])
+    const bundleOpts = {
+      train: opts.train,
+      trainCaptions: opts.trainCaptions,
+      reg: opts.reg,
+      regCaptions: opts.regCaptions,
+      includeConfig: opts.includeConfig,
+    }
+    if (opts.destination === 'download') {
+      const filename = `${projectRef.current.slug}-${av.label}.bundle.zip`
+      const a = document.createElement('a')
+      a.href = api.versionBundleZipUrl(projectRef.current.id, av.id, bundleOpts)
+      a.download = filename
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      return
+    }
+    try {
+      const result = await api.exportBundleToDataExports(projectRef.current.id, av.id, bundleOpts)
+      toast(t('layout.exportSavedToDataExports', { filename: result.filename, path: result.path }), 'success')
+      setExporting(false)
+    } catch (e) {
+      setExporting(false)
+      toast(t('layout.exportFailed', { error: String(e) }), 'error')
+    }
+  }, [t, toast])
 
   const handleDeleteVersion = useCallback(async (vid: number) => {
     if (!projectRef.current) return
@@ -126,7 +151,7 @@ export default function ProjectLayout() {
       const v = await api.createVersion(projectRef.current.id, body)
       await api.activateVersion(projectRef.current.id, v.id)
       await reload()
-      setCreating(false)
+      setCreating(null)
       toast(
         forkFromVersionId !== null
           ? t('layout.versionCreatedFromFork', { label })
@@ -147,12 +172,13 @@ export default function ProjectLayout() {
       activeVersion,
       reload,
       onSelectVersion: handleSelectVersion,
-      onCreateVersion: () => setCreating(true),
+      onCreateVersion: (forkFromVid?: number) => setCreating({ forkFrom: forkFromVid ?? null }),
       onExportTrain: handleExportTrain,
       onDeleteVersion: handleDeleteVersion,
       exporting,
     })
   }, [project, activeVersion, reload, handleSelectVersion, handleExportTrain, handleDeleteVersion, exporting, setCtx])
+
 
   useEffect(() => {
     return () => { setCtx?.(null) }
@@ -175,16 +201,23 @@ export default function ProjectLayout() {
         project,
         activeVersion,
         reload,
-        onCreateVersion: () => setCreating(true),
+        onCreateVersion: (forkFromVid?: number) => setCreating({ forkFrom: forkFromVid ?? null }),
         creatingVersionBusy: creatingBusy,
       }} />
       {creating && (
         <NewVersionDialog
           existingLabels={project.versions.map((v) => v.label)}
           existingVersions={project.versions.map((v) => ({ id: v.id, label: v.label }))}
+          initialForkFrom={creating.forkFrom}
           busy={creatingBusy}
-          onCancel={() => { if (creatingBusy) return; setCreating(false) }}
+          onCancel={() => { if (creatingBusy) return; setCreating(null) }}
           onSubmit={handleCreateVersion}
+        />
+      )}
+      {showExportDialog && (
+        <ExportBundleDialog
+          onConfirm={handleExportBundleConfirm}
+          onCancel={() => setShowExportDialog(false)}
         />
       )}
     </div>
@@ -194,19 +227,22 @@ export default function ProjectLayout() {
 export function NewVersionDialog({
   existingLabels,
   existingVersions,
+  initialForkFrom = null,
   busy = false,
   onCancel,
   onSubmit,
 }: {
   existingLabels: string[]
   existingVersions: { id: number; label: string }[]
+  /** 打开对话框时预填的 forkFrom version id（null = 不预填，user 自己选）。 */
+  initialForkFrom?: number | null
   busy?: boolean
   onCancel: () => void
   onSubmit: (label: string, forkFromVersionId: number | null) => void
 }) {
   const { t } = useTranslation()
   const [label, setLabel] = useState('')
-  const [forkFrom, setForkFrom] = useState<string>('')
+  const [forkFrom, setForkFrom] = useState<string>(initialForkFrom != null ? String(initialForkFrom) : '')
   const [err, setErr] = useState<string | null>(null)
 
   const submit = (e: React.FormEvent) => {

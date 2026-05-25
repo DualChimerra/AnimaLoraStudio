@@ -74,6 +74,27 @@ def migrate_legacy_attention(data: Any) -> Any:
     return data
 
 
+def migrate_legacy_save_keys(data: Any) -> Any:
+    """把老 cfg 的 save_every / save_state_every 改名带单位后缀。
+
+    save_every       → save_every_epochs   (epoch-based)
+    save_state_every → save_state_every_steps (step-based)
+
+    Idempotent；新名已存在则丢弃同义旧名。和 migrate_legacy_attention 一样
+    在两处调用：schema model_validator(mode='before') + runtime apply_yaml_config。
+    """
+    if not isinstance(data, dict):
+        return data
+    for legacy, new in (("save_every", "save_every_epochs"),
+                         ("save_state_every", "save_state_every_steps")):
+        if legacy in data:
+            if new in data:
+                data.pop(legacy)
+            else:
+                data[new] = data.pop(legacy)
+    return data
+
+
 class TrainingConfig(BaseModel):
     """与 config/train_template.yaml 对齐的完整训练参数。
 
@@ -213,6 +234,12 @@ class TrainingConfig(BaseModel):
         0.0, ge=0.0, le=1.0,
         description="层级 stochastic depth（整层级别随机跳过）",
         json_schema_extra=_meta("lora", advanced=True),
+    )
+    lora_reg_dims: Optional[dict[str, int]] = Field(
+        None,
+        description="分层 rank：正则表达式 → rank 的字典，按模块名正则全匹配覆盖默认 rank（如 {\"lora_unet_.*double.*\": 16}）",
+        examples=[{"lora_unet_.*double.*": 16}],
+        json_schema_extra=_meta("lora", "code", advanced=True),
     )
 
     # ------------------------------------------------------------------ 训练
@@ -489,10 +516,11 @@ class TrainingConfig(BaseModel):
         json_schema_extra=_meta("noise_schedule", show_when="loss_weighting==detail_inv_t", advanced=True),
     )
     grad_clip_max_norm: float = Field(
-        0.0, ge=0.0,
-        description="梯度裁剪最大范数（0=禁用）",
+        1.0, ge=0.0,
+        description="梯度裁剪最大范数：当本步所有可训练参数的梯度全局范数超过该值时按比例缩到该值，防止单步极端梯度把模型推飞；默认 1.0 适合绝大多数场景，bf16+DoRA/LoKr 不稳可降到 0.5，0=禁用",
         json_schema_extra=_meta("training", advanced=True),
     )
+
     mixed_precision: Literal["bf16", "fp16", "no"] = Field(
         "bf16",
         description="混合精度",
@@ -514,6 +542,11 @@ class TrainingConfig(BaseModel):
     @classmethod
     def _migrate_attention(cls, data: Any) -> Any:
         return migrate_legacy_attention(data)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_save_keys(cls, data: Any) -> Any:
+        return migrate_legacy_save_keys(data)
 
     @model_validator(mode="after")
     def _validate_prodigy_scheduler(self) -> "TrainingConfig":
@@ -546,7 +579,7 @@ class TrainingConfig(BaseModel):
         description="输出文件名前缀",
         json_schema_extra=_meta("output"),
     )
-    save_every: int = Field(
+    save_every_epochs: int = Field(
         2, ge=0,
         description="每 N epoch 保存（0=禁用）",
         json_schema_extra=_meta("output"),
@@ -556,14 +589,14 @@ class TrainingConfig(BaseModel):
         description="每 N step 保存（0=禁用）",
         json_schema_extra=_meta("output"),
     )
-    save_state_every: int = Field(
+    save_state_every_steps: int = Field(
         0, ge=0,
         description="每 N step 保存完整训练状态（断点续训，0=禁用）",
         json_schema_extra=_meta("output"),
     )
     save_state_every_epochs: int = Field(
         0, ge=0,
-        description="每 N epoch 保存完整训练状态（断点续训，0=禁用；与 save_state_every 取先到者）",
+        description="每 N epoch 保存完整训练状态（断点续训，0=禁用）",
         json_schema_extra=_meta("output"),
     )
     seed: int = Field(

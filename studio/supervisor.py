@@ -151,14 +151,19 @@ def _default_cmd_builder(task: dict[str, Any], config_path: Path) -> list[str]:
     return cmd
 
 
-def _maybe_finalize_version(conn: Any, task_id: int) -> None:
-    """PP6.3：task 成功完成 → 找 version → 回填 output_lora_path + stage=done。
+def _maybe_finalize_version(
+    conn: Any, task_id: int, task_status: str = "done"
+) -> None:
+    """task 终态 → 推 version.status（ADR-0007 §11.3-B）。
 
-    output_lora_path 推断：`versions/{label}/output/{output_name}_final.safetensors`
-    （anima_train 标准命名）。文件不存在不报错 — 有可能用户用别的命名规则。
-    project.stage 也推到 'done' 让 Stepper 反映。
+    task_status 映射：
+    - done → completed（+ output_lora_path 回填）
+    - failed → failed（+ last_failure_reason 写入 task.error_msg）
+    - canceled → canceled
+
+    paused 不进此函数（§11.3-A：task=paused 时 version 仍 training，UI 派生显示）。
     """
-    from . import projects as _projects, versions as _versions
+    from . import versions as _versions
     task_row = db.get_task(conn, task_id)
     if not task_row:
         return
@@ -167,20 +172,37 @@ def _maybe_finalize_version(conn: Any, task_id: int) -> None:
     if not (vid and pid):
         return
     v = _versions.get_version(conn, int(vid))
-    p = _projects.get_project(conn, int(pid))
-    if not v or not p:
+    if not v:
         return
-    # 推断 output_lora_path（与 anima_train 默认 `{output_name}_final.safetensors` 一致）
-    output_name = f"{p['slug']}_{v['label']}"
-    vdir = _versions.version_dir(int(pid), p["slug"], v["label"])
-    candidate = vdir / "output" / f"{output_name}_final.safetensors"
-    fields: dict[str, Any] = {"stage": "done"}
-    if candidate.exists():
-        fields["output_lora_path"] = str(candidate)
+    from . import projects as _projects
+    p = _projects.get_project(conn, int(pid))
+    if not p:
+        return
+
+    # ADR-0007 §11.3-B：task 终态独立映射，不撒谎
+    new_status_map = {
+        "done":     _versions.VersionStatus.COMPLETED,
+        "failed":   _versions.VersionStatus.FAILED,
+        "canceled": _versions.VersionStatus.CANCELED,
+    }
+    new_status = new_status_map.get(task_status)
+    if new_status is None:
+        return  # 未知 task_status（如 paused / running）不动 version
+
+    fields: dict[str, Any] = {"status": new_status}
+
+    if task_status == "done":
+        output_name = f"{p['slug']}_{v['label']}"
+        vdir = _versions.version_dir(int(pid), p["slug"], v["label"])
+        candidate = vdir / "output" / f"{output_name}_final.safetensors"
+        if candidate.exists():
+            fields["output_lora_path"] = str(candidate)
+    elif task_status == "failed":
+        err = task_row.get("error_msg")
+        if err:
+            fields["last_failure_reason"] = str(err)
+
     _versions.update_version(conn, int(vid), **fields)
-    # 项目也推到 done（用户视角整条链跑完了）
-    if p.get("stage") in ("training", "configured"):
-        _projects.advance_stage(conn, int(pid), "done")
 
 
 def _resolve_monitor_state_path(task: dict[str, Any]) -> Path:
@@ -338,15 +360,14 @@ class Supervisor:
             if slot is not None:
                 self._signal_terminate_async(slot)
                 return True
-            # daemon 上跑的 generate task：kill daemon 进程让它带着丢 cache 退出，
-            # 下次 generate task 再 lazy spawn。粗暴但可接受（用户主动取消低频）。
             with self._daemon_lock:
-                if self._daemon_active_task_id == task_id:
+                is_daemon_task = self._daemon_active_task_id == task_id
+                if is_daemon_task:
                     self._daemon_cancel_pending = True
-            try:
-                get_daemon().stop(timeout=3.0)
-            except Exception:
-                logger.exception("failed to stop daemon for cancel")
+            if is_daemon_task:
+                if get_daemon().cancel_active_task(task_id):
+                    return True
+                logger.warning("daemon cancel request missed; task_id=%s", task_id)
             return True
         return False
 
@@ -657,6 +678,17 @@ class Supervisor:
             )
             return
 
+        # ADR-0007 §11.7 / PR-3 commit 4：task 启动 → 冻结当时的 config
+        # 到 studio_data/tasks/{tid}/snapshot/config.yaml。失败不阻 task
+        # 启动（snapshot 是 forensics 不是必需）。
+        try:
+            from . import task_snapshot
+            task_snapshot.freeze_config(int(task["id"]), cfg_path)
+        except Exception:
+            logger.exception(
+                "task %s config snapshot freeze failed (non-fatal)", task["id"]
+            )
+
         # PP6.1 — 计算 per-task monitor 状态文件路径
         # 有 version_id：versions/{label}/monitor_state.json
         # 没有：studio_data/monitors/task_{id}/state.json（兜底）
@@ -754,6 +786,20 @@ class Supervisor:
                 pid=proc.pid,
                 monitor_state_path=str(monitor_state_path),
             )
+            # ADR-0007 §11.3-B 双写：task 启动 → version.status = training
+            vid = task.get("version_id")
+            if vid:
+                try:
+                    from . import versions as _versions
+                    _versions.update_version(
+                        conn, int(vid),
+                        status=_versions.VersionStatus.TRAINING,
+                    )
+                except Exception:
+                    logger.exception(
+                        "version.status=training write failed for task %s",
+                        task["id"],
+                    )
         self._on_event(
             {
                 "type": "task_state_changed",
@@ -881,6 +927,7 @@ class Supervisor:
 
         if not self._daemon_listener_registered:
             daemon.add_global_listener(self._on_daemon_global_event)
+            daemon.add_log_listener(self._on_daemon_log_line)
             self._daemon_listener_registered = True
 
         with self._daemon_lock:
@@ -962,11 +1009,23 @@ class Supervisor:
         if kind == "done":
             self._finalize_daemon_task(tid, status="done")
             self._emit_daemon_state()
+        elif kind == "canceled":
+            self._finalize_daemon_task(tid, status="canceled")
+            self._emit_daemon_state()
         elif kind == "error":
             self._finalize_daemon_task(
                 tid, status="failed", error_msg=str(event.get("message") or "daemon error"),
             )
             self._emit_daemon_state()
+
+    def _on_daemon_log_line(self, entry: dict[str, Any]) -> None:
+        """daemon stderr 增量行 → SSE daemon_log_line（前端日志抽屉用）。"""
+        self._on_event({
+            "type": "daemon_log_line",
+            "ts": entry.get("ts"),
+            "seq": entry.get("seq"),
+            "line": entry.get("line"),
+        })
 
     def _on_daemon_global_event(self, event: dict[str, Any]) -> None:
         """daemon 进程级事件（loaded / unloaded / stopped）。"""
@@ -1177,9 +1236,10 @@ class Supervisor:
                     fields["paused_step"] = slot.pause_step
                     fields["paused_at"] = time.time()
                 db.update_task(conn, cid, **fields)
-                # PP6.3：训练成功时回填 version.output_lora_path + 推 stage=done
-                if status == "done":
-                    _maybe_finalize_version(conn, cid)
+                # ADR-0007 §11.3-B：task 终态（done/failed/canceled）独立映射到
+                # version.status。paused 不进（task 还能 resume，§11.3-A）。
+                if status in ("done", "failed", "canceled"):
+                    _maybe_finalize_version(conn, cid, status)
             # commit 10 起：generate task 走 daemon 不进 SLOT_TRAIN，
             # 这条 _finish_slot 路径只跑 train / reg_ai；不再需要 generate
             # tempdir 清理（已搬到 _finalize_daemon_task）。
