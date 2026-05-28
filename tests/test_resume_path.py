@@ -370,15 +370,29 @@ def _create_paused_task(env, state_pt: Path, cfg_json: Path) -> int:
 
 
 def _import_server_module():
-    """每次干净 import server module — 测试 isolation 用。"""
-    import importlib
-    if "studio.server" in sys.modules:
-        del sys.modules["studio.server"]
+    """返回一个轻量 namespace 暴露 PR-6 抽出的 resume_task / HTTPException 给老 tests。
+
+    历史实现 `del sys.modules["studio.server"]` + 重新 import — 那是因为以前
+    server.py 全 self-contained。PR-6 后 server.py @app 装饰器跟 api.app 共享
+    同一 FastAPI 实例，反复重 import 会让装饰器对同一 app 重复注册路由（实测
+    每跑一次膨胀几十条），导致 route_snapshot / route_invariants 跨测污染。
+
+    改成只暴露 tests 直接用的 2 个名字（HTTPException + resume_task），不再
+    重 import server。
+    """
     try:
-        import studio.server as _s  # type: ignore[import-not-found]
-        return _s
+        from fastapi import HTTPException
+        from studio.api.routers.queue.lifecycle import resume_task as _resume_task
     except ImportError:
-        pytest.skip("fastapi not installed; cannot import studio.server")
+        pytest.skip("fastapi not installed; cannot import resume endpoint")
+
+    class _ServerShim:
+        pass
+
+    shim = _ServerShim()
+    shim.HTTPException = HTTPException
+    shim.resume_task = _resume_task
+    return shim
 
 
 def test_resume_endpoint_rejects_unknown_task(server_env) -> None:

@@ -16,14 +16,58 @@ from fastapi import FastAPI
 from .. import __version__
 from .lifespan import lifespan
 from .middleware import _SelectiveGZipMiddleware
-from .routers import browse, events_sse, health, presets
+from .routers import (
+    browse,
+    data_exports,
+    events_sse,
+    generate,
+    health,
+    installs,
+    jobs,
+    logs,
+    models,
+    presets,
+    root,
+    samples,
+    secrets as secrets_router,
+    system,
+    tagger,
+    upscalers,
+)
+from .routers.queue import io as queue_io_router
+from .routers.queue import lifecycle as queue_lifecycle
+from .routers.queue import outputs as queue_outputs
 
 app = FastAPI(title="AnimaStudio", version=__version__, lifespan=lifespan)
 app.add_middleware(_SelectiveGZipMiddleware, minimum_size=1000)
 
-# 第一批 router（PR-5 commit 2）。后续 router 逐批从 server.py 抽到
-# api/routers/<name>.py 后在此 include。
+# Router 注册顺序无所谓（FastAPI 按 path 精确匹配，include_router 先后只影响
+# include_in_schema=False 的 catch-all 顺序）。按 PR / 字母序排列方便审查。
+# PR-5 commit 2: health / presets / browse / events_sse
 app.include_router(health.router)
 app.include_router(presets.router)
 app.include_router(browse.router)
 app.include_router(events_sse.router)
+# PR-6 commit 1: 5 个小 router（root / samples / logs / data_exports / tagger）
+app.include_router(root.router)
+app.include_router(samples.router)
+app.include_router(logs.router)
+app.include_router(data_exports.router)
+app.include_router(tagger.router)
+# PR-6 commit 2: 4 个 admin router（jobs / secrets / models / upscalers）
+app.include_router(jobs.router)
+app.include_router(secrets_router.router)
+app.include_router(models.router)
+app.include_router(upscalers.router)
+# PR-6 commit 3: installs router（10 routes: wd14/torch/flash-attn/xformers/llm-tagger admin）
+app.include_router(installs.router)
+# PR-6 commit 4: system router（11 routes: restart / update / rollback / preflight / etc.）
+app.include_router(system.router)
+# PR-6 commit 5: generate router（8 routes: 出图 + daemon 状态 + TAEFlux）
+app.include_router(generate.router)
+# PR-6 commit 6: queue 子包 3 文件（lifecycle 12 + io 3 + outputs 5 = 20 routes）
+# 注册顺序：io 必须在 lifecycle 之前（FastAPI 按定义顺序匹配 path，"export" /
+# "import" 字符串否则会被 `/api/queue/{task_id}` 的整数解析截胡 422）
+app.include_router(queue_io_router.router)
+app.include_router(queue_lifecycle.router)
+app.include_router(queue_outputs.router)
