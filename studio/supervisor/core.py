@@ -57,6 +57,36 @@ from .slot import SLOT_DATA, SLOT_TRAIN, _Slot
 logger = logging.getLogger(__name__)
 
 
+def _tail_log_for_error_msg(log_path: Path, max_lines: int = 12, max_chars: int = 800) -> str:
+    """B-1.6: 失败 task 的 db.error_msg 从 "exit code 1" 升级为 traceback 摘要。
+
+    策略：读 jobs/<id>.log 末 N 行；找到最后一处 'Traceback' 截取那一段；
+    没有则取末 N 行。截断到 max_chars 适配 UI 显示宽度。
+
+    失败兜底返 ""（caller 用 "exit code N" 默认值）。
+    """
+    try:
+        if not log_path.exists():
+            return ""
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+        lines = text.splitlines()
+        if not lines:
+            return ""
+        tb_start = None
+        for i in range(len(lines) - 1, -1, -1):
+            if lines[i].startswith("Traceback"):
+                tb_start = i
+                break
+        snippet_lines = lines[tb_start:] if tb_start is not None else lines[-max_lines:]
+        out = "\n".join(snippet_lines).strip()
+        if len(out) > max_chars:
+            out = "..." + out[-(max_chars - 3):]
+        return out
+    except Exception:
+        logger.exception("tail log %s failed", log_path)
+        return ""
+
+
 class Supervisor:
     POLL_INTERVAL = 1.0
     TERMINATE_GRACE = 30.0
@@ -460,60 +490,81 @@ class Supervisor:
 
     # -------------------------------------------------------------- 子进程
     def _spawn_task(self, slot: _Slot, task: dict[str, Any]) -> None:
-        cfg_path = self._resolve_task_config_path(task)
-        if not cfg_path.exists():
-            self._fail_task_config_missing(task, cfg_path)
-            return
-
-        self._freeze_task_snapshot(int(task["id"]), cfg_path)
-
-        # PP6.1 — 计算 per-task monitor 状态文件路径
-        # 有 version_id：versions/{label}/monitor_state.json
-        # 没有：studio_data/monitors/task_{id}/state.json（兜底）
-        monitor_state_path = _resolve_monitor_state_path(task)
-        # 提前注入到 task dict 供 cmd_builder 用，以及落库
-        task = dict(task)
-        task["monitor_state_path"] = str(monitor_state_path)
-
-        self._logs_dir.mkdir(parents=True, exist_ok=True)
-        log_path = self._logs_dir / f"{task['id']}.log"
-        log_fp = open(log_path, "wb")
-
-        cmd = self._cmd_builder(task, cfg_path)
-        # ADR 0006 PR-1：LORA_TASK_ID 注入让训练子进程把 state 文件写到
-        # output_dir/state/task_<TID>/ 子目录，避免同 version 多 task 互覆盖。
-        proc = self._popen(cmd, log_fp, extra_env={"LORA_TASK_ID": str(task["id"])})
-
-        slot.proc = proc
-        slot.kind = "task"
-        slot.id = task["id"]
-        slot.log_fp = log_fp
-        slot.cancel_pending = False
-
-        tid = task["id"]
-
-        # PP6.4 — log tail → SSE（取代前端 2s 轮询 /api/logs/{id}）
-        slot.tailer = LogTailer(log_path, self._make_task_log_callback(slot, tid))
-        slot.tailer.start()
-
-        # PP6.4 → PR #37: monitor_state.json 变化 → SSE monitor_progress (增量协议)
-        slot.state_poller = MonitorStatePoller(
-            monitor_state_path, self._make_monitor_callback(tid)
+        # ADR-0009 PR-1 C6 trace_id 跨进程贯穿：
+        #   1) task.request_trace_id 由 API endpoint 入 task 时存（HTTP 请求那一刻
+        #      TraceIdMiddleware bind 的 contextvar）；老 task / 没存的兜底 bg-{uuid}
+        #   2) bind 到 ContextVar 让 supervisor 整段 _spawn_task 内 logger.x 都带
+        #   3) 注入 ANIMA_TRACE_ID / ANIMA_PROCESS_NAME env 给 worker 子进程
+        from ..infrastructure.logging import (
+            PROCESS_ENV, TRACE_ENV,
+            bind_trace_id, new_trace_id, reset_trace_id,
         )
-        slot.state_poller.start()
+        trace_id = task.get("request_trace_id") or f"bg-{new_trace_id()}"
+        kind = task.get("task_type") or "train"
+        process_name = f"worker:{kind}/{task['id']}"
+        _trace_token = bind_trace_id(trace_id)
+        try:
+            cfg_path = self._resolve_task_config_path(task)
+            if not cfg_path.exists():
+                self._fail_task_config_missing(task, cfg_path)
+                return
 
-        self._write_task_running_to_db(task, proc.pid, monitor_state_path)
+            self._freeze_task_snapshot(int(task["id"]), cfg_path)
 
-        self._on_event(
-            {
-                "type": "task_state_changed",
-                "task_id": task["id"],
-                "status": "running",
-            }
-        )
-        logger.info(
-            "started task %d on slot=%s (pid=%d)", task["id"], slot.name, proc.pid
-        )
+            # PP6.1 — 计算 per-task monitor 状态文件路径
+            # 有 version_id：versions/{label}/monitor_state.json
+            # 没有：studio_data/monitors/task_{id}/state.json（兜底）
+            monitor_state_path = _resolve_monitor_state_path(task)
+            # 提前注入到 task dict 供 cmd_builder 用，以及落库
+            task = dict(task)
+            task["monitor_state_path"] = str(monitor_state_path)
+
+            self._logs_dir.mkdir(parents=True, exist_ok=True)
+            log_path = self._logs_dir / f"{task['id']}.log"
+            log_fp = open(log_path, "wb")
+
+            cmd = self._cmd_builder(task, cfg_path)
+            # ADR 0006 PR-1：LORA_TASK_ID 注入让训练子进程把 state 文件写到
+            # output_dir/state/task_<TID>/ 子目录，避免同 version 多 task 互覆盖。
+            # ADR-0009 PR-1 C6：TRACE_ENV + PROCESS_ENV 让 worker bootstrap 拿到。
+            proc = self._popen(cmd, log_fp, extra_env={
+                "LORA_TASK_ID": str(task["id"]),
+                TRACE_ENV: trace_id,
+                PROCESS_ENV: process_name,
+            })
+
+            slot.proc = proc
+            slot.kind = "task"
+            slot.id = task["id"]
+            slot.log_fp = log_fp
+            slot.cancel_pending = False
+
+            tid = task["id"]
+
+            # PP6.4 — log tail → SSE（取代前端 2s 轮询 /api/logs/{id}）
+            slot.tailer = LogTailer(log_path, self._make_task_log_callback(slot, tid))
+            slot.tailer.start()
+
+            # PP6.4 → PR #37: monitor_state.json 变化 → SSE monitor_progress (增量协议)
+            slot.state_poller = MonitorStatePoller(
+                monitor_state_path, self._make_monitor_callback(tid)
+            )
+            slot.state_poller.start()
+
+            self._write_task_running_to_db(task, proc.pid, monitor_state_path)
+
+            self._on_event(
+                {
+                    "type": "task_state_changed",
+                    "task_id": task["id"],
+                    "status": "running",
+                }
+            )
+            logger.info(
+                "started task %d on slot=%s (pid=%d)", task["id"], slot.name, proc.pid
+            )
+        finally:
+            reset_trace_id(_trace_token)
 
     def _resolve_task_config_path(self, task: dict[str, Any]) -> Path:
         """PP6.3：优先用 task.config_path（version 私有 config 绝对路径）；
@@ -582,7 +633,15 @@ class Supervisor:
                     import json as _json
                     payload = _json.loads(payload_str) if payload_str else {}
                 except Exception:
+                    # B-4.4: malformed event 静默丢导致 UI pause_state 永远收不到
+                    # → 暂停按钮永远灰。logger.exception 进 studio.log；
+                    # SSE event_malformed 让前端可见（不阻断 task）。
                     logger.exception("malformed event marker: %r", line[:200])
+                    self._on_event({
+                        "type": "event_malformed",
+                        "task_id": tid,
+                        "raw_preview": line[:200],
+                    })
                     return  # 不当 log 推
                 # 状态机镜像（ADR §8.1 / §`_on_line` / Addendum 1 §supervisor）
                 if evt_type == "pause_state":
@@ -1094,7 +1153,12 @@ class Supervisor:
                     "pid": None,
                 }
                 if status == "failed":
-                    fields["error_msg"] = f"exit code {rc}"
+                    # B-1.6: tail jobs/<id>.log 末 12 行（含 Traceback 优先）
+                    # 拼到 error_msg，UI Task 列表能直接看到根因，不必每次翻 trace
+                    tail = _tail_log_for_error_msg(self._logs_dir / f"{cid}.log")
+                    fields["error_msg"] = (
+                        f"exit code {rc}\n{tail}" if tail else f"exit code {rc}"
+                    )
                 elif status == "paused":
                     fields["paused_state_path"] = slot.pause_state_path
                     fields["paused_config_path"] = slot.pause_config_path
@@ -1119,7 +1183,10 @@ class Supervisor:
                 elif status == "canceled":
                     project_jobs.mark_canceled(conn, cid)
                 else:
-                    project_jobs.mark_failed(conn, cid, f"exit code {rc}")
+                    # B-1.6: 同 task — tail jobs log 拼 error_msg
+                    tail = _tail_log_for_error_msg(self._logs_dir / f"{cid}.log")
+                    err_msg = f"exit code {rc}\n{tail}" if tail else f"exit code {rc}"
+                    project_jobs.mark_failed(conn, cid, err_msg)
                 job = project_jobs.get_job(conn, cid)
             self._on_event({
                 "type": "job_state_changed",
