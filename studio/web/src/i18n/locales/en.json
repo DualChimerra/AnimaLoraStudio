@@ -259,7 +259,10 @@
     "pathHintAuto": "(path)",
     "browse": "Browse",
     "browseProject": "Project files",
-    "multilineHint": "(one per line)"
+    "multilineHint": "(one per line)",
+    "useGlobal": "— Use global settings —",
+    "yes": "Yes",
+    "no": "No"
   },
   "schema": {
     "fieldCount": "{{n}} items",
@@ -275,7 +278,8 @@
       "system": "System & performance",
       "output": "Output & saving",
       "sample": "Sampling",
-      "monitor": "Monitor & progress"
+      "monitor": "Monitor & progress",
+      "wandb": "WandB (preset override)"
     },
     "enums": {
       "loraType": {
@@ -319,6 +323,15 @@
         "none": "Disabled",
         "offset": "Noise Offset",
         "pyramid": "Pyramid noise"
+      },
+      "wandbMode": {
+        "online": "Online",
+        "offline": "Offline",
+        "disabled": "Disabled"
+      },
+      "wandbPolicy": {
+        "all": "Keep all",
+        "last": "Keep latest only"
       }
     },
     "disableHints": {
@@ -422,7 +435,23 @@
       "sample_seed": "Sample seed (0 = random)",
       "sample_negative_prompt": "Negative prompt",
       "sample_prompt": "Single prompt mode: all sample images during training share this prompt (ignored when sample_prompts is set)",
-      "sample_prompts": "Multiple prompt rotation (takes priority over sample_prompt)"
+      "sample_prompts": "Multiple prompt rotation (takes priority over sample_prompt)",
+      "wandb_notice": "⚠️ Do not fill in these settings unless you know what you are doing",
+      "wandb_enabled": "Preset-level WandB toggle (blank = use global settings)",
+      "wandb_api_key": "WandB API Key (overrides global settings)",
+      "wandb_project": "WandB project name (blank = use global settings)",
+      "wandb_entity": "WandB team/user name (blank = use global settings)",
+      "wandb_base_url": "WandB custom server URL (blank = use global settings)",
+      "wandb_mode": "WandB mode (online / offline / disabled)",
+      "wandb_log_samples": "Preset-level sample logging toggle (blank = use global settings)",
+      "wandb_sample_max_side": "Sample max side (0 = use global settings)",
+      "wandb_sample_every_n_steps": "Step throttle (-1 = use global settings)",
+      "wandb_upload_model": "Preset-level model upload toggle (blank = use global settings)",
+      "wandb_upload_model_policy": "Model artifact retention (all = keep all, last = keep latest only)",
+      "wandb_upload_state_manual": "Preset-level manual training state upload toggle (blank = use global settings)",
+      "wandb_upload_state_manual_policy": "Manual training state artifact retention policy",
+      "wandb_upload_state_auto": "Preset-level auto training state upload toggle (blank = use global settings)",
+      "wandb_upload_state_auto_policy": "Auto training state artifact retention policy"
     },
     "altDescriptions": {
       "timestep_sampling": "[Timestep sampling] Distribution; when InfoNoise is enabled this is the warmup baseline, then adaptive CDF takes over",
@@ -751,6 +780,15 @@
     "sampleMaxSideHelp": "Resize to this pixel size before upload. Source images are often 2K+; 1216 is enough for wandb browsing.",
     "sampleEveryNSteps": "Step throttle",
     "sampleEveryNStepsHelp": "0 = no extra throttle. &gt; 0 uploads only when <code>global_step % N == 0</code>, avoiding GB-scale images in long training runs.",
+    "uploadArtifacts": "Artifact uploads",
+    "uploadModel": "Upload model",
+    "uploadModelHelp": "Automatically upload model to W&B Artifacts when saved during training.",
+    "uploadStateManual": "Upload manual training state",
+    "uploadStateManualHelp": "Upload manually saved training states (save_state_every_steps / epochs) to W&B Artifacts.",
+    "uploadStateAuto": "Upload auto training state",
+    "uploadStateAutoHelp": "Upload auto-saved per-epoch training state to W&B Artifacts.",
+    "policyLast": "Keep latest only",
+    "policyAll": "Keep all",
     "accountFree": "free (max 2 tags)",
     "accountGold": "gold (max 6 tags)",
     "accountPlatinum": "platinum (max 12 tags)",
@@ -1809,6 +1847,9 @@
   "presets": {
     "loadSchemaFailed": "Failed to load schema: {{error}}",
     "loadFailed": "Failed to load: {{error}}",
+    "compatNoticeTitle": "⚠ Compatibility notice",
+    "droppedFieldsBody": "The following fields are not recognized in this version and were ignored:",
+    "defaultedFieldsBody": "The following fields had invalid values and were reset to defaults:",
     "nameRequired": "Enter a name",
     "nameInvalid": "Only letters, digits, _, and - are allowed",
     "nameExists": "Name already exists",

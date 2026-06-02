@@ -105,10 +105,7 @@ def parse_preset_bytes(raw: bytes, filename: str) -> tuple[dict[str, Any], str]:
         raise PresetError(f"YAML/JSON 解析失败: {exc}") from exc
     if not isinstance(data, dict):
         raise PresetError("预设格式错误（顶层不是 mapping）")
-    try:
-        cfg = TrainingConfig.model_validate(data)
-    except ValidationError as exc:
-        raise PresetError(f"预设校验失败: {exc}") from exc
+    cfg, _, _ = _tolerant_validate(data)
     stem = re.sub(r"\.(ya?ml|json)$", "", filename, flags=re.I)
     suggested = re.sub(r"[^A-Za-z0-9_-]+", "-", stem).strip("-") or "imported"
     return _absolutize_model_paths(cfg.model_dump(mode="python")), suggested
@@ -130,19 +127,71 @@ def list_presets(base: Path | None = None) -> list[dict[str, Any]]:
     return items
 
 
+def _tolerant_validate(raw: dict[str, Any]) -> tuple[TrainingConfig, list[str], list[str]]:
+    known = set(TrainingConfig.model_fields)
+    data = dict(raw)
+
+    if "attention_backend" not in data:
+        if data.get("flash_attn") is True:
+            data["attention_backend"] = "flash_attn"
+        elif data.get("xformers") is True:
+            data["attention_backend"] = "xformers"
+        elif data.get("flash_attn") is False or data.get("xformers") is False:
+            data["attention_backend"] = "none"
+    data.pop("flash_attn", None)
+    data.pop("xformers", None)
+
+    dropped = sorted(k for k in data if k not in known)
+    data = {k: v for k, v in data.items() if k in known}
+    try:
+        return TrainingConfig.model_validate(data), dropped, []
+    except ValidationError:
+        pass
+
+    defaults = TrainingConfig()
+    defaulted: list[str] = []
+    max_rounds = len(data)
+    for _ in range(max_rounds):
+        try:
+            cfg = TrainingConfig.model_validate(data)
+            return cfg, dropped, sorted(defaulted)
+        except ValidationError as exc:
+            bad_fields = {
+                e["loc"][0] for e in exc.errors() if e.get("loc")
+            }
+            if not bad_fields:
+                raise PresetError(f"预设校验失败: {exc}") from exc
+            for f in bad_fields:
+                data[f] = getattr(defaults, f)
+                defaulted.append(str(f))
+
+    cfg = TrainingConfig.model_validate(data)
+    return cfg, dropped, sorted(defaulted)
+
+
 def read_preset(name: str, base: Path | None = None) -> dict[str, Any]:
-    """读取并校验预设；返回校验后的 dict（未知字段会被 forbid）。"""
+    """读取并容错校验预设。未知字段丢弃，非法值回退默认。"""
     path = _preset_path(name, base)
     if not path.exists():
         raise PresetError(f"预设不存在: {name}")
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     if not isinstance(raw, dict):
         raise PresetError(f"预设格式错误（顶层不是 mapping）: {name}")
-    try:
-        cfg = TrainingConfig.model_validate(raw)
-    except ValidationError as exc:
-        raise PresetError(f"预设校验失败: {exc}") from exc
+    cfg, _, _ = _tolerant_validate(raw)
     return _absolutize_model_paths(cfg.model_dump(mode="python"))
+
+
+def read_preset_with_warnings(
+    name: str, base: Path | None = None
+) -> tuple[dict[str, Any], list[str], list[str]]:
+    path = _preset_path(name, base)
+    if not path.exists():
+        raise PresetError(f"预设不存在: {name}")
+    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(raw, dict):
+        raise PresetError(f"预设格式错误（顶层不是 mapping）: {name}")
+    cfg, dropped, defaulted = _tolerant_validate(raw)
+    return _absolutize_model_paths(cfg.model_dump(mode="python")), dropped, defaulted
 
 
 def write_preset(name: str, data: dict[str, Any], base: Path | None = None) -> Path:

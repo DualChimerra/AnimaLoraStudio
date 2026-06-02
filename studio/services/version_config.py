@@ -14,9 +14,8 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import ValidationError
 
-from .presets.io import _absolutize_model_paths
+from .presets.io import _absolutize_model_paths, _tolerant_validate
 from ..schema import TrainingConfig
 from .projects.versions import version_dir
 from .projects import projects as _projects
@@ -115,10 +114,7 @@ def read_version_config(
     raw = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
     if not isinstance(raw, dict):
         raise VersionConfigError("config.yaml 顶层不是 mapping")
-    try:
-        cfg = TrainingConfig.model_validate(raw)
-    except ValidationError as exc:
-        raise VersionConfigError(f"config 校验失败: {exc}") from exc
+    cfg, _, _ = _tolerant_validate(raw)
     return _absolutize_model_paths(cfg.model_dump(mode="python"))
 
 
@@ -134,10 +130,7 @@ def write_version_config(
     payload = dict(data)
     if force_project_overrides:
         payload.update(project_specific_overrides(project, version))
-    try:
-        cfg = TrainingConfig.model_validate(payload)
-    except ValidationError as exc:
-        raise VersionConfigError(f"config 校验失败: {exc}") from exc
+    cfg, _, _ = _tolerant_validate(payload)
     dumped = cfg.model_dump(mode="python")
     p = version_config_path(project, version)
     p.parent.mkdir(parents=True, exist_ok=True)

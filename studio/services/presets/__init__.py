@@ -36,18 +36,18 @@ def fork_preset_for_version(
     project: dict[str, Any],
     version: dict[str, Any],
 ) -> dict[str, Any]:
-    """从全局 preset 复制一份进 version 私有 config。
+    return fork_preset_for_version_with_warnings(
+        src_preset_name, project, version
+    )[0]
 
-    1. 读全局 preset（presets_io 校验；老相对路径已在读取层转绝对）
-    2. 应用项目特定字段（data_dir / output_dir / output_name…）
-    3. **可选** 应用当前全局模型路径（受 `models.auto_sync_paths` toggle 控制）：
-       - toggle ON（默认 / 多数用户）：用 `default_paths_for_new_version()` 覆盖 4
-         字段。Settings 切了 selected_anima → 后续新 version 自动用新值。
-       - toggle OFF（独立模型用户）：尊重预设里的绝对路径，不覆盖。
-    4. 写到 `versions/{label}/config.yaml`
-    返回最终落盘的 config dict。
-    """
-    src = presets_io.read_preset(src_preset_name)
+
+def fork_preset_for_version_with_warnings(
+    src_preset_name: str,
+    project: dict[str, Any],
+    version: dict[str, Any],
+) -> tuple[dict[str, Any], list[str], list[str]]:
+    """从全局 preset 复制一份进 version 私有 config，返回兼容性警告。"""
+    src, dropped, defaulted = presets_io.read_preset_with_warnings(src_preset_name)
     new_data = deepcopy(src)
     new_data.update(version_config.project_specific_overrides(project, version))
     if _auto_sync_paths():
@@ -55,7 +55,7 @@ def fork_preset_for_version(
     version_config.write_version_config(
         project, version, new_data, force_project_overrides=True
     )
-    return version_config.read_version_config(project, version)
+    return version_config.read_version_config(project, version), dropped, defaulted
 
 
 def save_version_config_as_preset(

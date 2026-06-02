@@ -355,6 +355,12 @@ def test_popen_injects_wandb_env(env, tmp_path, monkeypatch: pytest.MonkeyPatch)
     assert captured["env"]["WANDB_BASE_URL"] == "https://wandb.example"
     assert captured["env"]["WANDB_MODE"] == "offline"
     assert captured["env"]["WANDB_LOG_SAMPLES"] == "0"
+    assert captured["env"]["WANDB_UPLOAD_MODEL"] == "0"
+    assert captured["env"]["WANDB_UPLOAD_MODEL_POLICY"] == "last"
+    assert captured["env"]["WANDB_UPLOAD_STATE_MANUAL"] == "0"
+    assert captured["env"]["WANDB_UPLOAD_STATE_MANUAL_POLICY"] == "last"
+    assert captured["env"]["WANDB_UPLOAD_STATE_AUTO"] == "0"
+    assert captured["env"]["WANDB_UPLOAD_STATE_AUTO_POLICY"] == "last"
 
 
 def test_config_path_takes_priority(env, tmp_path) -> None:

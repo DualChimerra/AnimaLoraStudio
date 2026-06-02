@@ -55,8 +55,15 @@ def list_presets_endpoint() -> dict[str, Any]:
 
 
 @router.get("/api/presets/{name}")
-def get_preset(name: str) -> dict[str, Any]:
+def get_preset(name: str, warnings: bool = False) -> dict[str, Any]:
     try:
+        if warnings:
+            config, dropped, defaulted = presets_io.read_preset_with_warnings(name)
+            return {
+                "config": config,
+                "dropped_fields": dropped,
+                "defaulted_fields": defaulted,
+            }
         return presets_io.read_preset(name)
     except presets_io.PresetError as exc:
         _err_code(exc); raise  # PR-2 C4: DomainError handler 翻 envelope

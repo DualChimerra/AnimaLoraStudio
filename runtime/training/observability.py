@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -69,6 +71,12 @@ class WandBMonitor:
         log_samples: bool = False,
         sample_max_side: int = 1216,
         sample_every_n_steps: int = 0,
+        upload_model: bool = False,
+        upload_model_policy: str = "last",
+        upload_state_manual: bool = False,
+        upload_state_manual_policy: str = "last",
+        upload_state_auto: bool = False,
+        upload_state_auto_policy: str = "last",
     ) -> None:
         self._wandb = wandb_module
         self._run = run
@@ -76,6 +84,13 @@ class WandBMonitor:
         self.sample_max_side = max(64, int(sample_max_side or 512))
         self.sample_every_n_steps = max(0, int(sample_every_n_steps or 0))
         self._last_logged_step: Optional[int] = None
+        self._upload_model_enabled = upload_model
+        self._upload_model_policy = upload_model_policy
+        self._upload_state_manual_enabled = upload_state_manual
+        self._upload_state_manual_policy = upload_state_manual_policy
+        self._upload_state_auto_enabled = upload_state_auto
+        self._upload_state_auto_policy = upload_state_auto_policy
+        self._last_artifact: dict[str, "Any"] = {}
 
     @property
     def enabled(self) -> bool:
@@ -132,6 +147,83 @@ class WandBMonitor:
         except Exception as exc:
             logger.warning(f"W&B 图片记录失败: {exc}")
 
+    def _delete_previous_artifact_versions(self, artifact_name: str, artifact_type: str, keep_artifact) -> None:
+        keep_version = getattr(keep_artifact, "version", None)
+        collection_name = f"{keep_artifact.entity}/{keep_artifact.project}/{artifact_name}"
+        deleted = 0
+        try:
+            api = self._wandb.Api()
+            for artifact in api.artifacts(type_name=artifact_type, name=collection_name):
+                if getattr(artifact, "version", None) == keep_version:
+                    continue
+                try:
+                    artifact.delete(delete_aliases=True)
+                    deleted += 1
+                    logger.info(f"W&B artifact 旧版本已删除: {artifact_name}:{artifact.version}")
+                except Exception as exc:
+                    logger.warning(f"W&B 删除旧 artifact 版本失败 ({artifact_name}:{getattr(artifact, 'version', '?')}): {exc}")
+            if deleted:
+                logger.info(f"W&B artifact 已清理旧版本: {artifact_name} ({deleted} 个)")
+        except Exception as exc:
+            logger.warning(f"W&B artifact 历史版本清理失败 ({artifact_name}): {exc}")
+
+    def _upload_artifact(self, file_path: Path, artifact_name: str, artifact_type: str, policy: str) -> None:
+        if not self.enabled:
+            return
+        try:
+            artifact = self._wandb.Artifact(artifact_name, type=artifact_type)
+            artifact.add_file(str(file_path), name=file_path.name)
+            size_mb = file_path.stat().st_size / 1024 / 1024
+            logger.info(f"W&B artifact 开始上传: {artifact_name} ({file_path.name}, {size_mb:.1f} MB)")
+            logged_artifact = self._run.log_artifact(artifact)
+            start_time = time.monotonic()
+            done = threading.Event()
+
+            def report_waiting() -> None:
+                while not done.wait(10):
+                    elapsed = time.monotonic() - start_time
+                    logger.info(f"W&B artifact 仍在上传: {artifact_name} ({elapsed:.0f}s, {size_mb:.1f} MB)")
+
+            progress_thread = threading.Thread(target=report_waiting, daemon=True)
+            progress_thread.start()
+            try:
+                logged_artifact.wait()
+            finally:
+                done.set()
+                progress_thread.join(timeout=1)
+            elapsed = time.monotonic() - start_time
+            logger.info(f"W&B artifact 已上传: {artifact_name} ({file_path.name}, {size_mb:.1f} MB, {elapsed:.1f}s)")
+            if policy == "last":
+                self._delete_previous_artifact_versions(artifact_name, artifact_type, logged_artifact)
+                prev = self._last_artifact.get(artifact_name)
+                if prev is not None and getattr(prev, "version", None) != getattr(logged_artifact, "version", None):
+                    try:
+                        prev.delete(delete_aliases=True)
+                        logger.info(f"W&B artifact 旧版本已删除: {artifact_name}:{prev.version}")
+                    except Exception as exc:
+                        logger.warning(f"W&B 删除旧 artifact 失败: {exc}")
+                self._last_artifact[artifact_name] = logged_artifact
+        except Exception as exc:
+            logger.warning(f"W&B artifact 上传失败 ({artifact_name}): {exc}")
+
+    def upload_model(self, file_path: Path) -> None:
+        if not self._upload_model_enabled or not self.enabled:
+            return
+        name = f"{self._run.name}-model"
+        self._upload_artifact(file_path, name, "model", self._upload_model_policy)
+
+    def upload_state_manual(self, file_path: Path) -> None:
+        if not self._upload_state_manual_enabled or not self.enabled:
+            return
+        name = f"{self._run.name}-state-manual"
+        self._upload_artifact(file_path, name, "training-state", self._upload_state_manual_policy)
+
+    def upload_state_auto(self, file_path: Path) -> None:
+        if not self._upload_state_auto_enabled or not self.enabled:
+            return
+        name = f"{self._run.name}-state-auto"
+        self._upload_artifact(file_path, name, "training-state", self._upload_state_auto_policy)
+
     def finish(self) -> None:
         if not self.enabled:
             return
@@ -141,11 +233,33 @@ class WandBMonitor:
             logger.warning(f"W&B finish 失败: {exc}")
 
 
+def _preset_str(args, attr: str) -> str:
+    """预设字符串覆盖：非空字符串时使用预设值。"""
+    val = getattr(args, attr, None)
+    return str(val) if val and str(val).strip() else ""
+
+
+def _preset_bool(args, attr: str) -> Optional[bool]:
+    """预设布尔覆盖：None 表示未设置（回退全局）。"""
+    val = getattr(args, attr, None)
+    if val is None:
+        return None
+    return bool(val)
+
+
 def init_wandb_monitor(args, output_dir: Path, config_path: Optional[Path]) -> WandBMonitor:
-    enabled = str(os.environ.get("WANDB_ENABLED", "")).strip().lower()
-    if enabled not in {"1", "true", "yes", "on"}:
+    # ---- 预设覆盖优先级：args.wandb_* (非空) > 环境变量 (全局 Settings) ----
+    preset_enabled = _preset_bool(args, "wandb_enabled")
+    if preset_enabled is not None:
+        enabled = preset_enabled
+    else:
+        enabled = str(os.environ.get("WANDB_ENABLED", "")).strip().lower() in {
+            "1", "true", "yes", "on",
+        }
+    if not enabled:
         return WandBMonitor(None, None)
-    mode = str(os.environ.get("WANDB_MODE", "online") or "online")
+
+    mode = _preset_str(args, "wandb_mode") or str(os.environ.get("WANDB_MODE", "online") or "online")
     if mode == "disabled":
         return WandBMonitor(None, None)
     try:
@@ -156,22 +270,67 @@ def init_wandb_monitor(args, output_dir: Path, config_path: Optional[Path]) -> W
             "请先在训练环境安装：pip install wandb，或在 Settings 关闭 WandB。"
         ) from exc
 
-    project = os.environ.get("WANDB_PROJECT") or "AnimaLoraStudio"
-    entity = os.environ.get("WANDB_ENTITY") or None
+    # 预设覆盖 API key：写进 env 让 wandb.init() 识别
+    preset_api_key = _preset_str(args, "wandb_api_key")
+    if preset_api_key:
+        os.environ["WANDB_API_KEY"] = preset_api_key
+
+    project = _preset_str(args, "wandb_project") or os.environ.get("WANDB_PROJECT") or "AnimaLoraStudio"
+    entity = _preset_str(args, "wandb_entity") or os.environ.get("WANDB_ENTITY") or None
     run_name = os.environ.get("WANDB_RUN_NAME") or str(args.output_name)
-    # 默认开 — supervisor 已经按 secrets.wandb.log_samples 设过 env；env 缺省（直接跑
-    # runtime 没经 supervisor 的情况）也跟 secrets 默认对齐保持开启。
-    log_samples = str(os.environ.get("WANDB_LOG_SAMPLES", "1")).strip().lower() not in {
-        "0", "false", "no", "off",
-    }
-    try:
-        sample_max_side = int(os.environ.get("WANDB_SAMPLE_MAX_SIDE", "1216") or 1216)
-    except ValueError:
-        sample_max_side = 512
-    try:
-        sample_every_n_steps = int(os.environ.get("WANDB_SAMPLE_EVERY_N_STEPS", "0") or 0)
-    except ValueError:
-        sample_every_n_steps = 0
+
+    preset_base_url = _preset_str(args, "wandb_base_url")
+    if preset_base_url:
+        os.environ["WANDB_BASE_URL"] = preset_base_url
+
+    # log_samples
+    preset_log_samples = _preset_bool(args, "wandb_log_samples")
+    if preset_log_samples is not None:
+        log_samples = preset_log_samples
+    else:
+        log_samples = str(os.environ.get("WANDB_LOG_SAMPLES", "1")).strip().lower() not in {
+            "0", "false", "no", "off",
+        }
+
+    # sample_max_side: preset 0 = 使用全局
+    preset_max_side = int(getattr(args, "wandb_sample_max_side", 0) or 0)
+    if preset_max_side > 0:
+        sample_max_side = preset_max_side
+    else:
+        try:
+            sample_max_side = int(os.environ.get("WANDB_SAMPLE_MAX_SIDE", "1216") or 1216)
+        except ValueError:
+            sample_max_side = 512
+
+    # sample_every_n_steps: preset -1 = 使用全局
+    preset_every_n = int(getattr(args, "wandb_sample_every_n_steps", -1) if getattr(args, "wandb_sample_every_n_steps", -1) is not None else -1)
+    if preset_every_n >= 0:
+        sample_every_n_steps = preset_every_n
+    else:
+        try:
+            sample_every_n_steps = int(os.environ.get("WANDB_SAMPLE_EVERY_N_STEPS", "0") or 0)
+        except ValueError:
+            sample_every_n_steps = 0
+
+    # artifact 上传
+    _env_bool = lambda key, default="0": str(os.environ.get(key, default)).strip().lower() in {"1", "true", "yes", "on"}
+    _env_policy = lambda key: "all" if str(os.environ.get(key, "last")).strip().lower() == "all" else "last"
+
+    def _resolve_bool(attr: str, env_key: str) -> bool:
+        p = _preset_bool(args, attr)
+        return p if p is not None else _env_bool(env_key)
+
+    def _resolve_policy(attr: str, env_key: str) -> str:
+        p = _preset_str(args, attr)
+        return p if p in {"all", "last"} else _env_policy(env_key)
+
+    upload_model = _resolve_bool("wandb_upload_model", "WANDB_UPLOAD_MODEL")
+    upload_model_policy = _resolve_policy("wandb_upload_model_policy", "WANDB_UPLOAD_MODEL_POLICY")
+    upload_state_manual = _resolve_bool("wandb_upload_state_manual", "WANDB_UPLOAD_STATE_MANUAL")
+    upload_state_manual_policy = _resolve_policy("wandb_upload_state_manual_policy", "WANDB_UPLOAD_STATE_MANUAL_POLICY")
+    upload_state_auto = _resolve_bool("wandb_upload_state_auto", "WANDB_UPLOAD_STATE_AUTO")
+    upload_state_auto_policy = _resolve_policy("wandb_upload_state_auto_policy", "WANDB_UPLOAD_STATE_AUTO_POLICY")
+
     wandb_dir = output_dir / "wandb"
     wandb_dir.mkdir(parents=True, exist_ok=True)
     cfg = {
@@ -195,4 +354,10 @@ def init_wandb_monitor(args, output_dir: Path, config_path: Optional[Path]) -> W
         log_samples=log_samples,
         sample_max_side=sample_max_side,
         sample_every_n_steps=sample_every_n_steps,
+        upload_model=upload_model,
+        upload_model_policy=upload_model_policy,
+        upload_state_manual=upload_state_manual,
+        upload_state_manual_policy=upload_state_manual_policy,
+        upload_state_auto=upload_state_auto,
+        upload_state_auto_policy=upload_state_auto_policy,
     )

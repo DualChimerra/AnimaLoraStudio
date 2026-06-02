@@ -259,7 +259,10 @@
     "pathHintAuto": "（路径）",
     "browse": "浏览",
     "browseProject": "从项目选择",
-    "multilineHint": "（每行一项）"
+    "multilineHint": "（每行一项）",
+    "useGlobal": "— 使用全局设置 —",
+    "yes": "是",
+    "no": "否"
   },
   "schema": {
     "fieldCount": "{{n}} 项",
@@ -275,7 +278,8 @@
       "system": "系统与性能",
       "output": "输出与保存",
       "sample": "采样",
-      "monitor": "监控与进度"
+      "monitor": "监控与进度",
+      "wandb": "WandB（预设覆盖）"
     },
     "enums": {
       "loraType": {
@@ -319,6 +323,15 @@
         "none": "不启用",
         "offset": "Noise Offset",
         "pyramid": "金字塔噪声"
+      },
+      "wandbMode": {
+        "online": "在线",
+        "offline": "离线",
+        "disabled": "禁用"
+      },
+      "wandbPolicy": {
+        "all": "保留全部",
+        "last": "仅保留最新"
       }
     },
     "disableHints": {
@@ -422,7 +435,23 @@
       "sample_seed": "采样种子（0=随机）",
       "sample_negative_prompt": "负面提示词",
       "sample_prompt": "单 prompt 模式：训练中所有采样图共用此 prompt（设置 sample_prompts 时被忽略）",
-      "sample_prompts": "多 prompt 轮换（优先于 sample_prompt）"
+      "sample_prompts": "多 prompt 轮换（优先于 sample_prompt）",
+      "wandb_notice": "⚠️ 如果你不知道自己在做什么，请不要填写这里的设置",
+      "wandb_enabled": "预设级 WandB 开关（留空 = 使用全局设置）",
+      "wandb_api_key": "WandB API Key（覆盖全局设置）",
+      "wandb_project": "WandB 项目名（留空 = 使用全局设置）",
+      "wandb_entity": "WandB 团队/用户名（留空 = 使用全局设置）",
+      "wandb_base_url": "WandB 自定义服务器地址（留空 = 使用全局设置）",
+      "wandb_mode": "WandB 模式（online / offline / disabled）",
+      "wandb_log_samples": "预设级采样图记录开关（留空 = 使用全局设置）",
+      "wandb_sample_max_side": "采样图最长边（0 = 使用全局设置）",
+      "wandb_sample_every_n_steps": "step 节流（-1 = 使用全局设置）",
+      "wandb_upload_model": "预设级上传模型开关（留空 = 使用全局设置）",
+      "wandb_upload_model_policy": "模型 artifact 保留策略（all = 全部保留，last = 仅保留最新）",
+      "wandb_upload_state_manual": "预设级上传手动保存的训练状态开关（留空 = 使用全局设置）",
+      "wandb_upload_state_manual_policy": "手动训练状态 artifact 保留策略",
+      "wandb_upload_state_auto": "预设级上传自动保存的训练状态开关（留空 = 使用全局设置）",
+      "wandb_upload_state_auto_policy": "自动训练状态 artifact 保留策略"
     },
     "altDescriptions": {
       "timestep_sampling": "【时间步采样】分布；InfoNoise 启用时作为热身期 baseline，正式阶段由自适应 CDF 接管",
@@ -751,6 +780,15 @@
     "sampleMaxSideHelp": "上传前缩到此像素。原图常 2K+，1216 已够 wandb 浏览。",
     "sampleEveryNSteps": "step 节流",
     "sampleEveryNStepsHelp": "0 = 不额外节流。&gt; 0 时只在 <code>global_step % N == 0</code> 上传，避免长训练上 GB 级图。",
+    "uploadArtifacts": "Artifact 上传",
+    "uploadModel": "上传模型",
+    "uploadModelHelp": "训练保存模型时自动上传到 W&B Artifacts。",
+    "uploadStateManual": "上传手动保存的训练状态",
+    "uploadStateManualHelp": "手动保存的训练状态（save_state_every_steps / epochs）上传到 W&B Artifacts。",
+    "uploadStateAuto": "上传自动保存的训练状态",
+    "uploadStateAutoHelp": "每 epoch 结束自动覆写的训练状态上传到 W&B Artifacts。",
+    "policyLast": "仅保留最新",
+    "policyAll": "保留全部",
     "accountFree": "free（max 2 tag）",
     "accountGold": "gold（max 6 tag）",
     "accountPlatinum": "platinum（max 12 tag）",
@@ -1809,6 +1847,9 @@
   "presets": {
     "loadSchemaFailed": "schema 加载失败: {{error}}",
     "loadFailed": "加载失败: {{error}}",
+    "compatNoticeTitle": "⚠ 兼容提示",
+    "droppedFieldsBody": "以下字段在当前版本中不存在，已被忽略：",
+    "defaultedFieldsBody": "以下字段的值不合法，已回退为默认值：",
     "nameRequired": "请输入名称",
     "nameInvalid": "仅允许字母、数字、_、-",
     "nameExists": "名称已存在",

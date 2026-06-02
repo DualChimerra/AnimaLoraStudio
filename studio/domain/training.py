@@ -18,20 +18,16 @@ from typing import Any, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .common import AttentionBackend, _meta
-from .migrations import (
-    migrate_legacy_attention,
-    migrate_legacy_save_keys,
-    migrate_noise_enhancement_type,
-)
+from .migrations import migrate_legacy_save_keys, migrate_noise_enhancement_type
 
 
 class TrainingConfig(BaseModel):
     """与 config/train_template.yaml 对齐的完整训练参数。
 
-    `extra="forbid"`：未知键直接报错，避免拼写错误悄悄失效。
+    `extra="ignore"`：云端/旧版预设里多出的键静默丢弃。
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     # ---------------------------------------------------------------- 模型路径
     # 这些路径在 Studio 创建 version 时会被替换成 **绝对路径**（基于
@@ -475,11 +471,6 @@ class TrainingConfig(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _migrate_attention(cls, data: Any) -> Any:
-        return migrate_legacy_attention(data)
-
-    @model_validator(mode="before")
-    @classmethod
     def _migrate_save_keys(cls, data: Any) -> Any:
         return migrate_legacy_save_keys(data)
 
@@ -622,6 +613,88 @@ class TrainingConfig(BaseModel):
                     "训练时 bootstrap_phase 会自动 prepend 到 sample_prompt / "
                     "sample_prompts，确保采样图能反映 LoRA 是否激活。",
         json_schema_extra=_meta("sample", hidden=True),
+    )
+
+    # --------------------------------------------------------------- WandB 预设覆盖
+    wandb_notice: str = Field(
+        "",
+        description="⚠️ 如果你不知道自己在做什么，请不要填写这里的设置。此处的值会覆盖全局 Settings 页的 WandB 配置，留空则使用全局设置。",
+        json_schema_extra=_meta("wandb", "notice", advanced=True),
+    )
+    wandb_enabled: Optional[bool] = Field(
+        None,
+        description="启用 WandB（留空使用全局设置）",
+        json_schema_extra=_meta("wandb", advanced=True),
+    )
+    wandb_api_key: str = Field(
+        "",
+        description="API Key（留空使用全局设置）",
+        json_schema_extra=_meta("wandb", advanced=True),
+    )
+    wandb_project: str = Field(
+        "",
+        description="项目名（留空使用全局设置）",
+        json_schema_extra=_meta("wandb", advanced=True),
+    )
+    wandb_entity: str = Field(
+        "",
+        description="Entity / Team（留空使用全局设置）",
+        json_schema_extra=_meta("wandb", advanced=True),
+    )
+    wandb_base_url: str = Field(
+        "",
+        description="自定义 WandB 服务地址（留空使用全局设置）",
+        json_schema_extra=_meta("wandb", advanced=True),
+    )
+    wandb_mode: Literal["", "online", "offline", "disabled"] = Field(
+        "",
+        description="运行模式 online/offline/disabled（留空使用全局设置）",
+        json_schema_extra=_meta("wandb", advanced=True),
+    )
+    wandb_log_samples: Optional[bool] = Field(
+        None,
+        description="上传采样图到 WandB（留空使用全局设置）",
+        json_schema_extra=_meta("wandb", advanced=True),
+    )
+    wandb_sample_max_side: int = Field(
+        0, ge=0,
+        description="采样图缩放最长边像素（0=使用全局设置）",
+        json_schema_extra=_meta("wandb", advanced=True),
+    )
+    wandb_sample_every_n_steps: int = Field(
+        -1, ge=-1,
+        description="采样图上传节流步数（-1=使用全局设置，0=不节流）",
+        json_schema_extra=_meta("wandb", advanced=True),
+    )
+    wandb_upload_model: Optional[bool] = Field(
+        None,
+        description="上传模型 artifact（留空使用全局设置）",
+        json_schema_extra=_meta("wandb", advanced=True),
+    )
+    wandb_upload_model_policy: Literal["", "all", "last"] = Field(
+        "",
+        description="模型保留策略 all/last（留空使用全局设置）",
+        json_schema_extra=_meta("wandb", advanced=True),
+    )
+    wandb_upload_state_manual: Optional[bool] = Field(
+        None,
+        description="上传手动保存的训练状态 artifact（留空使用全局设置）",
+        json_schema_extra=_meta("wandb", advanced=True),
+    )
+    wandb_upload_state_manual_policy: Literal["", "all", "last"] = Field(
+        "",
+        description="手动状态保留策略 all/last（留空使用全局设置）",
+        json_schema_extra=_meta("wandb", advanced=True),
+    )
+    wandb_upload_state_auto: Optional[bool] = Field(
+        None,
+        description="上传自动保存的训练状态 artifact（留空使用全局设置）",
+        json_schema_extra=_meta("wandb", advanced=True),
+    )
+    wandb_upload_state_auto_policy: Literal["", "all", "last"] = Field(
+        "",
+        description="自动状态保留策略 all/last（留空使用全局设置）",
+        json_schema_extra=_meta("wandb", advanced=True),
     )
 
     # ---------------------------------------------------------------- 监控/进度

@@ -79,6 +79,14 @@ class WandBConfig(BaseModel):
     # step 节流：>0 时只在 `global_step % N == 0` 上传，避免长训练上 GB 级图。
     # 0 = 不额外节流（按训练循环已有 sample 频率上传），baseline / epoch 边界始终上传。
     sample_every_n_steps: int = 0
+    # Artifact 上传：模型 / 训练状态上传到 wandb Artifacts，方便云端管理和版本追踪。
+    # policy = "all" 保留全部版本，"last" 只保留最新一份（上传新的后删除旧版本）。
+    upload_model: bool = False
+    upload_model_policy: str = "last"
+    upload_state_manual: bool = False
+    upload_state_manual_policy: str = "last"
+    upload_state_auto: bool = False
+    upload_state_auto_policy: str = "last"
 
     @model_validator(mode="after")
     def _normalize_values(self) -> "WandBConfig":
@@ -86,6 +94,13 @@ class WandBConfig(BaseModel):
             self.mode = "online"
         self.sample_max_side = max(64, int(self.sample_max_side or 512))
         self.sample_every_n_steps = max(0, int(self.sample_every_n_steps or 0))
+        _valid_policies = {"all", "last"}
+        if self.upload_model_policy not in _valid_policies:
+            self.upload_model_policy = "last"
+        if self.upload_state_manual_policy not in _valid_policies:
+            self.upload_state_manual_policy = "last"
+        if self.upload_state_auto_policy not in _valid_policies:
+            self.upload_state_auto_policy = "last"
         return self
 
 

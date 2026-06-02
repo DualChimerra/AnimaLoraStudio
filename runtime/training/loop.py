@@ -282,6 +282,7 @@ def run(ctx: TrainingContext) -> None:
                     with optimizer_eval_mode(ctx.optimizer):
                         ctx.injector.save(lora_path)
                     ctx.emit(f"Saved LoRA: {lora_path}")
+                    ctx.wandb_monitor.upload_model(lora_path)
 
                 # 定期保存训练状态（断点续训）
                 save_state_every_steps = getattr(args, "save_state_every_steps", 0)
@@ -306,6 +307,7 @@ def run(ctx: TrainingContext) -> None:
                         lora_path = ctx.output_dir / f"{args.output_name}_step{ctx.global_step}.safetensors"
                         ctx.injector.save(lora_path)
                     ctx.emit(f"Saved training state (step {ctx.global_step}): {state_path.name}")
+                    ctx.wandb_monitor.upload_state_manual(state_path)
 
                 # 检查 max_steps
                 if args.max_steps and ctx.global_step >= args.max_steps:
@@ -329,6 +331,7 @@ def run(ctx: TrainingContext) -> None:
                 with optimizer_eval_mode(ctx.optimizer):
                     ctx.injector.save(save_path)
                 ctx.emit(f"Saved LoRA: {save_path}")
+                ctx.wandb_monitor.upload_model(save_path)
 
             # 采样（轮换提示词）
             if args.sample_every > 0 and ctx.current_epoch % args.sample_every == 0:
@@ -368,6 +371,7 @@ def run(ctx: TrainingContext) -> None:
                     if not lora_path.exists():
                         ctx.injector.save(lora_path)
                 ctx.emit(f"Saved training state (epoch {ctx.current_epoch}): {state_path.name}")
+                ctx.wandb_monitor.upload_state_manual(state_path)
 
             # ADR 0006 Addendum 1 方案 Δ：每 epoch 末尾**强制**写 auto_epoch_state.pt（覆盖式）。
             # 跟用户主动开的 save_state_every_epochs / save_state_every_steps（多份历史归档）独立，无 args gate ——
@@ -391,6 +395,7 @@ def run(ctx: TrainingContext) -> None:
                     monitor_state=monitor_data, scheduler=ctx.scheduler,
                     timestep_sampler=ctx.timestep_sampler,
                 )
+            ctx.wandb_monitor.upload_state_auto(auto_state_path)
             # 更新 ctx 字段供 handle_interrupt emit pause_state 用
             ctx.last_auto_epoch_state_path = auto_state_path
             ctx.last_auto_epoch_config_path = auto_config_path

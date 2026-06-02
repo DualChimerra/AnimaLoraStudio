@@ -698,19 +698,24 @@ def import_bundle(
                             except _vc.VersionConfigError:
                                 pass  # 无效 config，跳过，不中断导入
                     else:
-                        presets_base.mkdir(parents=True, exist_ok=True)
-                        target = presets_base / inner
+                        from ..presets import io as _presets_io
+
+                        try:
+                            config, _ = _presets_io.parse_preset_bytes(zf.read(info), inner)
+                        except _presets_io.PresetError:
+                            continue
+                        target_name = Path(inner).stem
+                        target = _presets_io.preset_path(target_name, presets_base)
                         if target.exists():
-                            stem = target.stem
                             n = 1
                             while True:
-                                candidate = presets_base / f"{stem}_imported_{n}.yaml"
+                                candidate_name = f"{target_name}_imported_{n}"
+                                candidate = _presets_io.preset_path(candidate_name, presets_base)
                                 if not candidate.exists():
-                                    target = candidate
+                                    target_name = candidate_name
                                     break
                                 n += 1
-                        with zf.open(info) as src, target.open("wb") as dst:
-                            _copy_chunks(src, dst)
+                        _presets_io.write_preset(target_name, config, presets_base)
                         preset_count += 1
 
             img_cnt, tag_cnt = _count_train(vdir / "train", seen_train) if train_entries else (0, 0)

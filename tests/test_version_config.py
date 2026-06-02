@@ -5,8 +5,9 @@ from pathlib import Path
 
 import pytest
 import yaml
+from fastapi.testclient import TestClient
 
-from studio import db
+from studio import db, server
 from studio.services.projects import projects, versions
 from studio.services import presets as preset_flow, version_config
 
@@ -83,6 +84,37 @@ def test_write_then_read(env) -> None:
     assert cfg_out["lora_rank"] == 64
 
 
+def test_write_tolerates_stale_preset_fields(env) -> None:
+    p, v = _make_pv(env)
+    cfg_in = _minimal_config(
+        lora_rank=64,
+        optimizer_type="lion",
+        future_field_from_other_branch=True,
+    )
+    version_config.write_version_config(p, v, cfg_in)
+    cfg_out = version_config.read_version_config(p, v)
+    assert cfg_out["lora_rank"] == 64
+    assert cfg_out["optimizer_type"] != "lion"
+    assert "future_field_from_other_branch" not in cfg_out
+
+
+def test_read_tolerates_stale_version_config(env) -> None:
+    p, v = _make_pv(env)
+    raw = _minimal_config(
+        lora_rank=96,
+        optimizer_type="lion",
+        future_field_from_other_branch=True,
+    )
+    path = version_config.version_config_path(p, v)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(raw, allow_unicode=True), encoding="utf-8")
+
+    cfg_out = version_config.read_version_config(p, v)
+    assert cfg_out["lora_rank"] == 96
+    assert cfg_out["optimizer_type"] != "lion"
+    assert "future_field_from_other_branch" not in cfg_out
+
+
 def test_write_forces_project_overrides(env) -> None:
     """用户传错的 data_dir / output_dir 都会被服务端覆盖回项目路径。"""
     p, v = _make_pv(env)
@@ -133,6 +165,51 @@ def test_fork_preset_for_version_applies_overrides(env) -> None:
     assert cfg["output_name"] == f"{p['slug']}_baseline"
     # 其他字段沿用 preset
     assert cfg["lora_rank"] == 128
+
+
+def test_fork_preset_for_version_reports_warnings(env) -> None:
+    from studio.services.presets import io as presets_io
+    p, v = _make_pv(env)
+    raw = _minimal_config(
+        lora_rank=128,
+        optimizer_type="lion",
+        future_field_from_other_branch=True,
+    )
+    (env["presets"] / "stale.yaml").write_text(
+        yaml.safe_dump(raw, allow_unicode=True), encoding="utf-8"
+    )
+
+    cfg, dropped, defaulted = preset_flow.fork_preset_for_version_with_warnings(
+        "stale", p, v
+    )
+
+    assert cfg["lora_rank"] == 128
+    assert dropped == ["future_field_from_other_branch"]
+    assert "optimizer_type" in defaulted
+    assert presets_io.read_preset("stale")["optimizer_type"] != "lion"
+
+
+def test_fork_preset_endpoint_returns_warnings(env) -> None:
+    p, v = _make_pv(env)
+    raw = _minimal_config(
+        lora_rank=128,
+        optimizer_type="lion",
+        future_field_from_other_branch=True,
+    )
+    (env["presets"] / "stale.yaml").write_text(
+        yaml.safe_dump(raw, allow_unicode=True), encoding="utf-8"
+    )
+
+    resp = TestClient(server.app).post(
+        f"/api/projects/{p['id']}/versions/{v['id']}/config/from_preset",
+        json={"name": "stale"},
+    )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["config"]["lora_rank"] == 128
+    assert body["dropped_fields"] == ["future_field_from_other_branch"]
+    assert "optimizer_type" in body["defaulted_fields"]
 
 
 def test_fork_then_modify_does_not_change_preset(env) -> None:

@@ -53,6 +53,8 @@ export default function TrainPage() {
   const [reg, setReg] = useState<RegStatus | null>(null)
   const [busy, setBusy] = useState(false)
   const [autoSyncPaths, setAutoSyncPaths] = useState<boolean>(true)
+  const [droppedFields, setDroppedFields] = useState<string[]>([])
+  const [defaultedFields, setDefaultedFields] = useState<string[]>([])
 
   /** 已落盘的 config JSON 快照，dirty 判断的 baseline。 */
   const savedJsonRef = useRef<string | null>(null)
@@ -102,6 +104,11 @@ export default function TrainPage() {
     }
   }, [project.id, vid, toast, setConfigSync, t])
 
+  const applyPresetWarnings = useCallback((r: { dropped_fields?: string[]; defaulted_fields?: string[] }) => {
+    setDroppedFields(r.dropped_fields ?? [])
+    setDefaultedFields(r.defaulted_fields ?? [])
+  }, [])
+
   useEffect(() => {
     api.schema().then(setSchema).catch((e) => toast(t('train.loadSchemaFailed', { error: e }), 'error'))
     api.listPresets().then(setPresets).catch(() => setPresets([]))
@@ -109,6 +116,8 @@ export default function TrainPage() {
   }, [toast, t])
 
   useEffect(() => {
+    setDroppedFields([])
+    setDefaultedFields([])
     void refreshConfig()
   }, [refreshConfig])
 
@@ -277,7 +286,8 @@ export default function TrainPage() {
     }
     setBusy(true)
     try {
-      await api.forkPresetForVersion(project.id, vid, name)
+      const r = await api.forkPresetForVersion(project.id, vid, name)
+      applyPresetWarnings(r)
       // refreshConfig 刷本页 config state；reload 刷父级 activeVersion，
       // 主表单字段才会同步显示新预设的内容。
       await Promise.all([refreshConfig(), reload()])
@@ -385,7 +395,8 @@ export default function TrainPage() {
 
       const name = generateUniquePresetName(defaultPresetName(), presets)
       await api.savePreset(name, cleaned)
-      await api.forkPresetForVersion(project.id, vid, name)
+      const r = await api.forkPresetForVersion(project.id, vid, name)
+      applyPresetWarnings(r)
 
       const list = await api.listPresets()
       setPresets(list)
@@ -603,6 +614,17 @@ export default function TrainPage() {
                     </button>
                   </div>
                 </div>
+                {(droppedFields.length > 0 || defaultedFields.length > 0) && (
+                  <div className="mb-3 rounded-md border border-amber-400/50 bg-amber-950/60 px-3.5 py-2.5 text-xs text-amber-100 space-y-1">
+                    <span className="font-semibold text-amber-300">{t('presets.compatNoticeTitle')}</span>
+                    {droppedFields.length > 0 && (
+                      <div>{t('presets.droppedFieldsBody')}<code className="ml-1 text-[11px] opacity-80">{droppedFields.join(', ')}</code></div>
+                    )}
+                    {defaultedFields.length > 0 && (
+                      <div>{t('presets.defaultedFieldsBody')}<code className="ml-1 text-[11px] opacity-80">{defaultedFields.join(', ')}</code></div>
+                    )}
+                  </div>
+                )}
                 <SchemaForm
                   schema={schema}
                   values={config}

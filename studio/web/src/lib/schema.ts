@@ -5,6 +5,7 @@ import type { SchemaProperty } from '../api/client'
 export type ControlKind =
   | 'bool'
   | 'select'
+  | 'tristate'
   | 'int'
   | 'float'
   | 'string'
@@ -23,7 +24,8 @@ export function controlKind(prop: SchemaProperty): ControlKind {
       prop.control === 'path' ||
       prop.control === 'textarea' ||
       prop.control === 'code' ||
-      prop.control === 'string-list'
+      prop.control === 'string-list' ||
+      prop.control === 'tristate'
     )
       return prop.control
   }
@@ -33,7 +35,9 @@ export function controlKind(prop: SchemaProperty): ControlKind {
   // 解开 anyOf: [X, null] 的可空类型
   let type = prop.type
   if (!type && prop.anyOf) {
+    const hasNull = prop.anyOf.some((a) => a.type === 'null')
     const nonNull = prop.anyOf.find((a) => a.type && a.type !== 'null')
+    if (hasNull && nonNull?.type === 'boolean') return 'tristate'
     type = nonNull?.type
   }
 
@@ -88,6 +92,7 @@ export const SCHEMA_GROUP_LABEL_KEYS: Record<string, string> = {
   output: 'schema.groups.output',
   sample: 'schema.groups.sample',
   monitor: 'schema.groups.monitor',
+  wandb: 'schema.groups.wandb',
 }
 
 export const SCHEMA_ENUM_LABEL_KEYS: Record<string, Record<string, string>> = {
@@ -133,6 +138,27 @@ export const SCHEMA_ENUM_LABEL_KEYS: Record<string, Record<string, string>> = {
     offset: 'schema.enums.noiseEnhancementType.offset',
     pyramid: 'schema.enums.noiseEnhancementType.pyramid',
   },
+  wandb_mode: {
+    '': 'field.useGlobal',
+    online: 'schema.enums.wandbMode.online',
+    offline: 'schema.enums.wandbMode.offline',
+    disabled: 'schema.enums.wandbMode.disabled',
+  },
+  wandb_upload_model_policy: {
+    '': 'field.useGlobal',
+    all: 'schema.enums.wandbPolicy.all',
+    last: 'schema.enums.wandbPolicy.last',
+  },
+  wandb_upload_state_manual_policy: {
+    '': 'field.useGlobal',
+    all: 'schema.enums.wandbPolicy.all',
+    last: 'schema.enums.wandbPolicy.last',
+  },
+  wandb_upload_state_auto_policy: {
+    '': 'field.useGlobal',
+    all: 'schema.enums.wandbPolicy.all',
+    last: 'schema.enums.wandbPolicy.last',
+  }
 }
 
 export function schemaGroupLabel(key: string, fallback: string, t: TFunction): string {

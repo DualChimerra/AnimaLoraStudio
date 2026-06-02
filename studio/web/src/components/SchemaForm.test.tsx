@@ -20,6 +20,10 @@ vi.mock('react-i18next', () => ({
         'schema.enums.lr_scheduler.none': 'None',
         'schema.enums.lr_scheduler.cosine': 'Cosine',
         'schema.enums.timestep_sampling.logit_normal': 'Logit Normal',
+        'schema.enums.timestep_sampling.uniform': 'Uniform',
+        'field.useGlobal': 'Use global',
+        'field.yes': 'Yes',
+        'field.no': 'No',
       }
       if (key === 'schema.fieldCount') return `${opts?.n ?? 0} fields`
       return dict[key] ?? opts?.defaultValue ?? key
@@ -73,6 +77,12 @@ const schema: SchemaResponse = {
         group: 'timestep_sampling',
         description: 'InfoNoise',
         advanced: true,
+      },
+      wandb_enabled: {
+        anyOf: [{ type: 'boolean' }, { type: 'null' }],
+        default: null,
+        group: 'training',
+        description: 'WandB',
       },
     },
   },
@@ -144,6 +154,31 @@ describe('SchemaForm takeover behavior', () => {
     expect(screen.getByText('Prodigy controls the learning rate')).toBeInTheDocument()
   })
 
+  it('renders nullable booleans as tri-state selects without coercing null to false', () => {
+    const onChange = vi.fn()
+
+    render(
+      <SchemaForm
+        schema={schema}
+        values={{
+          optimizer_type: 'adamw',
+          learning_rate: 0.0001,
+          lr_scheduler: 'none',
+          infonoise_enabled: false,
+          timestep_sampling: 'logit_normal',
+          wandb_enabled: null,
+        }}
+        onChange={onChange}
+        advancedMode
+      />,
+    )
+
+    const wandbSelect = screen.getByDisplayValue('Use global') as HTMLSelectElement
+    expect(wandbSelect.value).toBe('')
+    expect(screen.queryByRole('checkbox', { name: /wandb/i })).not.toBeInTheDocument()
+    expect(onChange).not.toHaveBeenCalled()
+  })
+
   it('disables InfoNoise-controlled timestep fields and uses frontend alt descriptions', () => {
     render(
       <SchemaForm
@@ -160,7 +195,7 @@ describe('SchemaForm takeover behavior', () => {
       />,
     )
 
-    const timestepSelect = screen.getAllByRole('combobox')[2] as HTMLSelectElement
+    const timestepSelect = screen.getAllByRole('combobox').find((el) => (el as HTMLSelectElement).value === 'uniform') as HTMLSelectElement
     expect(timestepSelect).toBeDisabled()
     expect(screen.getByText('InfoNoise controls timestep sampling')).toBeInTheDocument()
     expect(screen.getByText('InfoNoise takes over timestep sampling')).toBeInTheDocument()

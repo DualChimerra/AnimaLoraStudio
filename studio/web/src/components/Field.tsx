@@ -71,6 +71,32 @@ export default function Field({
     )
   }
 
+  // tristate (Optional[bool]: null / true / false) ----------------------
+  if (kind === 'tristate') {
+    const triValue = value === true ? 'true' : value === false ? 'false' : ''
+    return (
+      <div className="py-1.5">
+        <div className="text-sm font-medium text-fg-secondary mb-1">
+          {label}{hintNode}
+        </div>
+        <select
+          value={triValue}
+          onChange={(e) => {
+            const v = e.target.value
+            onChange(v === 'true' ? true : v === 'false' ? false : null)
+          }}
+          disabled={disabled}
+          className="input" style={inputStyle}
+        >
+          <option value="">{t('field.useGlobal')}</option>
+          <option value="true">{t('field.yes')}</option>
+          <option value="false">{t('field.no')}</option>
+        </select>
+        {help && <div className="text-xs text-fg-tertiary mt-1">{help}</div>}
+      </div>
+    )
+  }
+
   // select --------------------------------------------------------------
   if (kind === 'select') {
     return (

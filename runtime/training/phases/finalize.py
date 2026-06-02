@@ -42,5 +42,6 @@ def run(ctx: TrainingContext) -> None:
         ctx.emit(f"Loss curve (first {len(ctx.loss_history)} steps):\n{chart}")
 
     ctx.emit(f"Saved final LoRA: {final_path}")
+    ctx.wandb_monitor.upload_model(final_path)
     ctx.wandb_monitor.finish()
     logger.info("训练完成!")

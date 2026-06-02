@@ -333,3 +333,36 @@ def test_import_bundle_config_with_auto_sync_off_preserves_windows_path(
     # 路径原样保留（POSIX 形式）；关键点是不会出现 REPO_ROOT 前缀
     assert cfg["transformer_path"] == src_path
     assert "G:/" in cfg["transformer_path"]
+
+
+def test_import_bundle_normalizes_legacy_presets(isolated, tmp_path: Path) -> None:
+    import yaml
+    from studio.schema import TrainingConfig
+    from studio.services.presets import io as presets_io
+
+    legacy = TrainingConfig().model_dump(mode="python")
+    legacy.pop("attention_backend", None)
+    legacy["xformers"] = True
+    legacy["optimizer_type"] = "not-real"
+
+    bundle = tmp_path / "legacy.bundle.zip"
+    with zipfile.ZipFile(bundle, "w", compression=zipfile.ZIP_STORED) as zf:
+        zf.writestr(
+            "manifest.json",
+            json.dumps({
+                "schema_version": 2,
+                "source": {"title": "Imported", "slug": "imported", "version_label": "v1"},
+                "includes": {"presets": True},
+            }),
+        )
+        zf.writestr("presets/legacy.yaml", yaml.safe_dump(legacy, allow_unicode=True, sort_keys=False))
+
+    presets_base = tmp_path / "presets"
+    with db.connection_for(isolated["db"]) as conn:
+        result = train_io.import_bundle(conn, bundle, presets_base=presets_base)
+
+    assert result["stats"]["preset_count"] == 1
+    assert [item["name"] for item in presets_io.list_presets(presets_base)] == ["legacy"]
+    cfg = presets_io.read_preset("legacy", presets_base)
+    assert cfg["attention_backend"] == "xformers"
+    assert cfg["optimizer_type"] == TrainingConfig().optimizer_type

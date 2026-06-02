@@ -209,6 +209,12 @@ const EMPTY: Secrets = {
     log_samples: true,
     sample_max_side: 1216,
     sample_every_n_steps: 0,
+    upload_model: false,
+    upload_model_policy: 'last',
+    upload_state_manual: false,
+    upload_state_manual_policy: 'last',
+    upload_state_auto: false,
+    upload_state_auto_policy: 'last',
   },
   modelscope: { token: '' },
   download_source: 'huggingface',
@@ -1087,6 +1093,64 @@ export default function SettingsPage() {
                 onChange={(e) => update('wandb', 'sample_every_n_steps', Math.max(0, parseInt(e.target.value) || 0))}
                 className={textInputClass}
               />
+            </SettingsField>
+
+            <h4 className="text-xs font-semibold text-zinc-400 uppercase tracking-wider mt-4 mb-2">
+              {t('settings.uploadArtifacts')}
+            </h4>
+            <SettingsField
+              label={t('settings.uploadModel')}
+              helpTooltip={<p>{t('settings.uploadModelHelp')}</p>}
+            >
+              <div className="flex items-center gap-3">
+                <Bool value={draft.wandb.upload_model} onChange={(v) => update('wandb', 'upload_model', v)} />
+                {draft.wandb.upload_model && (
+                  <select
+                    value={draft.wandb.upload_model_policy}
+                    onChange={(e) => update('wandb', 'upload_model_policy', e.target.value as 'all' | 'last')}
+                    className={textInputClass + ' w-auto'}
+                  >
+                    <option value="last">{t('settings.policyLast')}</option>
+                    <option value="all">{t('settings.policyAll')}</option>
+                  </select>
+                )}
+              </div>
+            </SettingsField>
+            <SettingsField
+              label={t('settings.uploadStateManual')}
+              helpTooltip={<p>{t('settings.uploadStateManualHelp')}</p>}
+            >
+              <div className="flex items-center gap-3">
+                <Bool value={draft.wandb.upload_state_manual} onChange={(v) => update('wandb', 'upload_state_manual', v)} />
+                {draft.wandb.upload_state_manual && (
+                  <select
+                    value={draft.wandb.upload_state_manual_policy}
+                    onChange={(e) => update('wandb', 'upload_state_manual_policy', e.target.value as 'all' | 'last')}
+                    className={textInputClass + ' w-auto'}
+                  >
+                    <option value="last">{t('settings.policyLast')}</option>
+                    <option value="all">{t('settings.policyAll')}</option>
+                  </select>
+                )}
+              </div>
+            </SettingsField>
+            <SettingsField
+              label={t('settings.uploadStateAuto')}
+              helpTooltip={<p>{t('settings.uploadStateAutoHelp')}</p>}
+            >
+              <div className="flex items-center gap-3">
+                <Bool value={draft.wandb.upload_state_auto} onChange={(v) => update('wandb', 'upload_state_auto', v)} />
+                {draft.wandb.upload_state_auto && (
+                  <select
+                    value={draft.wandb.upload_state_auto_policy}
+                    onChange={(e) => update('wandb', 'upload_state_auto_policy', e.target.value as 'all' | 'last')}
+                    className={textInputClass + ' w-auto'}
+                  >
+                    <option value="last">{t('settings.policyLast')}</option>
+                    <option value="all">{t('settings.policyAll')}</option>
+                  </select>
+                )}
+              </div>
             </SettingsField>
           </div>
         )}

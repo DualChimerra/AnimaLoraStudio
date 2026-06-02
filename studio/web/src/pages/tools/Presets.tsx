@@ -78,6 +78,8 @@ export default function PresetsPage() {
 
   // 已保存快照，用于 dirty 判定
   const savedJsonRef = useRef<string | null>(null)
+  const [droppedFields, setDroppedFields] = useState<string[]>([])
+  const [defaultedFields, setDefaultedFields] = useState<string[]>([])
 
   // 描述
   const [descriptions, setDescriptions] = useState<Record<string, string>>(loadPresetDescriptions)
@@ -152,19 +154,25 @@ export default function PresetsPage() {
         setNewName('')
         setDescDraft('')
         setDescDirty(false)
+        setDroppedFields([])
+        setDefaultedFields([])
       } else {
         setConfig(null)
         savedJsonRef.current = null
         setNewName('')
         setDescDraft('')
         setDescDirty(false)
+        setDroppedFields([])
+        setDefaultedFields([])
       }
       setNewNameError('')
       return
     }
-    api.getPreset(selected).then((data) => {
+    api.getPresetWithWarnings(selected).then(({ config: data, dropped_fields, defaulted_fields }) => {
       setConfig(data)
       savedJsonRef.current = JSON.stringify(data)
+      setDroppedFields(dropped_fields)
+      setDefaultedFields(defaulted_fields)
       setDescDraft(descriptions[selected] ?? '')
       setDescDirty(false)
     }).catch((e) => {
@@ -744,6 +752,17 @@ export default function PresetsPage() {
                   </button>
                 </div>
               </div>
+              {(droppedFields.length > 0 || defaultedFields.length > 0) && (
+                <div className="mb-3 rounded-md border border-amber-400/50 bg-amber-950/60 px-3.5 py-2.5 text-xs text-amber-100 space-y-1">
+                  <span className="font-semibold text-amber-300">{t('presets.compatNoticeTitle')}</span>
+                  {droppedFields.length > 0 && (
+                    <div>{t('presets.droppedFieldsBody')}<code className="ml-1 text-[11px] opacity-80">{droppedFields.join(', ')}</code></div>
+                  )}
+                  {defaultedFields.length > 0 && (
+                    <div>{t('presets.defaultedFieldsBody')}<code className="ml-1 text-[11px] opacity-80">{defaultedFields.join(', ')}</code></div>
+                  )}
+                </div>
+              )}
               <SchemaForm
                 schema={schema}
                 values={config}
