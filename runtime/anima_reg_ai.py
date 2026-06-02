@@ -44,11 +44,18 @@ for _p in (_THIS_DIR, _REPO_ROOT):
 
 import anima_train as _T  # noqa: E402
 
-# 复用 reg_builder.RegMeta（PR-9 commit 2 加了 generation_method 字段）
-from studio.services.reg.builder import RegMeta, read_meta, write_meta  # noqa: E402
+# 复用 reg_builder.RegMeta（PR-9 commit 2 加了 generation_method 字段）+ clear_reg_dir
+# （booru full-mode build 入口同款实现，行为/语义跟 booru reg 路径绑定一致）。
+from studio.services.reg.builder import (  # noqa: E402
+    RegMeta,
+    clear_reg_dir,
+    read_meta,
+    write_meta,
+)
 from studio.services.tagging.caption_format import (  # noqa: E402
     caption_json_to_tags,
     caption_json_to_text,
+    normalize_caption_json,
 )
 
 logging.basicConfig(
@@ -190,199 +197,59 @@ def _prompt_tags_from_caption(caption_path: Path, excluded_tags: set[str]) -> li
     return prompt_tags
 
 
-def _take_prompt_tag(
-    raw_tag: object,
-    excluded_tags: set[str],
-    seen: set[str],
-) -> str | None:
-    tag = _prompt_tag(str(raw_tag or ""))
-    if not tag or tag in excluded_tags or tag in seen:
-        return None
-    seen.add(tag)
-    return tag
+def _filter_normalized_caption(
+    data: dict, excluded_tags: set[str]
+) -> dict:
+    """Drop excluded tags + meta.trigger from a normalized standard-shape caption.
 
+    Reg 端不带 trigger：base prior 不认识 LoRA handle；同时避免 reg sidecar 被
+    训练侧 caption_utils.load_and_build_caption 再次读到 trigger 注入。
 
-def _split_tag_value(value: object) -> list[object]:
-    if value is None:
-        return []
-    if isinstance(value, str):
-        return value.split(",")
-    if isinstance(value, (list, tuple, set)):
-        return list(value)
-    return [value]
+    Scalar 字段（count/character/series/artist）按逗号拆开后逐 tag 过 excluded
+    再 join 回，让 "1girl, 1boy" 这种合并值的单项 exclude 可以命中。
+    """
+    src_tags = data.get("tags") or {}
 
+    def _keep_list(values: list[str]) -> list[str]:
+        return [t for t in values if _tag_key(t) not in excluded_tags]
 
-def _filter_prompt_tag_list(
-    raw_tags: object,
-    excluded_tags: set[str],
-    seen: set[str],
-) -> list[str]:
-    out: list[str] = []
-    for raw_tag in _split_tag_value(raw_tags):
-        tag = _take_prompt_tag(raw_tag, excluded_tags, seen)
-        if tag:
-            out.append(tag)
-    return out
-
-
-def _filter_tag_collection(
-    value: object,
-    excluded_tags: set[str],
-    seen: set[str],
-) -> str | list[str]:
-    tags = _filter_prompt_tag_list(value, excluded_tags, seen)
-    if isinstance(value, str):
-        return ", ".join(tags)
-    return tags
-
-
-def _filter_scalar_tag(
-    value: object,
-    excluded_tags: set[str],
-    seen: set[str],
-) -> str:
-    return _take_prompt_tag(value, excluded_tags, seen) or ""
-
-
-def _character_text(value: object) -> str:
-    if isinstance(value, dict):
-        full = str(value.get("full") or "").strip()
-        if full:
-            return full
-        parts = [
-            str(value.get("name") or "").strip(),
-            str(value.get("variant") or "").strip(),
+    def _keep_scalar(value: str) -> str:
+        kept = [
+            t.strip() for t in str(value or "").split(",")
+            if t.strip() and _tag_key(t) not in excluded_tags
         ]
-        return ", ".join(p for p in parts if p)
-    return str(value or "").strip()
+        return ", ".join(kept)
 
-
-def _filter_character_value(
-    value: object,
-    excluded_tags: set[str],
-    seen: set[str],
-) -> object:
-    tag = _take_prompt_tag(_character_text(value), excluded_tags, seen)
-    if not isinstance(value, dict):
-        return tag or ""
-
-    out = dict(value)
-    if not tag:
-        for key in ("name", "variant", "full"):
-            if key in out:
-                out[key] = ""
-        return out
-
-    if "full" in out or not ("name" in out or "variant" in out):
-        out["full"] = tag
-    if "name" in out and not str(out.get("variant") or "").strip():
-        out["name"] = tag
-    return out
-
-
-def _filter_meta_trigger(data: dict, excluded_tags: set[str], seen: set[str]) -> None:
-    meta = data.get("meta") if isinstance(data.get("meta"), dict) else None
-    if meta is None:
-        return
-    trigger = _take_prompt_tag(meta.get("trigger"), excluded_tags, seen)
-    if trigger:
-        meta["trigger"] = trigger
-    else:
-        meta.pop("trigger", None)
-
-
-def _filter_standard_json(data: dict, excluded_tags: set[str]) -> dict:
-    out = dict(data)
-    tags = dict(out.get("tags") if isinstance(out.get("tags"), dict) else {})
-    out["tags"] = tags
-    seen: set[str] = set()
-    _filter_meta_trigger(out, excluded_tags, seen)
-
-    tags["quality"] = _filter_prompt_tag_list(tags.get("quality"), excluded_tags, seen)
-    for key in ("count", "character", "series", "artist"):
-        tags[key] = _filter_scalar_tag(tags.get(key), excluded_tags, seen)
-    for key in ("appearance", "tags", "environment"):
-        tags[key] = _filter_prompt_tag_list(tags.get(key), excluded_tags, seen)
-    tags["nl"] = str(tags.get("nl") or "").strip()
-    return out
-
-
-def _filter_documented_full_json(data: dict, excluded_tags: set[str]) -> dict:
-    out = dict(data)
-    fixed = dict(out.get("fixed") if isinstance(out.get("fixed"), dict) else {})
-    character = out.get("character")
-    ai = dict(out.get("ai_output") if isinstance(out.get("ai_output"), dict) else {})
-    from_path = dict(out.get("from_path") if isinstance(out.get("from_path"), dict) else {})
-    out["fixed"] = fixed
-    out["character"] = character
-    out["ai_output"] = ai
-    if "from_path" in out:
-        out["from_path"] = from_path
-
-    seen: set[str] = set()
-    _filter_meta_trigger(out, excluded_tags, seen)
-
-    fixed["quality"] = _filter_tag_collection(fixed.get("quality"), excluded_tags, seen)
-    ai["count"] = _filter_scalar_tag(ai.get("count"), excluded_tags, seen)
-    out["character"] = _filter_character_value(character, excluded_tags, seen)
-    fixed["series"] = _filter_scalar_tag(fixed.get("series"), excluded_tags, seen)
-    fixed["artist"] = _filter_scalar_tag(fixed.get("artist"), excluded_tags, seen)
-
-    ai["appearance"] = _filter_prompt_tag_list(ai.get("appearance"), excluded_tags, seen)
-    for key in ("appearance", "extra_appearance"):
-        if key in from_path:
-            from_path[key] = _filter_prompt_tag_list(from_path.get(key), excluded_tags, seen)
-
-    ai["tags"] = _filter_prompt_tag_list(ai.get("tags"), excluded_tags, seen)
-    for key in ("tags", "extra_tags"):
-        if key in from_path:
-            from_path[key] = _filter_prompt_tag_list(from_path.get(key), excluded_tags, seen)
-
-    ai["environment"] = _filter_prompt_tag_list(ai.get("environment"), excluded_tags, seen)
-    ai["nl"] = str(ai.get("nl") or "").strip()
-    return out
-
-
-def _filter_simple_tags_json(data: dict, excluded_tags: set[str]) -> dict:
-    out = dict(data)
-    seen: set[str] = set()
-    _filter_meta_trigger(out, excluded_tags, seen)
-    out["tags"] = _filter_prompt_tag_list(out.get("tags"), excluded_tags, seen)
-    return out
-
-
-def _filter_simplified_json(data: dict, excluded_tags: set[str]) -> dict:
-    out = dict(data)
-    seen: set[str] = set()
-    _filter_meta_trigger(out, excluded_tags, seen)
-    if "quality" in out:
-        out["quality"] = _filter_tag_collection(out.get("quality"), excluded_tags, seen)
-    for key in ("count", "character", "series", "artist"):
-        if key in out:
-            out[key] = _filter_scalar_tag(out.get(key), excluded_tags, seen)
-    for key in ("appearance", "tags", "environment"):
-        if key in out:
-            out[key] = _filter_prompt_tag_list(out.get(key), excluded_tags, seen)
-    if "nl" in out:
-        out["nl"] = str(out.get("nl") or "").strip()
-    return out
-
-
-def _filter_json_caption(raw: dict, excluded_tags: set[str]) -> dict:
-    tags_obj = raw.get("tags")
-    if isinstance(tags_obj, dict):
-        return _filter_standard_json(raw, excluded_tags)
-    if "ai_output" in raw or "fixed" in raw or "from_path" in raw:
-        return _filter_documented_full_json(raw, excluded_tags)
-    if isinstance(tags_obj, list):
-        return _filter_simple_tags_json(raw, excluded_tags)
-    return _filter_simplified_json(raw, excluded_tags)
+    meta = {
+        k: v for k, v in (data.get("meta") or {}).items() if k != "trigger"
+    }
+    return {
+        "meta": meta,
+        "tags": {
+            "quality": _keep_list(src_tags.get("quality") or []),
+            "count": _keep_scalar(src_tags.get("count") or ""),
+            "character": _keep_scalar(src_tags.get("character") or ""),
+            "series": _keep_scalar(src_tags.get("series") or ""),
+            "artist": _keep_scalar(src_tags.get("artist") or ""),
+            "appearance": _keep_list(src_tags.get("appearance") or []),
+            "tags": _keep_list(src_tags.get("tags") or []),
+            "environment": _keep_list(src_tags.get("environment") or []),
+            "nl": str(src_tags.get("nl") or "").strip(),
+        },
+    }
 
 
 def _rewrite_json_caption_for_prompt(caption_path: Path, excluded_tags: set[str]) -> str:
-    """Rewrite a reg JSON sidecar while preserving its source JSON shape."""
+    """Normalize → filter excluded + drop trigger → write back standard shape.
+
+    Reg sidecar 是派生产物，统一写 caption_format.normalize_caption_json 输出的
+    标准 shape；训练侧 caption_utils.load_and_build_caption 读 reg JSON 也走同一
+    个 normalize 入口，不需要保留 user-side 原始 documented_full / simplified
+    形态，反而消掉了 4 套 shape filter 的镜像维护成本。
+    """
     raw = json.loads(caption_path.read_text(encoding="utf-8"))
-    filtered = _filter_json_caption(raw if isinstance(raw, dict) else {}, excluded_tags)
+    normalized = normalize_caption_json(raw if isinstance(raw, dict) else {})
+    filtered = _filter_normalized_caption(normalized, excluded_tags)
     prompt = caption_json_to_text(filtered)
     caption_path.write_text(
         json.dumps(filtered, ensure_ascii=False, indent=2) + "\n",
@@ -443,17 +310,6 @@ def _already_has_reg(reg_sub: Path, train_stem: str) -> bool:
         ):
             return True
     return False
-
-
-def _clear_reg_dir(reg_dir: Path) -> None:
-    """Clear old reg outputs before a full AI prior generation run."""
-    if not reg_dir.exists():
-        return
-    for child in reg_dir.iterdir():
-        if child.is_dir():
-            shutil.rmtree(child)
-        else:
-            child.unlink()
 
 
 def _write_meta_final(
@@ -595,7 +451,7 @@ def main() -> None:
 
     if not incremental:
         logger.info("full 模式：清空旧 reg 内容")
-        _clear_reg_dir(reg_dir)
+        clear_reg_dir(reg_dir)
 
     # 生成循环
     total = len(to_generate)
