@@ -599,15 +599,16 @@ export default function SettingsPage() {
       {tab === 'dataset' && (<>
       <SettingsSection id="gelbooru" title="Gelbooru">
         <SettingsField label="user_id">
-          <input
+          <SettingsInput
             type="text"
             value={draft.gelbooru.user_id}
-            onChange={(e) => update('gelbooru', 'user_id', e.target.value)}
+            onChange={(v) => update('gelbooru', 'user_id', v)}
             autoComplete="off"
             data-lpignore="true"
             data-1p-ignore
             data-form-type="other"
-            className={textInputClass}                                  />
+            className={textInputClass}
+          />
         </SettingsField>
         <SettingsField label="api_key">
           <SensitiveInput
@@ -629,16 +630,17 @@ export default function SettingsPage() {
 
       <SettingsSection id="danbooru" title="Danbooru">
         <SettingsField label="username">
-          <input
+          <SettingsInput
             type="text"
             value={draft.danbooru.username}
-            onChange={(e) => update('danbooru', 'username', e.target.value)}
+            onChange={(v) => update('danbooru', 'username', v)}
             placeholder={t('settings.danbooruUsernamePlaceholder')}
             autoComplete="off"
             data-lpignore="true"
             data-1p-ignore
             data-form-type="other"
-            className={textInputClass}                                  />
+            className={textInputClass}
+          />
         </SettingsField>
         <SettingsField label="api_key">
           <SensitiveInput
@@ -665,42 +667,46 @@ export default function SettingsPage() {
           desc={t('settings.commaSeparated')}
           helpTooltip={<p><Trans i18nKey="settings.excludeTagsHelp" components={{ code: <code /> }} /></p>}
         >
-          <input
+          <SettingsInput
             type="text"
             value={draft.download.exclude_tags.join(', ')}
-            onChange={(e) =>
+            onChange={(v) =>
               update('download', 'exclude_tags',
-                e.target.value.split(',').map((t) => t.trim().replace(/^-+/, '')).filter(Boolean)
+                v.split(',').map((t) => t.trim().replace(/^-+/, '')).filter(Boolean)
               )
             }
             placeholder={t('settings.excludeTagsPlaceholder')}
-            className={textInputClass}                                  />
+            className={textInputClass}
+          />
         </SettingsField>
 
         <div className="grid grid-cols-3 gap-3 pt-2 border-t border-subtle">
           <div className="flex flex-col gap-1">
             <label className="text-xs text-fg-secondary font-mono">parallel_workers</label>
-            <input
+            <SettingsInput
               type="number" min={1} max={16}
               value={draft.download.parallel_workers}
-              onChange={(e) => update('download', 'parallel_workers', Math.max(1, Number(e.target.value) || 1))}
-              className={`${textInputClass} max-w-24`}                              />
+              onChange={(v) => update('download', 'parallel_workers', Math.max(1, Number(v) || 1))}
+              className={`${textInputClass} max-w-24`}
+            />
           </div>
           <div className="flex flex-col gap-1">
             <label className="text-xs text-fg-secondary font-mono">api_rate_per_sec</label>
-            <input
+            <SettingsInput
               type="number" step="0.5" min={0.5} max={10}
               value={draft.download.api_rate_per_sec}
-              onChange={(e) => update('download', 'api_rate_per_sec', Math.max(0.5, Number(e.target.value) || 0.5))}
-              className={`${textInputClass} max-w-24`}                              />
+              onChange={(v) => update('download', 'api_rate_per_sec', Math.max(0.5, Number(v) || 0.5))}
+              className={`${textInputClass} max-w-24`}
+            />
           </div>
           <div className="flex flex-col gap-1">
             <label className="text-xs text-fg-secondary font-mono">cdn_rate_per_sec</label>
-            <input
+            <SettingsInput
               type="number" step="1" min={1} max={20}
               value={draft.download.cdn_rate_per_sec}
-              onChange={(e) => update('download', 'cdn_rate_per_sec', Math.max(1, Number(e.target.value) || 1))}
-              className={`${textInputClass} max-w-24`}                              />
+              onChange={(v) => update('download', 'cdn_rate_per_sec', Math.max(1, Number(v) || 1))}
+              className={`${textInputClass} max-w-24`}
+            />
           </div>
         </div>
       </SettingsSection>
@@ -720,10 +726,10 @@ export default function SettingsPage() {
           label={t('settings.proxy.httpLabel')}
           desc={t('settings.proxy.httpDesc')}
         >
-          <input
+          <SettingsInput
             type="text"
             value={draft.proxy.http_proxy}
-            onChange={(e) => update('proxy', 'http_proxy', e.target.value)}
+            onChange={(v) => update('proxy', 'http_proxy', v)}
             placeholder="http://127.0.0.1:7890"
             className={textInputClass}
             disabled={!draft.proxy.enabled}
@@ -734,10 +740,10 @@ export default function SettingsPage() {
           label={t('settings.proxy.httpsLabel')}
           desc={t('settings.proxy.httpsDesc')}
         >
-          <input
+          <SettingsInput
             type="text"
             value={draft.proxy.https_proxy}
-            onChange={(e) => update('proxy', 'https_proxy', e.target.value)}
+            onChange={(v) => update('proxy', 'https_proxy', v)}
             placeholder="http://127.0.0.1:7890"
             className={textInputClass}
             disabled={!draft.proxy.enabled}
@@ -748,10 +754,10 @@ export default function SettingsPage() {
           label={t('settings.proxy.noProxyLabel')}
           desc={t('settings.proxy.noProxyDesc')}
         >
-          <input
+          <SettingsInput
             type="text"
             value={draft.proxy.no_proxy}
-            onChange={(e) => update('proxy', 'no_proxy', e.target.value)}
+            onChange={(v) => update('proxy', 'no_proxy', v)}
             placeholder="localhost,127.0.0.1"
             className={textInputClass}
             disabled={!draft.proxy.enabled}
@@ -807,26 +813,29 @@ export default function SettingsPage() {
           t={t}
         />
         <SettingsField label="local_dir" desc={t('settings.blankAutoHfDownload')}>
-          <input
+          <SettingsInput
             type="text"
             value={draft.wd14.local_dir ?? ''}
-            onChange={(e) => update('wd14', 'local_dir', e.target.value || null)}
-            className={textInputClass}                                  />
+            onChange={(v) => update('wd14', 'local_dir', v || null)}
+            className={textInputClass}
+          />
         </SettingsField>
         <div className="grid grid-cols-2 gap-3">
           <SettingsField label="threshold_general">
-            <input
+            <SettingsInput
               type="number" step="0.01" min={0} max={1}
               value={draft.wd14.threshold_general}
-              onChange={(e) => update('wd14', 'threshold_general', Number(e.target.value))}
-              className={`${textInputClass} max-w-32`}                              />
+              onChange={(v) => update('wd14', 'threshold_general', Number(v))}
+              className={`${textInputClass} max-w-32`}
+            />
           </SettingsField>
           <SettingsField label="threshold_character">
-            <input
+            <SettingsInput
               type="number" step="0.01" min={0} max={1}
               value={draft.wd14.threshold_character}
-              onChange={(e) => update('wd14', 'threshold_character', Number(e.target.value))}
-              className={`${textInputClass} max-w-32`}                              />
+              onChange={(v) => update('wd14', 'threshold_character', Number(v))}
+              className={`${textInputClass} max-w-32`}
+            />
           </SettingsField>
         </div>
         <SettingsField label="blacklist_tags" desc={t('settings.commaSeparated')}>
@@ -837,11 +846,12 @@ export default function SettingsPage() {
           />
         </SettingsField>
         <SettingsField label="batch_size" desc={t('settings.batchSizeHint')}>
-          <input
+          <SettingsInput
             type="number" min={1} max={64}
             value={draft.wd14.batch_size}
-            onChange={(e) => update('wd14', 'batch_size', Math.max(1, Number(e.target.value) || 1))}
-            className={`${textInputClass} max-w-24`}                              />
+            onChange={(v) => update('wd14', 'batch_size', Math.max(1, Number(v) || 1))}
+            className={`${textInputClass} max-w-24`}
+          />
         </SettingsField>
       </SettingsSection>
 
@@ -861,26 +871,29 @@ export default function SettingsPage() {
           t={t}
         />
         <SettingsField label="local_dir" desc={t('settings.blankAutoHfDownload')}>
-          <input
+          <SettingsInput
             type="text"
             value={draft.cltagger.local_dir ?? ''}
-            onChange={(e) => update('cltagger', 'local_dir', e.target.value || null)}
-            className={textInputClass}                                  />
+            onChange={(v) => update('cltagger', 'local_dir', v || null)}
+            className={textInputClass}
+          />
         </SettingsField>
         <div className="grid grid-cols-2 gap-3">
           <SettingsField label="threshold_general">
-            <input
+            <SettingsInput
               type="number" step="0.01" min={0} max={1}
               value={draft.cltagger.threshold_general}
-              onChange={(e) => update('cltagger', 'threshold_general', Number(e.target.value))}
-              className={`${textInputClass} max-w-32`}                                      />
+              onChange={(v) => update('cltagger', 'threshold_general', Number(v))}
+              className={`${textInputClass} max-w-32`}
+            />
           </SettingsField>
           <SettingsField label="threshold_character">
-            <input
+            <SettingsInput
               type="number" step="0.01" min={0} max={1}
               value={draft.cltagger.threshold_character}
-              onChange={(e) => update('cltagger', 'threshold_character', Number(e.target.value))}
-              className={`${textInputClass} max-w-32`}                                      />
+              onChange={(v) => update('cltagger', 'threshold_character', Number(v))}
+              className={`${textInputClass} max-w-32`}
+            />
           </SettingsField>
         </div>
         <div className="grid grid-cols-2 gap-3">
@@ -908,11 +921,12 @@ export default function SettingsPage() {
           />
         </SettingsField>
         <SettingsField label="batch_size" desc={t('settings.batchSizeHint')}>
-          <input
+          <SettingsInput
             type="number" min={1} max={64}
             value={draft.cltagger.batch_size}
-            onChange={(e) => update('cltagger', 'batch_size', Math.max(1, Number(e.target.value) || 1))}
-            className={`${textInputClass} max-w-24`}                              />
+            onChange={(v) => update('cltagger', 'batch_size', Math.max(1, Number(v) || 1))}
+            className={`${textInputClass} max-w-24`}
+          />
         </SettingsField>
       </SettingsSection>
 
@@ -1018,27 +1032,27 @@ export default function SettingsPage() {
           />
         </SettingsField>
         <SettingsField label="project">
-          <input
+          <SettingsInput
             type="text"
             value={draft.wandb.project}
-            onChange={(e) => update('wandb', 'project', e.target.value)}
+            onChange={(v) => update('wandb', 'project', v)}
             placeholder="AnimaLoraStudio"
             className={textInputClass}
           />
         </SettingsField>
         <SettingsField label="entity" desc={t('settings.wandbEntityHint')}>
-          <input
+          <SettingsInput
             type="text"
             value={draft.wandb.entity}
-            onChange={(e) => update('wandb', 'entity', e.target.value)}
+            onChange={(v) => update('wandb', 'entity', v)}
             className={textInputClass}
           />
         </SettingsField>
         <SettingsField label="base_url" desc={t('settings.wandbBaseUrlHint')}>
-          <input
+          <SettingsInput
             type="text"
             value={draft.wandb.base_url}
-            onChange={(e) => update('wandb', 'base_url', e.target.value)}
+            onChange={(v) => update('wandb', 'base_url', v)}
             placeholder="https://api.wandb.ai"
             className={textInputClass}
           />
@@ -1070,12 +1084,12 @@ export default function SettingsPage() {
               label={t('settings.sampleMaxSide')}
               helpTooltip={<p>{t('settings.sampleMaxSideHelp')}</p>}
             >
-              <input
+              <SettingsInput
                 type="number"
                 min={64}
                 step={64}
                 value={draft.wandb.sample_max_side}
-                onChange={(e) => update('wandb', 'sample_max_side', Math.max(64, parseInt(e.target.value) || 1216))}
+                onChange={(v) => update('wandb', 'sample_max_side', Math.max(64, parseInt(v) || 1216))}
                 className={textInputClass}
               />
             </SettingsField>
@@ -1085,12 +1099,12 @@ export default function SettingsPage() {
                 <p><Trans i18nKey="settings.sampleEveryNStepsHelp" components={{ code: <code /> }} /></p>
               }
             >
-              <input
+              <SettingsInput
                 type="number"
                 min={0}
                 step={50}
                 value={draft.wandb.sample_every_n_steps}
-                onChange={(e) => update('wandb', 'sample_every_n_steps', Math.max(0, parseInt(e.target.value) || 0))}
+                onChange={(v) => update('wandb', 'sample_every_n_steps', Math.max(0, parseInt(v) || 0))}
                 className={textInputClass}
               />
             </SettingsField>
@@ -1334,18 +1348,76 @@ function SensitiveInput({ value, serverValue, onChange }: {
   value: string; serverValue: string; onChange: (v: string) => void
 }) {
   const { t } = useTranslation()
-  const masked = value === MASK
+  const [localValue, setLocalValue] = useState(value)
+
+  useEffect(() => {
+    setLocalValue(value)
+  }, [value])
+
+  const masked = localValue === MASK
+
+  const handleBlur = () => {
+    if (localValue !== value) {
+      onChange(localValue)
+    }
+  }
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      e.currentTarget.blur()
+    }
+  }
+
   return (
     <input
       type="password"
-      value={masked ? '' : value}
+      value={masked ? '' : localValue}
       placeholder={serverValue === MASK ? t('settings.sensitiveSavedPlaceholder') : ''}
-      onChange={(e) => onChange(e.target.value || MASK)}
+      onChange={(e) => setLocalValue(e.target.value || MASK)}
+      onBlur={handleBlur}
+      onKeyDown={handleKeyDown}
       autoComplete="new-password"
       data-lpignore="true"
       data-1p-ignore
       data-form-type="other"
-      className={textInputClass}                />
+      className={textInputClass}
+    />
+  )
+}
+
+interface SettingsInputProps extends Omit<React.InputHTMLAttributes<HTMLInputElement>, 'value' | 'onChange'> {
+  value: string | number
+  onChange: (v: string) => void
+}
+
+function SettingsInput({ value, onChange, type = 'text', ...props }: SettingsInputProps) {
+  const [localValue, setLocalValue] = useState(value)
+
+  useEffect(() => {
+    setLocalValue(value)
+  }, [value])
+
+  const handleBlur = () => {
+    if (String(localValue) !== String(value)) {
+      onChange(String(localValue))
+    }
+  }
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      e.currentTarget.blur()
+    }
+  }
+
+  return (
+    <input
+      type={type}
+      {...props}
+      value={localValue}
+      onChange={(e) => setLocalValue(e.target.value)}
+      onBlur={handleBlur}
+      onKeyDown={handleKeyDown}
+    />
   )
 }
 
