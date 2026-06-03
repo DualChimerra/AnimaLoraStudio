@@ -458,3 +458,103 @@ def ensure_manifest(project_dir: Path) -> dict[str, Any]:
         manifest = {"images": migrated}
         _atomic_write(path, manifest)
         return manifest
+
+
+# ---------------------------------------------------------------------------
+# ADR 0010 — per-version train/ manifest（fallback 重建）
+#
+# 新模型把 preprocess 产物落到 versions/{label}/train/，状态记到同位
+# manifest.json。本节只暴露 fallback 入口：第一次访问某 version 的 train
+# manifest 时，按老 project 级 preprocess/manifest.json 隐式重建。
+#
+# 详 docs/adr/0010-preprocess-train-scope.md + docs/design/preprocess-train-scope-plan.md §3.2。
+# 重写逻辑只读老 manifest 元数据，不复制图像 bytes（train/ 已是处理后产物
+# 由 curate 阶段复制进去，新模型唯一丢失的是 origin 反查关系）。
+# ---------------------------------------------------------------------------
+
+TRAIN_MANIFEST_VERSION = 2
+_IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp"})
+
+
+def train_manifest_path(project_dir: Path, version_label: str) -> Path:
+    return project_dir / "versions" / version_label / "train" / MANIFEST_NAME
+
+
+def _build_train_manifest_from_legacy(
+    legacy: dict[str, Any], train_files: set[str]
+) -> dict[str, Any]:
+    """从老 project 级 manifest 抽出 train/ 里实际存在的图的 origin 关系。
+
+    跳过：(1) train/ 里没有的 entry、(2) 老 entry 标 duplicate_removed 的（人工
+    去重审核记录，跟 train manifest 无关，新模型走 version 级独立记录）。
+    """
+    images: dict[str, Any] = {}
+    for name, entry in legacy.get("images", {}).items():
+        if not isinstance(entry, dict):
+            continue
+        if name not in train_files:
+            continue
+        if is_duplicate_removed_entry(entry):
+            continue
+        images[name] = {
+            "origin": entry_origin(entry, name),
+            "mtime": entry.get("mtime", 0),
+            "size": entry.get("size", 0),
+        }
+    return {"version": TRAIN_MANIFEST_VERSION, "images": images}
+
+
+def ensure_train_manifest(project_dir: Path, version_label: str) -> Path:
+    """幂等：保证 versions/{label}/train/manifest.json 存在；返回路径。
+
+    Fallback 重建规则（详 ADR 0010 §决策）：
+
+    1. 目标已存在 → 直接返回（O(1) stat，热路径无开销）
+    2. 不存在 + 老 `preprocess/manifest.json` 存在 → 按 train/ 实际文件名
+       匹配老 entry origin 重建 v2 schema
+    3. 老 manifest 也不存在 / 损坏 → 写空 v2 manifest
+
+    train/ 目录不存在时**也会创建**（首次访问该 version 时该目录可能还空）。
+
+    所有 train manifest read 入口都该先过这一道（防御性，幂等代价 = 1 次
+    stat）。fork version 时（`versions.py:create_version`）也显式调一次防止
+    源 manifest 损坏。
+
+    PR-1 范围：本函数 + 测试。**调用点的接入在 PR-2 范围**（manifest 模块
+    瘦身时一并接进所有 read/write 入口）。
+    """
+    target = train_manifest_path(project_dir, version_label)
+    if target.exists():
+        return target
+
+    train_dir = target.parent
+    legacy_path = manifest_path(project_dir)  # 项目级老 manifest
+
+    with _LOCK:
+        # 双检查：拿锁后再看一次（可能别人刚建完）
+        if target.exists():
+            return target
+
+        train_dir.mkdir(parents=True, exist_ok=True)
+
+        # 收集 train/ 里的图（一级目录，不递归；按图像后缀过滤避免把 .txt 算进来）
+        train_files: set[str] = set()
+        if train_dir.exists():
+            for entry in train_dir.iterdir():
+                if entry.is_file() and entry.suffix.lower() in _IMAGE_SUFFIXES:
+                    train_files.add(entry.name)
+
+        # 读老 manifest（不存在 / 损坏 → 空，跟 load() 一致语义）
+        legacy: dict[str, Any]
+        if legacy_path.exists():
+            try:
+                raw = json.loads(legacy_path.read_text(encoding="utf-8"))
+                legacy = raw if isinstance(raw, dict) else {}
+            except (OSError, json.JSONDecodeError):
+                legacy = {}
+        else:
+            legacy = {}
+
+        manifest = _build_train_manifest_from_legacy(legacy, train_files)
+        _atomic_write(target, manifest)
+        return target
