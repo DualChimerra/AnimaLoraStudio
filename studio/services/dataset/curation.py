@@ -107,59 +107,33 @@ def _list_image_entries(d: Path) -> list[dict[str, Any]]:
 
 
 def list_download(conn, project_id: int) -> list[dict[str, Any]]:
-    """筛选页左侧候选列表 = 预处理后可独立勾选的所有图。
+    """筛选页左侧候选列表 = `download/` 物理图，每张一行。
 
-    历史上这就是 `download/` 的 ls，每张原图一行；ADR 0004 之后引入了"已处理 →
-    preprocess/{stem}.png"的隐式映射，但仍维持 1:1 行（前端不感知差异）。
+    ADR 0010 fixup（2026-06-04）：Curation 跟预处理派生解耦。原 ADR 0004 设计
+    会按 manifest 展开 multi-crop 派生（X.jpg → 显示 X_c0.png + X_c1.png），但
+    新模型下 list_train 按 origin 去重（fan-out 折叠成一行 X.jpg），left/right
+    名字空间不一致会让 `used` 排除失败 → 已加入 train 的图重新出现在 left →
+    用户重选 → `copy_to_train` 看到 dst 物理已存在 → skip 报错。
 
-    Multi-crop fan-out（一张原图 → N 张 `X_c0.png` / `X_c1.png` ...）打破了 1:1
-    —— 用户期望在筛选里看到 N 行可单独勾选 / 单独丢弃，所以这里**展开派生**：
+    新行为：list_download 只列 download/ 物理图（不感知 manifest 派生）；
+    name 跟 list_train 返回的 origin 在同一命名空间（download 文件名），
+    used 排除走得通。预处理派生只在 Preprocess Overview 暴露给用户。
 
-      - download/X.jpg 在 manifest 里有 origin=X.jpg 的 entries → 列出这些
-        preprocess 派生文件名（含 _c0/_c1 等后缀），mtime 取 preprocess/ 副本
-      - download/X.jpg 没 entries → 列出 X.jpg 自身（隐式 original）
-      - manifest 里有 origin 但 download 原图已被删 → orphan，不列出（curation
-        阶段无法重抓，UI 不该展示死链）
-
-    返回的 name 字段对 derived 行是 preprocess 产物名，对 original 行是 download
-    文件名。`copy_to_train` 同样接受两种 name；resolve 在那一侧处理。
+    `duplicate_removed` 也不过滤（PR-4 上一 fixup 决议，去重已下沉 train scope）。
     """
-    p, pdir = _project_dir(conn, project_id)
+    _, pdir = _project_dir(conn, project_id)
     download_dir = pdir / "download"
-    preprocess_manifest.ensure_manifest(pdir)
-    processed = preprocess_manifest.all_processed(pdir)
 
-    # origin → [preprocess names...]
-    by_origin: dict[str, list[str]] = {}
-    for name, entry in processed.items():
-        origin = preprocess_manifest.entry_origin(entry, name)
-        by_origin.setdefault(origin, []).append(name)
-
-    # ADR 0010 §去重 scope：去重已下沉到 train 集（per-version 审核），
-    # download 池不再过滤；老项目里残留的 duplicate_removed 标记仅在老
-    # endpoint 范围内有意义（PR-5 删），Curation 候选不该被它影响。
     entries: list[dict[str, Any]] = []
     if download_dir.exists():
         for f in sorted(download_dir.iterdir()):
             if not f.is_file() or f.suffix.lower() not in IMAGE_EXTS:
                 continue
-            derivatives = by_origin.get(f.name)
-            if derivatives:
-                # Expand each preprocess derivative as its own row
-                for pname in sorted(derivatives):
-                    pp = pdir / "preprocess" / pname
-                    try:
-                        mtime = pp.stat().st_mtime
-                    except OSError:
-                        continue
-                    entries.append({"name": pname, "mtime": mtime})
-            else:
-                try:
-                    mtime = f.stat().st_mtime
-                except OSError:
-                    continue
-                entries.append({"name": f.name, "mtime": mtime})
-    entries.sort(key=lambda e: e["name"])
+            try:
+                mtime = f.stat().st_mtime
+            except OSError:
+                continue
+            entries.append({"name": f.name, "mtime": mtime})
     return entries
 
 

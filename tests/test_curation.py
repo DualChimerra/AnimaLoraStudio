@@ -180,13 +180,14 @@ def test_copy_to_train_uses_original_when_unprocessed(env) -> None:
     assert copied.read_bytes() == b"original-bytes"
 
 
-def test_curation_view_expands_multi_crop_derivatives(env) -> None:
-    """Multi-crop fan-out: download/X.png 派生 X_c0.png / X_c1.png，
-    筛选 left 展开为 N 行可单独勾选，原 X.png 不再单独出现。"""
+def test_curation_view_does_not_expand_multi_crop_derivatives(env) -> None:
+    """ADR 0010 fixup（2026-06-04）：Curation 跟预处理派生解耦。
+    multi-crop fan-out 后 left 仍按 download 原图显示（不展开 X_c0/X_c1），
+    跟 list_train 按 origin 去重保持命名空间一致（避免 used 排除失败）。
+    """
     _dl(env, "X.png", blob=b"orig")
     _dl(env, "Y.png", blob=b"orig")
     pdir = projects.project_dir(env["p"]["id"], env["p"]["slug"])
-    # 模拟 multi-crop fan-out 写盘 + manifest
     (pdir / "preprocess").mkdir(parents=True, exist_ok=True)
     (pdir / "preprocess" / "X_c0.png").write_bytes(b"head")
     (pdir / "preprocess" / "X_c1.png").write_bytes(b"body")
@@ -200,8 +201,8 @@ def test_curation_view_expands_multi_crop_derivatives(env) -> None:
     )
     with db.connection_for(env["db"]) as conn:
         view = curation.curation_view(conn, env["p"]["id"], env["v"]["id"])
-    # X 派生为 c0 / c1；Y 未处理保持原名；X.png 自身不在 left
-    assert set(_names(view["left"])) == {"X_c0.png", "X_c1.png", "Y.png"}
+    # left 按 download 物理图（X.png + Y.png），不展开派生
+    assert set(_names(view["left"])) == {"X.png", "Y.png"}
 
 
 def test_copy_to_train_accepts_preprocess_derivative_name(env) -> None:
