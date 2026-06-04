@@ -323,3 +323,36 @@ def test_state_dict_round_trip_v2():
     s2.load_state_dict(state)
     np.testing.assert_array_equal(s2._mse_ema, s1._mse_ema)
     assert list(s2._fifo[2]) == [2.0]
+
+
+# ---------------------------------------------------------------------------
+# Reg 集 record mask（loop.py:141 行为，C3）
+# ---------------------------------------------------------------------------
+
+
+def test_record_accepts_partial_batch_after_reg_mask():
+    """模拟 loop.py 用 loss_weight≥0.99 mask 跳过 reg 集样本后再 record。
+
+    InfoNoise 不应假定每次 record 都收到固定 batch size — main+reg 混合 batch
+    经 mask 后样本数变少，scheduler 必须能正确处理。
+    """
+    s = InfoNoiseScheduler(K=4, N_warm=1, M=1, B=4, N_min=1, beta=0.5)
+    # 模拟 batch=4: 2 个 main (loss_weight=1.0) + 2 个 reg (loss_weight=0.3)
+    t_full = torch.tensor([0.1, 0.5, 0.9, 0.5])
+    mse_full = torch.tensor([10.0, 5.0, 1.0, 5.0])
+    lw = torch.tensor([1.0, 0.3, 0.3, 1.0])
+    main_mask = lw >= 0.99
+    # 应取 idx 0 + 3 = 2 个样本进 record
+    s.record(t_full[main_mask], mse_full[main_mask])
+    assert s._internal_step == 1  # 1 次调用
+    assert int(s._n_count.sum()) == 2  # 累计 2 个样本进 bin
+
+
+def test_record_handles_empty_after_mask():
+    """边界 case：整 batch 全是 reg 集，mask 后空 → record 0 个样本应安全。"""
+    s = InfoNoiseScheduler(K=4, N_warm=1, M=1, B=4, N_min=1, beta=0.5)
+    empty_t = torch.tensor([], dtype=torch.float32)
+    empty_mse = torch.tensor([], dtype=torch.float32)
+    s.record(empty_t, empty_mse)
+    assert int(s._n_count.sum()) == 0
+    assert s._internal_step == 1  # 仍计入"一次 record"

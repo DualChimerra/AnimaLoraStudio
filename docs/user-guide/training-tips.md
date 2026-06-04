@@ -202,7 +202,17 @@ EDM/Karras 论文里 δ=0.15 是常用经验值。
 
 **注意**：InfoNoise 启用后 `timestep_sampling` 字段仅用于热身期。正式阶段由自适应 CDF 接管。
 
-**与 `loss_weighting` 的关系**：InfoNoise 用未加权 MSE 估各噪声区间的信息量；这是论文 entropy rate 推导的必要前提。如果同时启用 `loss_weighting`（`min_snr` / `detail_inv_t` / `cosmap`），两个机制在做同一件事的两种方式（自适应 schedule resample vs 手工 schedule reweight），会互相消磨。schema 校验拦截这种组合，需要二选一。
+**与其他训练选项的关系**：InfoNoise 用未加权 MSE 估各噪声区间的信息量；这是论文 entropy rate 推导的必要前提。下面列出已知会跟 InfoNoise 产生干扰的配置：
+
+| 配置 | 关系 | 处置 |
+|------|------|------|
+| `loss_weighting != none` (`min_snr`/`detail_inv_t`/`cosmap`) | 两个机制都在重塑 σ schedule（自适应 resample vs 手工 reweight），叠加互相消磨 | schema 互斥，保存配置时报错 |
+| `loss_type=huber` | huber 削峰让 outlier 区间不学，但 InfoNoise 用 raw MSE 看到 outlier 仍高 → 推 mass 进去 → 反馈环 | schema 互斥 |
+| `timestep_schedule_shift != 1.0` | shift 只在 baseline 路径生效；CDF 接管后静默失效 | schema 互斥 |
+| `noise_offset > 0` | 改 mse 形状（低 σ 端被 offset 抬高），InfoNoise 学到的是含 offset 的 schedule | 可同开但 schedule 形状会变；如想跟论文一致建议关 noise_offset |
+| `noise_enhancement_type=pyramid` | 同上，多尺度叠加比 offset 影响更大 | 同上 |
+| 正则集（`reg_data_dir != null` + `reg_weight < 1`） | reg 集分布跟 train 集不同；InfoNoise 自动跳过 reg 集样本仅学 train 集分布（loop 内 mask 处理） | 透明处理，无需用户操作 |
+| LoRA dropout（`lora_dropout` / `lora_rank_dropout` / `lora_module_dropout`） | 加梯度噪声，不改 mse 形状的系统性偏移 | 可同开，FIFO + EMA 双层平滑能 absorb |
 
 ### 噪声增强
 

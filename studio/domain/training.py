@@ -573,6 +573,40 @@ class TrainingConfig(BaseModel):
             )
         return self
 
+    @model_validator(mode="after")
+    def _validate_infonoise_schedule_shift_exclusive(self) -> "TrainingConfig":
+        """InfoNoise 与 timestep_schedule_shift 互斥：InfoNoise CDF 接管后 shift 静默失效。
+
+        timestep_schedule_shift 仅在 sample_t 的 baseline 路径生效；InfoNoise sample()
+        走 CDF 路径直接返回 t，不再应用 shift。同开时用户期望的"全程偏移"会在 warmup
+        结束后悄悄消失。强制二选一，避免 silent 行为切换。
+        """
+        if self.infonoise_enabled and self.timestep_schedule_shift != 1.0:
+            raise ValueError(
+                f"infonoise_enabled=true 与 timestep_schedule_shift={self.timestep_schedule_shift} 互斥："
+                "InfoNoise 自适应 CDF 接管后 schedule_shift 不再生效，会在 warmup 结束时"
+                "悄悄切换行为。请二选一：(a) 关闭 InfoNoise 保留 schedule_shift；"
+                "或 (b) 设 timestep_schedule_shift=1.0 走 InfoNoise 自适应路径。"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_infonoise_loss_type_exclusive(self) -> "TrainingConfig":
+        """InfoNoise 与 loss_type=huber 互斥：huber 削峰让 InfoNoise 推 mass 进死循环。
+
+        InfoNoise 用 raw MSE（不削峰）估各噪声区间的信息量，huber 让模型对 outlier
+        不学。某区间 outlier 多时，InfoNoise 看到 raw MSE 仍高 → 推 mass 过去 → huber
+        让模型仍然不学那里 → raw MSE 仍高 → InfoNoise 继续推 mass 过去（反馈环）。
+        """
+        if self.infonoise_enabled and self.loss_type == "huber":
+            raise ValueError(
+                "infonoise_enabled=true 与 loss_type=huber 互斥：huber 对 outlier 鲁棒"
+                "（不学），但 InfoNoise 用 raw MSE 看到 outlier 区间高损失会持续把采样推过去，"
+                "形成 mass 集中在不学的区间的反馈环。请二选一：(a) 关闭 InfoNoise 保留 huber；"
+                "或 (b) 设 loss_type=mse 走 InfoNoise 自适应路径。"
+            )
+        return self
+
     # ---------------------------------------------------------------- 输出/保存
     output_dir: str = Field(
         "./output",
