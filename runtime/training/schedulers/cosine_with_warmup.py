@@ -19,18 +19,26 @@ def build(args, optimizer, total_steps: Optional[int]):
 
     total_steps = int(total_steps)
     warmup_steps = int(getattr(args, "lr_scheduler_warmup_steps", 100) or 0)
-    eta_min = float(getattr(args, "lr_scheduler_eta_min", 0.0) or 0.0)
+    eta_min = max(0.0, float(getattr(args, "lr_scheduler_eta_min", 0.0) or 0.0))
     if total_steps <= 0:
         logger.warning("cosine_with_warmup 调度器 total_steps<=0，回退到 none")
         return None
     warmup_steps = max(0, min(warmup_steps, total_steps))
+    if total_steps <= warmup_steps:
+        logger.warning(
+            "cosine_with_warmup: total_steps(%s) <= warmup_steps(%s)，"
+            "整个训练只跑 warmup，没有 cosine 衰减段",
+            total_steps, warmup_steps,
+        )
 
     def make_lambda(base_lr: float):
         min_factor = eta_min / base_lr if base_lr > 0 else 0.0
 
         def lr_lambda(step: int) -> float:
+            # warmup: step / warmup_steps  (对齐 transformers /
+            # diffusers / PEFT / sd-scripts 全社区约定，step 0-indexed)
             if warmup_steps > 0 and step < warmup_steps:
-                return max(min_factor, float(step + 1) / float(warmup_steps))
+                return float(step) / float(warmup_steps)
             decay_steps = max(1, total_steps - warmup_steps)
             progress = min(1.0, max(0.0, float(step - warmup_steps) / float(decay_steps)))
             cosine_factor = 0.5 * (1.0 + math.cos(math.pi * progress))

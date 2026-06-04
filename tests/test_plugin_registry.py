@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 import types
 from pathlib import Path
@@ -97,11 +98,92 @@ def test_cosine_with_warmup_scheduler_warms_then_decays() -> None:
         optimizer.step()
         scheduler.step()
 
-    assert lrs[0] == pytest.approx(0.5)
-    assert lrs[1] == pytest.approx(1.0)
+    # warmup: step/warmup_steps（对齐 transformers / sd-scripts，step 0-indexed）
+    assert lrs[0] == pytest.approx(0.0)
+    assert lrs[1] == pytest.approx(0.5)
     assert lrs[2] == pytest.approx(1.0)
     assert lrs[-1] < lrs[2]
     assert lrs[-1] >= 0.1
+
+
+def test_cosine_with_warmup_zero_warmup_starts_at_base_lr() -> None:
+    torch = pytest.importorskip("torch")
+    from training.schedulers import build_scheduler
+
+    param = torch.nn.Parameter(torch.tensor([1.0]))
+    optimizer = torch.optim.SGD([param], lr=1.0)
+    args = argparse.Namespace(
+        lr_scheduler="cosine_with_warmup",
+        lr_scheduler_warmup_steps=0,
+        lr_scheduler_eta_min=0.0,
+    )
+    scheduler = build_scheduler(args, optimizer, total_steps=4)
+
+    # 没 warmup：step 0 直接走 cosine 起点 = base_lr
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(1.0)
+    scheduler.step()
+    # step 1：cosine progress = 1/4，lr ≈ 0.5·(1+cos(π/4)) ≈ 0.853
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(0.5 * (1.0 + math.cos(math.pi * 0.25)))
+
+
+def test_cosine_with_warmup_multi_param_group_respects_eta_min() -> None:
+    """多 param_group 不同 base_lr 时，每个 group 都 floor 在同一个绝对 eta_min。"""
+    torch = pytest.importorskip("torch")
+    from training.schedulers import build_scheduler
+
+    p1 = torch.nn.Parameter(torch.tensor([1.0]))
+    p2 = torch.nn.Parameter(torch.tensor([1.0]))
+    optimizer = torch.optim.SGD(
+        [{"params": [p1], "lr": 1e-3}, {"params": [p2], "lr": 1e-4}],
+    )
+    args = argparse.Namespace(
+        lr_scheduler="cosine_with_warmup",
+        lr_scheduler_warmup_steps=0,
+        lr_scheduler_eta_min=1e-6,
+    )
+    scheduler = build_scheduler(args, optimizer, total_steps=10)
+
+    # 走到 cosine 末端
+    for _ in range(10):
+        optimizer.step()
+        scheduler.step()
+
+    # 两个 group 都 floor 在 eta_min=1e-6 的绝对下限
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(1e-6, rel=1e-5)
+    assert optimizer.param_groups[1]["lr"] == pytest.approx(1e-6, rel=1e-5)
+
+
+def test_cosine_with_warmup_no_total_steps_returns_none() -> None:
+    from training.schedulers import build_scheduler
+
+    args = argparse.Namespace(
+        lr_scheduler="cosine_with_warmup",
+        lr_scheduler_warmup_steps=10,
+        lr_scheduler_eta_min=0.0,
+    )
+    assert build_scheduler(args, optimizer=None, total_steps=None) is None
+    assert build_scheduler(args, optimizer=None, total_steps=0) is None
+    assert build_scheduler(args, optimizer=None, total_steps=-5) is None
+
+
+def test_cosine_with_warmup_clamps_negative_eta_min() -> None:
+    """eta_min<0 被 clamp 到 0，保证 lr 永不为负。"""
+    torch = pytest.importorskip("torch")
+    from training.schedulers import build_scheduler
+
+    param = torch.nn.Parameter(torch.tensor([1.0]))
+    optimizer = torch.optim.SGD([param], lr=1.0)
+    args = argparse.Namespace(
+        lr_scheduler="cosine_with_warmup",
+        lr_scheduler_warmup_steps=0,
+        lr_scheduler_eta_min=-0.5,
+    )
+    scheduler = build_scheduler(args, optimizer, total_steps=4)
+
+    for _ in range(4):
+        assert optimizer.param_groups[0]["lr"] >= 0.0
+        optimizer.step()
+        scheduler.step()
 
 
 def test_ppsf_zero_prodigy_steps_disables_freeze(monkeypatch) -> None:
