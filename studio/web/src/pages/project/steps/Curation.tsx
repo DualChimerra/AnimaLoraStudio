@@ -208,6 +208,9 @@ export default function CurationPage() {
 
   // ADR 0010 fixup: train 区 thumb 走 download bucket + manifest.origin，
   // 显示"预处理前的样子"。trainEntries 已带 origin（backend list_train 加）。
+  // 用 raw=1 跳过 resolve_origin —— 否则老 ADR 0004 设计会 hijack 到
+  // preprocess/{派生} 派生（X.jpg → preprocess/X_c0.png），但 ADR 0010
+  // 后 preprocess/ 不再被 worker 写 → 404 裂图。
   const rightOriginByName = useMemo(() => {
     const m = new Map<string, string>()
     for (const e of trainEntries) {
@@ -217,7 +220,10 @@ export default function CurationPage() {
   }, [trainEntries])
 
   const leftItems = useMemo(
-    () => leftSortedNames.map((n) => ({ name: n, thumbUrl: api.projectThumbUrl(project.id, n) })),
+    () => leftSortedNames.map((n) => ({
+      name: n,
+      thumbUrl: api.projectThumbUrl(project.id, n, 'download', 256, undefined, true),
+    })),
     [leftSortedNames, project.id]
   )
   const rightItems = useMemo(
@@ -228,6 +234,7 @@ export default function CurationPage() {
             name: n,
             thumbUrl: api.projectThumbUrl(
               project.id, rightOriginByName.get(n) ?? n, 'download', 256,
+              undefined, true,
             ),
           })),
     [rightSortedNames, project.id, versionId, rightOriginByName]
@@ -235,7 +242,10 @@ export default function CurationPage() {
 
   const onLeftHover = useCallback(
     (name: string) =>
-      setFocus({ side: 'left', name, url: api.projectThumbUrl(project.id, name, 'download', 768) }),
+      setFocus({
+        side: 'left', name,
+        url: api.projectThumbUrl(project.id, name, 'download', 768, undefined, true),
+      }),
     [project.id]
   )
 
@@ -247,7 +257,7 @@ export default function CurationPage() {
         side: 'right',
         folder: rightFolder,
         name,
-        url: api.projectThumbUrl(project.id, origin, 'download', 768),
+        url: api.projectThumbUrl(project.id, origin, 'download', 768, undefined, true),
       })
     },
     [versionId, project.id, rightFolder, rightOriginByName]
