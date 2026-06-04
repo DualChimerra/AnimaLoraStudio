@@ -146,7 +146,6 @@ def project_thumb(
     if not p:
         raise HTTPException(404, f"项目不存在: id={pid}")
     pdir = projects.project_dir(p["id"], p["slug"])
-    preprocess_manifest.ensure_manifest(pdir)
 
     if bucket == "preprocess":
         # Direct addressing — no resolve. Path traversal guard against the

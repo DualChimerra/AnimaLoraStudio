@@ -1,6 +1,6 @@
 # 0004 — 预处理状态用单 manifest 替代「双 bucket + per-image sidecar」
 
-**状态**：Accepted（amended 2026-05-21 — 见 Addendum 1）
+**状态**：Superseded by [0010](0010-preprocess-train-scope.md)（2026-06-04 — 预处理已下沉 version 级 train scope；本 ADR 的项目级 `preprocess/` + `preprocess/manifest.json` 写路径已删，仅保留只读 fallback 给 0010 §`ensure_train_manifest` 老项目迁移用）
 **日期**：2026-05-15
 **决策者**：@WalkingMeatAxolotl
 

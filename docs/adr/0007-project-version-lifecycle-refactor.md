@@ -197,6 +197,28 @@ output_lora_path, last_task_id, last_failure_reason
 | 6 | frontend 项目列表卡片 | 3 |
 | 7 | 清理 + `_v9` destructive migration (DROP `stage` 列) | 2, 3, 4, 5, 6 |
 
+## Addendum 1 — `preprocessing` phase（2026-06-04）
+
+ADR 0010 把预处理从项目 scope 下沉到 version scope（`versions/{label}/train/`
+上原地做 upscale / crop）。phase 模型相应扩展一个 step：
+
+### 修改
+
+- **Phase 增 `preprocessing`**，插在 `curating` 之后、`tagging` 之前。完整顺序：
+  `curating → preprocessing → tagging → editing → regularizing → ready`
+- **可跳过集合扩到 `{preprocessing, regularizing}`**：用户不需要 upscale 也能继续
+- **完成判定**：`preprocessing` 没有强制校验（同 `regularizing`）—— 跳过即下一步
+- **DB migration `_v11`**：现存 `phase ∈ {tagging, editing, regularizing, ready}`
+  且 train 集非空的 version 一次性回填 `preprocessing` 状态，避免老 version 在
+  UI 上突然"退步"到 preprocessing 步骤
+
+### 理由
+
+- 预处理 = "改 train 集像素"，跟 "改 train 集图集合"（curating）和 "标 caption"
+  （tagging）是三件独立动作，混进 curating 会让校验混乱（curating 校验"≥1 张图"
+  vs preprocessing 校验"全部 upscale"是两套半成品状态）
+- 跳过性匹配实际：很多 LoRA workflow 不 upscale 直接打标
+
 ## 参考
 
 - `docs/design/project-version-task-lifecycle.md` —— 两轮 review 完整讨论稿
