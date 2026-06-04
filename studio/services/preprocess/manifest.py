@@ -951,6 +951,30 @@ def train_swap_entry(
         _atomic_write(target, m)
 
 
+def train_remove_entries(
+    project_dir: Path,
+    version_label: str,
+    names: list[str],
+) -> int:
+    """批量删 train manifest entries（按 entry key）。返回实际删除数。
+
+    给 `curation.remove_from_train` 用：用户从 train 删一张 download 原图时，
+    后者按 origin 反查得到 N 个派生 rel path（multi-crop fan-out），一次性
+    pop + 原子写盘比逐条 mutation 高效。
+    """
+    ensure_train_manifest(project_dir, version_label)
+    target = train_manifest_path(project_dir, version_label)
+    removed = 0
+    with _LOCK:
+        m = _read_train_target(target)
+        for name in names:
+            if m["images"].pop(name, None) is not None:
+                removed += 1
+        if removed:
+            _atomic_write(target, m)
+    return removed
+
+
 def train_clear_all(project_dir: Path, version_label: str) -> None:
     """清空本 version 的 train manifest 状态——只清 manifest 文件，**不动**
     train/ 物理文件。

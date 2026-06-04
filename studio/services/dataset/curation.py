@@ -166,32 +166,51 @@ def list_download(conn, project_id: int) -> list[dict[str, Any]]:
 def list_train(
     conn, project_id: int, version_id: int
 ) -> dict[str, list[dict[str, Any]]]:
-    """train 子文件夹 → [{name, mtime, origin}, ...]。
+    """train 子文件夹 → `[{name, mtime, origin}, ...]`（按 origin 去重）。
 
-    `origin`（ADR 0010 fixup 2026-06-04）：train manifest 反查 download 原图
-    文件名。Curation 右侧显示 download 原图（**预处理前的样子**）而不是
-    train 物理产物，避免 multi-crop fan-out / 去重 / upscale 改字节后右侧
-    缩略图"显示移动"。预处理结果仍可在 Preprocess Overview 看。
-    缺 manifest entry / 老项目 fallback：origin 用 name 自身（1:1 同名兜底）。
+    ADR 0010 fixup（2026-06-04）：Curation 右侧 train 区显示"用户筛选时
+    选了哪些 download 原图"，跟预处理后状态解耦：
+
+    - 按 manifest entry.origin **去重**：multi-crop fan-out 派生（X_c0.png +
+      X_c1.png 同 origin=X.jpg）只显示一条
+    - 不过滤 `duplicate_removed` entry：用户当时筛选选了它，时间上在预处理
+      之前，UI 该显示
+    - 扫 train manifest 而不是物理文件（fan-out 派生数量跟筛选语义无关）
+    - 返回 `name` 用 **origin**（download 文件名），跟 `copy_to_train` /
+      `remove_from_train` 的 name 语义对齐到 download scope
+
+    `mtime` 用 manifest entry 的 mtime（物理产物 mtime；多派生取第一条）；
+    前端按时间排序仍稳定。老项目 fallback：ensure_train_manifest 重建后
+    走同一路径。
     """
     p, v, train = _version_train_dir(conn, project_id, version_id)
     if not train.exists():
         return {}
     pdir = projects.project_dir(p["id"], p["slug"])
+    preprocess_manifest.ensure_train_manifest(pdir, v["label"])
     tm = preprocess_manifest.train_load(pdir, v["label"])
-    entries_by_rel = tm.get("images", {})
+    entries = tm.get("images", {})
 
     out: dict[str, list[dict[str, Any]]] = {}
     for sub in sorted(train.iterdir()):
         if not sub.is_dir():
             continue
-        items: list[dict[str, Any]] = []
+        # 物理目录决定显示集合（含 duplicate_removed 软删除的图：物理还在）+
+        # 兼容老路径（copy_to_train 不写 manifest，但物理图能扫到）。manifest
+        # 仅用于反查 origin → 按 origin 去重（multi-crop fan-out 折叠成一行）。
+        items_by_origin: dict[str, dict[str, Any]] = {}
         for raw in _list_image_entries(sub):
             rel = f"{sub.name}/{raw['name']}"
-            entry = entries_by_rel.get(rel, {})
+            entry = entries.get(rel, {})
             origin = preprocess_manifest.entry_origin(entry, raw["name"])
-            items.append({**raw, "origin": origin})
-        out[sub.name] = items
+            if origin in items_by_origin:
+                continue
+            items_by_origin[origin] = {
+                "name": origin,
+                "origin": origin,
+                "mtime": raw["mtime"],
+            }
+        out[sub.name] = sorted(items_by_origin.values(), key=lambda e: e["name"])
     return out
 
 
@@ -368,27 +387,79 @@ def remove_from_train(
     folder: str,
     files: list[str],
 ) -> dict[str, list[str]]:
-    """从 train/{folder}/ 删除文件（含同名 metadata）；download 不动。"""
+    """从 train/{folder}/ 删除 download 原图的所有 train 派生 + 同 stem
+    metadata；download 不动。
+
+    ADR 0010 fixup（2026-06-04）：`files` 是 **origin 名**（download 文件
+    名），跟 list_train 返回的 `name` 字段一致。本函数查 train manifest
+    找所有 origin 匹配的 entry，删它们的 train 物理文件 + manifest entry
+    + 同 stem caption (.txt/.json)。这样删一行 = 删该原图在 train 里的
+    全部派生（multi-crop fan-out 一并清掉）。
+    """
     _validate_folder(folder)
-    _, _, train = _version_train_dir(conn, project_id, version_id)
+    p, v, train = _version_train_dir(conn, project_id, version_id)
+    pdir = projects.project_dir(p["id"], p["slug"])
     fdir = train / folder
+    preprocess_manifest.ensure_train_manifest(pdir, v["label"])
+    tm = preprocess_manifest.train_load(pdir, v["label"])
+    entries = tm.get("images", {})
+
+    # origin → [rel paths in this folder]
+    by_origin: dict[str, list[str]] = {}
+    for rel, entry in entries.items():
+        if "/" not in rel:
+            continue
+        f, filename = rel.split("/", 1)
+        if f != folder:
+            continue
+        origin = preprocess_manifest.entry_origin(entry, filename)
+        by_origin.setdefault(origin, []).append(rel)
+
     removed: list[str] = []
     missing: list[str] = []
-    for name in files:
-        _validate_filename(name)
-        p = fdir / name
-        if not p.exists():
-            missing.append(name)
+    rels_to_pop: list[str] = []
+    for origin_name in files:
+        _validate_filename(origin_name)
+        rels = by_origin.get(origin_name, [])
+        if not rels:
+            # manifest 没记 → 兜底直接删 fdir / origin_name（老项目同名场景）
+            pp = fdir / origin_name
+            if pp.exists():
+                pp.unlink()
+                for ext in _META_EXTS:
+                    mp = pp.with_suffix(ext)
+                    if mp.exists():
+                        try:
+                            mp.unlink()
+                        except OSError:
+                            pass
+                removed.append(origin_name)
+            else:
+                missing.append(origin_name)
             continue
-        p.unlink()
-        for ext in _META_EXTS:
-            mp = p.with_suffix(ext)
-            if mp.exists():
+        # 删所有派生物理文件 + 各派生 stem 的 metadata
+        for rel in rels:
+            _, filename = rel.split("/", 1)
+            pp = fdir / filename
+            if pp.exists():
                 try:
-                    mp.unlink()
+                    pp.unlink()
                 except OSError:
                     pass
-        removed.append(name)
+            for ext in _META_EXTS:
+                mp = pp.with_suffix(ext)
+                if mp.exists():
+                    try:
+                        mp.unlink()
+                    except OSError:
+                        pass
+        rels_to_pop.extend(rels)
+        removed.append(origin_name)
+
+    if rels_to_pop:
+        preprocess_manifest.train_remove_entries(
+            pdir, v["label"], rels_to_pop,
+        )
     return {"removed": removed, "missing": missing}
 
 
