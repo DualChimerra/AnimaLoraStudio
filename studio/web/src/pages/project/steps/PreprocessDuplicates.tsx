@@ -160,7 +160,7 @@ export default function PreprocessDuplicatesPage() {
       <div className="flex flex-col h-full gap-3 min-h-0">
         <div className="grid gap-3 flex-1 min-h-0" style={{ gridTemplateColumns: '1fr 260px' }}>
           <div className="flex flex-col gap-2 min-h-0 min-w-0">
-            <PreprocessToolsBar current="dedupe" projectId={project.id} />
+            <PreprocessToolsBar current="dedupe" projectId={project.id} versionId={vid} />
             <DuplicateOperationPanel
               options={options}
               result={result}

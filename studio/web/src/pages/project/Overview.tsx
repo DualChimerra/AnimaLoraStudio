@@ -1082,14 +1082,14 @@ function DetailGrid({ project, version }: { project: ProjectDetail; version: Ver
           title={t('overview.detail.resolutionDist')}
           bins={pixelBins}
           emptyHint={t('overview.detail.emptyResolution')}
-          action={{ label: `② ${t('nav.preprocess')}`, onClick: () => navigate(`/projects/${project.id}/preprocess?tool=upscale`) }}
+          action={version ? { label: `② ${t('nav.preprocess')}`, onClick: () => navigate(`/projects/${project.id}/v/${version.id}/preprocess?tool=upscale`) } : undefined}
           phase={`② ${t('nav.preprocess')}`}
         />
         <HistTileCard
           title={t('overview.detail.aspectDist')}
           bins={arBins}
           emptyHint={t('overview.detail.emptyAspect')}
-          action={{ label: `② ${t('nav.preprocess')}`, onClick: () => navigate(`/projects/${project.id}/preprocess?tool=crop`) }}
+          action={version ? { label: `② ${t('nav.preprocess')}`, onClick: () => navigate(`/projects/${project.id}/v/${version.id}/preprocess?tool=crop`) } : undefined}
           phase={`② ${t('nav.preprocess')}`}
         />
         <RegTileCard

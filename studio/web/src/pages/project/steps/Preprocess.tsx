@@ -350,7 +350,7 @@ export default function PreprocessPage() {
         <div className="grid gap-3 flex-1 min-h-0" style={{ gridTemplateColumns: '1fr 260px' }}>
           {/* 左栏 */}
           <div className="flex flex-col gap-2 min-h-0 min-w-0">
-            <PreprocessToolsBar current="upscale" projectId={project.id} />
+            <PreprocessToolsBar current="upscale" projectId={project.id} versionId={vid} />
             <OperationPanel
               tileSize={tileSize}
               setTileSize={setTileSize}

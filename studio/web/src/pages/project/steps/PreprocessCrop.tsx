@@ -331,7 +331,7 @@ export default function PreprocessCropPage() {
         <div className="grid gap-3 flex-1 min-h-0" style={{ gridTemplateColumns: '1fr 260px' }}>
           {/* 左栏 */}
           <div className="flex flex-col gap-2 min-h-0 min-w-0">
-            <PreprocessToolsBar current="crop" projectId={project.id} />
+            <PreprocessToolsBar current="crop" projectId={project.id} versionId={vid} />
             <OperationPanel
               arSel={arSel} setArSel={setArSel}
               customAR={customAR} setCustomAR={setCustomAR}
@@ -396,7 +396,7 @@ export default function PreprocessCropPage() {
                 {!loading && images.length === 0 && (
                   <p className="text-fg-tertiary text-sm">
                     {t('preprocessCrop.emptyWorkspace')}{' '}
-                    <Link to={`/projects/${project.id}/preprocess?tool=upscale`} className="text-accent hover:underline">
+                    <Link to={`/projects/${project.id}/v/${vid}/preprocess?tool=upscale`} className="text-accent hover:underline">
                       {t('preprocessCrop.goToUpscale')}
                     </Link>
                   </p>
