@@ -148,20 +148,12 @@ export default function PreprocessOverviewPage() {
   const removedItems = useMemo<GridItem[]>(
     () => removed.map((im) => ({
       name: im.name,
-      // duplicate_removed 物理仍在 train/{name}；缩略图走 train bucket
-      thumbUrl: (() => {
-        const { folder, filename } = splitRel(im.name)
-        return api.versionThumbUrl(project.id, vid, 'train', filename, folder, 256)
-          + `&_=${im.mtime}`
-      })(),
-      previewUrl: (() => {
-        const { folder, filename } = splitRel(im.name)
-        return api.versionThumbUrl(project.id, vid, 'train', filename, folder, 1600)
-          + `&_=${im.mtime}`
-      })(),
+      // duplicate_removed 物理已删；缩略图走 download bucket + im.source (origin)
+      thumbUrl: api.projectThumbUrl(project.id, im.source, 'download', 256, im.mtime, true),
+      previewUrl: api.projectThumbUrl(project.id, im.source, 'download', 1600, im.mtime, true),
       caption: im.w && im.h ? `${im.source} · ${im.w}×${im.h}` : im.source,
     })),
-    [removed, project.id, vid],
+    [removed, project.id],
   )
 
   const items = tab === 'all' ? allItems : removedItems

@@ -471,20 +471,22 @@ def list_crop_workspace_train(
 def list_duplicate_removed_workspace_train(
     p: dict[str, Any], version_label: str
 ) -> list[dict[str, Any]]:
-    """train scope 软删除工作集。物理文件仍在 train/{name}（mark_duplicate_removed
-    不删文件），缩略图按 train bucket 取（thumb endpoint PR-3 改）。
+    """train scope 软删除工作集（"已删除"tab）。
+
+    `mark_duplicate_removed` 已删 train/{name} 物理图；本函数扫 manifest tombstone，
+    缩略图 metadata 从 `download/{origin}` 现读，前端 thumb 也走 download bucket。
     """
     from PIL import Image
 
     pdir = project_root(p)
-    train_dir = version_train_dir(p, version_label)
+    download_dir = pdir / "download"
     removed = preprocess_manifest.train_duplicate_removed(pdir, version_label)
 
     items: list[dict[str, Any]] = []
     for name in sorted(removed.keys()):
         entry = removed[name]
         origin = preprocess_manifest.entry_origin(entry, name)
-        src = train_dir / name
+        src = download_dir / origin
         if not src.is_file():
             items.append({
                 "name": name,

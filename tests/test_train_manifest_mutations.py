@@ -183,6 +183,8 @@ def test_replace_with_crops_origin_fallback_to_source(
 
 def test_mark_duplicate_removed_on_existing_processed(project_dir: Path) -> None:
     _train_path(project_dir, "A.png").write_bytes(b"a")
+    # caption sidecar 也写一份，验证一起删
+    _train_path(project_dir, "A.txt").write_text("tag", encoding="utf-8")
     pm.train_add_processed(project_dir, "v1", "A.png", {"origin": "A.jpg"})
 
     result = pm.train_mark_duplicate_removed(project_dir, "v1", ["A.png"])
@@ -192,8 +194,9 @@ def test_mark_duplicate_removed_on_existing_processed(project_dir: Path) -> None
     assert entry is not None
     assert entry["kind"] == pm.DUPLICATE_REMOVED_KIND
     assert entry["origin"] == "A.jpg"
-    # train/A.png 物理文件**不删**——保留作"已审核但跳过"标记
-    assert _train_path(project_dir, "A.png").exists()
+    # train/A.png + caption sidecar 都物理删除（tombstone 仅在 manifest）
+    assert not _train_path(project_dir, "A.png").exists()
+    assert not _train_path(project_dir, "A.txt").exists()
 
 
 def test_mark_duplicate_removed_on_unrecorded_train_file(
@@ -233,12 +236,32 @@ def test_mark_duplicate_removed_already_marked_skipped(project_dir: Path) -> Non
 
 
 def test_restore_duplicate_removed_unwinds_mark(project_dir: Path) -> None:
-    _train_path(project_dir, "D.png").write_bytes(b"d")
+    """restore 从 download/{origin} 复制回 train/{name}（图+caption）+ 删 tombstone。"""
+    # 先准备 download/D.png（原图）+ caption
+    (project_dir / "download").mkdir(exist_ok=True)
+    (project_dir / "download" / "D.png").write_bytes(b"d-original")
+    (project_dir / "download" / "D.txt").write_text("tag", encoding="utf-8")
+    _train_path(project_dir, "D.png").write_bytes(b"d-train")
     pm.train_mark_duplicate_removed(project_dir, "v1", ["D.png"])
+    assert not _train_path(project_dir, "D.png").exists()  # mark 已删
 
     result = pm.train_restore_duplicate_removed(project_dir, "v1", ["D.png"])
-    assert result == {"restored": ["D.png"], "missing": []}
+    assert result == {"restored": ["D.png"], "missing": [], "no_origin": []}
     assert pm.train_get_entry(project_dir, "v1", "D.png") is None
+    assert _train_path(project_dir, "D.png").read_bytes() == b"d-original"
+    assert _train_path(project_dir, "D.txt").read_text(encoding="utf-8") == "tag"
+
+
+def test_restore_duplicate_removed_no_origin(project_dir: Path) -> None:
+    """download/{origin} 缺失 → no_origin，entry 保留供 UI 提示。"""
+    _train_path(project_dir, "F.png").write_bytes(b"f")
+    pm.train_add_processed(project_dir, "v1", "F.png", {"origin": "F.jpg"})
+    pm.train_mark_duplicate_removed(project_dir, "v1", ["F.png"])
+
+    result = pm.train_restore_duplicate_removed(project_dir, "v1", ["F.png"])
+    assert result == {"restored": [], "missing": [], "no_origin": ["F.png"]}
+    entry = pm.train_get_entry(project_dir, "v1", "F.png")
+    assert entry is not None and entry["kind"] == pm.DUPLICATE_REMOVED_KIND
 
 
 def test_restore_duplicate_removed_missing_when_not_marked(
@@ -248,7 +271,7 @@ def test_restore_duplicate_removed_missing_when_not_marked(
     pm.train_add_processed(project_dir, "v1", "E.png", {"origin": "E.jpg"})
 
     result = pm.train_restore_duplicate_removed(project_dir, "v1", ["E.png"])
-    assert result == {"restored": [], "missing": ["E.png"]}
+    assert result == {"restored": [], "missing": ["E.png"], "no_origin": []}
     # processed entry 不动
     entry = pm.train_get_entry(project_dir, "v1", "E.png")
     assert entry is not None

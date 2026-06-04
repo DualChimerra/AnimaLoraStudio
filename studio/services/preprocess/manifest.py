@@ -471,13 +471,16 @@ def train_mark_duplicate_removed(
     version_label: str,
     names: list[str],
 ) -> dict[str, list[str]]:
-    """标记人工审核去重移除（train scope）。
+    """去重移除（train scope）：物理删除 train/{name} + caption sidecar，manifest
+    entry 改为 `kind=duplicate_removed` 作 tombstone（用于总览页"已删除"tab +
+    `train_restore_duplicate_removed` 恢复）。
 
-    不动磁盘文件——保留 train/{name} 作"已审核但跳过"标记。下游 curate /
-    training 通过查 manifest 判断该图是否参与训练。
+    下游 tagging / training 直接扫 `train/`，物理删除保证图不再出现在 caption
+    队列 / dataset_config 列表里。
 
     每个 version 独立审核（manifest 是 version 级）。fork 时整树复制
-    （ADR 0007 `_copytree("train")`）会把 duplicate_removed 状态带过去。
+    （ADR 0007 `_copytree("train")`）只带物理文件——tombstone 同样会复制因为
+    manifest 也在 train/ 下。
     """
     removed: list[str] = []
     missing: list[str] = []
@@ -493,19 +496,32 @@ def train_mark_duplicate_removed(
             if is_duplicate_removed_entry(entry):
                 skipped.append(name)
                 continue
+            src = train_dir / name
             if entry is not None:
                 origin = entry_origin(entry, name)
                 size = int(entry.get("size", 0) or 0)
-            else:
-                src = train_dir / name
-                if not src.is_file():
-                    missing.append(name)
-                    continue
+            elif src.is_file():
                 origin = name
                 try:
                     size = src.stat().st_size
                 except OSError:
                     size = 0
+            else:
+                missing.append(name)
+                continue
+            # 物理删图 + caption sidecar
+            if src.is_file():
+                try:
+                    src.unlink()
+                except OSError:
+                    pass
+            for ext in (".txt", ".json"):
+                sidecar = src.with_suffix(ext)
+                if sidecar.is_file():
+                    try:
+                        sidecar.unlink()
+                    except OSError:
+                        pass
             m["images"][name] = {
                 "kind": DUPLICATE_REMOVED_KIND,
                 "origin": origin,
@@ -522,25 +538,56 @@ def train_restore_duplicate_removed(
     version_label: str,
     names: list[str],
 ) -> dict[str, list[str]]:
-    """撤销去重移除标记——只删 duplicate_removed entry，不动 train/ 物理文件。
+    """撤销去重移除：从 `download/{entry.origin}` 复制图 + caption 覆盖回
+    `train/{name}`，并删 manifest entry。
 
-    跟老 `restore_duplicate_removed` 同语义，train scope 版。
+    返回三组：
+    - `restored`：成功复原（download 原图存在并已复制覆盖）
+    - `missing`：name 没 entry 或 entry 不是 duplicate_removed
+    - `no_origin`：entry 是 duplicate_removed 但 `download/{origin}` 物理文件
+      缺失——entry 保留，调用方提示用户从外部 import 原图
     """
+    import shutil
+
     restored: list[str] = []
     missing: list[str] = []
+    no_origin: list[str] = []
     ensure_train_manifest(project_dir, version_label)
     target = train_manifest_path(project_dir, version_label)
+    download_dir = project_dir / "download"
+    train_dir = _train_dir(project_dir, version_label)
     with _LOCK:
         m = _read_train_target(target)
         for name in names:
             entry = m["images"].get(name)
-            if is_duplicate_removed_entry(entry):
-                del m["images"][name]
-                restored.append(name)
-            else:
+            if not is_duplicate_removed_entry(entry):
                 missing.append(name)
+                continue
+            origin = entry_origin(entry, name)
+            src = download_dir / origin
+            if not src.is_file():
+                no_origin.append(name)
+                continue
+            dst = train_dir / name
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                shutil.copy2(src, dst)
+            except OSError:
+                no_origin.append(name)
+                continue
+            # caption 跟随：download/{origin_stem}.{ext} → train/{name_stem}.{ext}
+            origin_stem = Path(origin).stem
+            for ext in (".txt", ".json"):
+                cap_src = download_dir / f"{origin_stem}{ext}"
+                if cap_src.is_file():
+                    try:
+                        shutil.copy2(cap_src, dst.with_suffix(ext))
+                    except OSError:
+                        pass
+            del m["images"][name]
+            restored.append(name)
         _atomic_write(target, m)
-    return {"restored": restored, "missing": missing}
+    return {"restored": restored, "missing": missing, "no_origin": no_origin}
 
 
 def train_restore(

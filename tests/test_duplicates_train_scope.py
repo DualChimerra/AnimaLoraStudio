@@ -117,9 +117,9 @@ def test_apply_train_duplicate_marks_manifest(env) -> None:
             names=["1_data/A.png", "1_data/B.png"],
         )
     assert sorted(result["removed"]) == ["1_data/A.png", "1_data/B.png"]
-    # 物理文件保留
-    assert (env["sub"] / "A.png").exists()
-    assert (env["sub"] / "B.png").exists()
+    # 物理文件已删（tombstone 只在 manifest）
+    assert not (env["sub"] / "A.png").exists()
+    assert not (env["sub"] / "B.png").exists()
     # manifest 标记
     entry = preprocess_manifest.train_get_entry(
         env["pdir"], env["v"]["label"], "1_data/A.png"

@@ -331,5 +331,5 @@ def test_duplicates_apply_endpoint_marks_manifest(client: TestClient) -> None:
     assert resp.status_code == 200
     body = resp.json()
     assert body["removed"] == ["1_data/X.png"]
-    # 物理文件保留
-    assert (sub / "X.png").exists()
+    # 物理文件已删（tombstone 只在 manifest）
+    assert not (sub / "X.png").exists()

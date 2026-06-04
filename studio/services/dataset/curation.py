@@ -142,20 +142,18 @@ def list_train(
 ) -> dict[str, list[dict[str, Any]]]:
     """train 子文件夹 → `[{name, mtime, origin}, ...]`（按 origin 去重）。
 
-    ADR 0010 fixup（2026-06-04）：Curation 右侧 train 区显示"用户筛选时
-    选了哪些 download 原图"，跟预处理后状态解耦：
+    ADR 0010 fixup：Curation 右侧 train 区显示"用户筛选时选了哪些 download 原图"，
+    跟预处理后状态解耦：
 
     - 按 manifest entry.origin **去重**：multi-crop fan-out 派生（X_c0.png +
       X_c1.png 同 origin=X.jpg）只显示一条
-    - 不过滤 `duplicate_removed` entry：用户当时筛选选了它，时间上在预处理
-      之前，UI 该显示
-    - 扫 train manifest 而不是物理文件（fan-out 派生数量跟筛选语义无关）
-    - 返回 `name` 用 **origin**（download 文件名），跟 `copy_to_train` /
+    - 物理 iterdir 决定显示集合：duplicate_removed 物理已删 → 自然不出现
+      在 Curation；要查看 / 恢复走总览页"已删除"tab
+    - 返回 `name` 用 **origin**（download 文件名），跟 `copy_download_to_train` /
       `remove_from_train` 的 name 语义对齐到 download scope
 
-    `mtime` 用 manifest entry 的 mtime（物理产物 mtime；多派生取第一条）；
-    前端按时间排序仍稳定。老项目 fallback：ensure_train_manifest 重建后
-    走同一路径。
+    `mtime` 用物理文件 mtime；前端按时间排序仍稳定。老项目 fallback：
+    ensure_train_manifest 重建后走同一路径。
     """
     p, v, train = _version_train_dir(conn, project_id, version_id)
     if not train.exists():
@@ -169,7 +167,7 @@ def list_train(
     for sub in sorted(train.iterdir()):
         if not sub.is_dir():
             continue
-        # 物理目录决定显示集合（含 duplicate_removed 软删除的图：物理还在）+
+        # 物理目录决定显示集合（duplicate_removed 物理已删→不出现）+
         # 兼容老路径（copy_to_train 不写 manifest，但物理图能扫到）。manifest
         # 仅用于反查 origin → 按 origin 去重（multi-crop fan-out 折叠成一行）。
         items_by_origin: dict[str, dict[str, Any]] = {}

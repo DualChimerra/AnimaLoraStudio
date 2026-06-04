@@ -116,15 +116,15 @@ def test_list_train_images_marks_duplicate_removed(isolated) -> None:
     assert items[0]["duplicate_removed"] is True
 
 
-def test_list_train_images_includes_stale_duplicate_removed(isolated) -> None:
-    """manifest 有 duplicate_removed entry 但 train/ 物理已删 → 仍报告 stale。"""
+def test_list_train_images_includes_duplicate_removed_tombstone(isolated) -> None:
+    """train_mark_duplicate_removed 物理删图 + 留 manifest tombstone → list 仍报告该 entry。"""
     p = isolated["project"]
     sub = isolated["sub"]
     _write_png(sub / "S.png")
     preprocess_manifest.train_mark_duplicate_removed(
         preprocess.project_root(p), "v1", [_rel("S.png")]
     )
-    (sub / "S.png").unlink()
+    assert not (sub / "S.png").exists()  # mark 已删
 
     items = preprocess.list_train_images(p, "v1")
     assert len(items) == 1
@@ -160,17 +160,16 @@ def test_list_train_images_returns_processed_flag(isolated) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_summary_train_counts_physical_plus_stale(isolated) -> None:
+def test_summary_train_counts_physical_plus_tombstone(isolated) -> None:
     p = isolated["project"]
     sub = isolated["sub"]
     _write_png(sub / "A.png")
     _write_png(sub / "B.png")
-    # stale duplicate_removed
+    # duplicate_removed → 物理删 + tombstone 留
     _write_png(sub / "C.png")
     preprocess_manifest.train_mark_duplicate_removed(
         preprocess.project_root(p), "v1", [_rel("C.png")]
     )
-    (sub / "C.png").unlink()
 
     s = preprocess.summary_train(p, "v1")
     assert s["image_count"] == 3
@@ -330,9 +329,17 @@ def test_list_crop_workspace_processed_flag(isolated) -> None:
 
 
 def test_list_duplicate_removed_workspace_returns_marked(isolated) -> None:
+    """mark 物理删 train/{name}；list 从 download/{origin} 现读 w/h。"""
     p = isolated["project"]
     sub = isolated["sub"]
     _write_png(sub / "Q.png", (40, 30))
+    # download/Q.png 用作 origin 来源
+    download = _download_dir(p)
+    download.mkdir(parents=True, exist_ok=True)
+    _write_png(download / "Q.png", (40, 30))
+    preprocess_manifest.train_add_processed(
+        preprocess.project_root(p), "v1", _rel("Q.png"), {"origin": "Q.png"},
+    )
     preprocess_manifest.train_mark_duplicate_removed(
         preprocess.project_root(p), "v1", [_rel("Q.png")]
     )
@@ -343,14 +350,14 @@ def test_list_duplicate_removed_workspace_returns_marked(isolated) -> None:
     assert out[0]["w"] == 40 and out[0]["h"] == 30
 
 
-def test_list_duplicate_removed_workspace_stale_entry(isolated) -> None:
+def test_list_duplicate_removed_workspace_no_origin(isolated) -> None:
+    """download/{origin} 缺失 → 仍报告 entry，w/h=None。"""
     p = isolated["project"]
     sub = isolated["sub"]
     _write_png(sub / "R.png")
     preprocess_manifest.train_mark_duplicate_removed(
         preprocess.project_root(p), "v1", [_rel("R.png")]
     )
-    (sub / "R.png").unlink()
 
     out = preprocess.list_duplicate_removed_workspace_train(p, "v1")
     assert len(out) == 1

@@ -203,9 +203,9 @@ def test_list_train_dedupes_by_origin_on_fan_out(env) -> None:
     assert view["right"]["1_data"][0]["origin"] == "X.jpg"
 
 
-def test_list_train_shows_duplicate_removed_in_curation(env) -> None:
-    """duplicate_removed 标记的图物理还在 → Curation 右侧仍显示（筛选时间
-    在预处理之前，时间语义上独立于 dedupe 决定）。"""
+def test_list_train_excludes_duplicate_removed_after_physical_delete(env) -> None:
+    """duplicate_removed 物理图已删 → Curation 右侧不出现（仅在总览页 "已删除"
+    tab 通过 manifest tombstone 可见）。"""
     train_sub = _train(env, "1_data")
     train_sub.mkdir(parents=True, exist_ok=True)
     (train_sub / "Y.jpg").write_bytes(b"y")
@@ -215,11 +215,12 @@ def test_list_train_shows_duplicate_removed_in_curation(env) -> None:
     preprocess_manifest.train_mark_duplicate_removed(
         _pdir(env), env["v"]["label"], ["1_data/Y.jpg"],
     )
+    assert not (train_sub / "Y.jpg").exists()  # 已物理删
 
     with db.connection_for(env["db"]) as conn:
         view = curation.curation_view(conn, env["p"]["id"], env["v"]["id"])
-    # duplicate_removed entry 物理仍在 → Curation 右侧仍含 Y.jpg
-    assert [e["name"] for e in view["right"]["1_data"]] == ["Y.jpg"]
+    # 1_data 文件夹现在空 → curation_view 不返回该 folder
+    assert "1_data" not in view["right"] or view["right"]["1_data"] == []
 
 
 def test_remove_from_train_deletes_all_fan_out_derivatives(env) -> None:
