@@ -1,6 +1,6 @@
 # 0010 — preprocess scope 从项目级 download 下沉到 version 级 train
 
-**状态**：Proposed
+**状态**：Accepted（PR-1/2/3/4/5 全部 merge；2026-06-04 收尾）
 **日期**：2026-06-03
 **决策者**：@WalkingMeatAxolotl
 **Supersedes**：[ADR 0004 — 预处理状态用单 manifest 替代「双 bucket + per-image sidecar」](0004-preprocess-manifest.md)（含 Addendum 1）

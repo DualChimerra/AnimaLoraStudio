@@ -51,8 +51,8 @@
 8-step pipeline + tool pages:
 
 1. **Download** — Booru scraping / local jpg / png / zip upload
-2. **Preprocess** (optional) — multi-tool pipeline: overview (multi-select + one-click undo) + duplicate review (perceptual-hash grouped manual review) + upscale (ESRGAN / Real-ESRGAN presets via ModelScope / HF) + crop (manual rect drawing + smart AR-clustered prefill aligned with sd-scripts training buckets) + inpaint
-3. **Curate** — dual download / train panels with multi-select copy / remove and subfolder management
+2. **Curate** — dual download / train panels with multi-select copy / remove and subfolder management
+3. **Preprocess** (optional, per-version) — runs in-place on the selected `versions/{label}/train/` (ADR 0010): overview (multi-select + one-click undo, undo pulls the original back from download and collapses multi-crop fan-out) + duplicate review (perceptual-hash grouped manual review, confirm physically deletes the image + caption sidecar) + upscale (ESRGAN / Real-ESRGAN presets via ModelScope / HF) + crop (manual rect drawing + smart AR-clustered prefill aligned with sd-scripts training buckets) + inpaint
 4. **Tag** — choose from WD14 / CLTagger / LLM with automatic GPU EP fallback; trigger_word input at the top
 5. **Tag editor** — cached mode with restore points, bulk add / delete / replace
 6. **Regularization set** (optional) — AI prior generation (default) / Booru reverse search; mirror + flat structures, editable with delete / auto-dedupe / dual-tagger choice

@@ -51,8 +51,8 @@
 流水线 8 步 + 工具页：
 
 1. **下载** — Booru 抓取 / 本地 jpg / png / zip 上传
-2. **预处理**（可选）— 多工具流水线：总览（多选 + 一键撤销）+ 去重审核（perceptual hash 分组人工审核）+ 放大（ESRGAN / Real-ESRGAN 等多预设，ModelScope / HF 双源）+ 裁剪（手动框选 + 智能 AR 聚类预填，跟 sd-scripts 训练桶对齐）+ 涂抹
-3. **筛选** — download / train 双面板，多选复制 / 移除，子文件夹管理
+2. **筛选** — download / train 双面板，多选复制 / 移除，子文件夹管理
+3. **预处理**（可选，版本级）— 在选中 `versions/{label}/train/` 上原地处理（ADR 0010）：总览（多选 + 一键撤销，撤销自动从 download 取回原图并折叠 multi-crop fan-out）+ 去重审核（perceptual hash 分组，确认后物理删图 + caption sidecar）+ 放大（ESRGAN / Real-ESRGAN 等多预设，ModelScope / HF 双源）+ 裁剪（手动框选 + 智能 AR 聚类预填，跟 sd-scripts 训练桶对齐）+ 涂抹
 4. **打标** — WD14 / CLTagger / LLM 三选，GPU EP 自动 fallback；顶部 trigger_word 输入
 5. **标签编辑** — 缓存模式 + 还原点，批量加 / 删 / 替换
 6. **正则集**（可选）— AI 先验生成（默认）/ Booru 反向搜；mirror + flat 结构，可编辑 / 删图 / 自动去重 / 双 tagger 可选
