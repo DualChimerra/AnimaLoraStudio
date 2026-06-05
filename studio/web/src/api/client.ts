@@ -2233,6 +2233,13 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ files: files && files.length > 0 ? Array.from(files) : null }),
     }),
+  /** 删除 output 目录下选中的文件（批量）。relative_paths 相对 output/。
+   *  任一不存在 → 后端 404 整批拒绝，前端 toast 错误后调用方 caller 应自行刷新。 */
+  deleteTaskOutputs: (id: number, files: ReadonlyArray<string>) =>
+    req<{ deleted: string[] }>(`/api/queue/${id}/outputs`, {
+      method: 'DELETE',
+      body: JSON.stringify({ files: Array.from(files) }),
+    }),
 
   // PP8 — WD14 运行时 / GPU 装包 ------------------------------------------
   /** 当前 onnxruntime 状态：包名 / 版本 / providers / nvidia-smi 检测结果。 */
