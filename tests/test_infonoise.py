@@ -331,17 +331,17 @@ def test_state_dict_round_trip_v2():
 
 
 def test_record_accepts_partial_batch_after_reg_mask():
-    """模拟 loop.py 用 loss_weight≥0.99 mask 跳过 reg 集样本后再 record。
+    """模拟 loop.py 用 ~is_reg mask 跳过 reg 集样本后再 record。
 
     InfoNoise 不应假定每次 record 都收到固定 batch size — main+reg 混合 batch
     经 mask 后样本数变少，scheduler 必须能正确处理。
     """
     s = InfoNoiseScheduler(K=4, N_warm=1, M=1, B=4, N_min=1, beta=0.5)
-    # 模拟 batch=4: 2 个 main (loss_weight=1.0) + 2 个 reg (loss_weight=0.3)
+    # 模拟 batch=4: 2 个 main (is_reg=False) + 2 个 reg (is_reg=True)
     t_full = torch.tensor([0.1, 0.5, 0.9, 0.5])
     mse_full = torch.tensor([10.0, 5.0, 1.0, 5.0])
-    lw = torch.tensor([1.0, 0.3, 0.3, 1.0])
-    main_mask = lw >= 0.99
+    is_reg = torch.tensor([False, True, True, False])
+    main_mask = ~is_reg
     # 应取 idx 0 + 3 = 2 个样本进 record
     s.record(t_full[main_mask], mse_full[main_mask])
     assert s._internal_step == 1  # 1 次调用

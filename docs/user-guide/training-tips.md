@@ -210,7 +210,7 @@ EDM/Karras 论文里 δ=0.15 是常用经验值。
 | `loss_type=huber` | huber 削峰让 outlier 区间不学，但 InfoNoise 用 raw MSE 看到 outlier 仍高 → 推 mass 进去 → 反馈环 | schema 互斥 |
 | `timestep_schedule_shift != 1.0` | shift 只在 baseline 路径生效；CDF 接管后静默失效 | schema 互斥 |
 | `noise_enhancement_type != none` (`offset` / `pyramid`) | 噪声增强改变 noise 形状，InfoNoise 学到的不再是 clean entropy rate profile（I-MMSE 推导假设标准高斯 noise）| schema 互斥 |
-| 正则集（`reg_data_dir != null` + `reg_weight < 1`） | reg 集分布跟 train 集不同；InfoNoise 自动跳过 reg 集样本仅学 train 集分布（loop 内 mask 处理） | 透明处理，无需用户操作 |
+| 正则集（`reg_data_dir != null`，任意 `reg_weight`） | reg 集与 main 集分布不同（典型 booru 通用图 vs LoRA 主题）；I-MMSE 假设单分布，混入会让 schedule 学到 mixture MMSE 而非 mmse_main。InfoNoise 按 batch 内 `is_reg` flag 硬过滤 reg 样本，仅 main 样本进 schedule 学习；reg 样本仍参与梯度（按 `reg_weight` 加权） | 透明处理，无需用户操作。未来若主流用法转向多 main 分布（multi-concept LoRA），按 `docs/todo/infonoise-reg-policy-reeval.md` 重评估 |
 | LoRA dropout（`lora_dropout` / `lora_rank_dropout` / `lora_module_dropout`） | 加梯度噪声，不改 mse 形状的系统性偏移 | 可同开，FIFO + EMA 双层平滑能 absorb |
 
 ### 噪声增强

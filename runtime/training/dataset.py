@@ -387,9 +387,11 @@ class MergedDataset(Dataset):
         if idx < self._main_len:
             item = self.main_dataset[idx]
             item["loss_weight"] = 1.0
+            item["is_reg"] = False
             return item
         item = self.reg_dataset[idx - self._main_len]
         item["loss_weight"] = self.reg_weight
+        item["is_reg"] = True
         return item
 
 
@@ -700,6 +702,7 @@ def collate_fn(batch):
     result = {"pixel_values": pixels, "captions": captions}
     if "loss_weight" in batch[0]:
         result["loss_weight"] = torch.tensor([b["loss_weight"] for b in batch], dtype=torch.float32)
+        result["is_reg"] = torch.tensor([b["is_reg"] for b in batch], dtype=torch.bool)
     return result
 
 
@@ -710,4 +713,5 @@ def collate_fn_cached(batch):
     result = {"latents": latents, "captions": captions}
     if "loss_weight" in batch[0]:
         result["loss_weight"] = torch.tensor([b["loss_weight"] for b in batch], dtype=torch.float32)
+        result["is_reg"] = torch.tensor([b["is_reg"] for b in batch], dtype=torch.bool)
     return result
