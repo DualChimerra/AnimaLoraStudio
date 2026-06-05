@@ -607,6 +607,23 @@ class TrainingConfig(BaseModel):
             )
         return self
 
+    @model_validator(mode="after")
+    def _validate_infonoise_noise_enhancement_exclusive(self) -> "TrainingConfig":
+        """InfoNoise 与 noise_enhancement_type 互斥：噪声增强改变 noise 形状会让 InfoNoise
+        schedule 偏离论文最优。
+
+        InfoNoise 论文 I-MMSE 推导假设标准高斯 noise；offset 加 DC 偏置、pyramid 加多尺度
+        低频成分都改变 noise 频谱，让 InfoNoise 学到的不再是 clean entropy rate profile。
+        """
+        if self.infonoise_enabled and self.noise_enhancement_type != "none":
+            raise ValueError(
+                f"infonoise_enabled=true 与 noise_enhancement_type={self.noise_enhancement_type!r} 互斥："
+                "噪声增强会改变 noise 形状，让 InfoNoise 学到的 schedule 偏离论文最优"
+                "（I-MMSE 推导假设标准高斯 noise）。请二选一：(a) 关闭 InfoNoise 保留噪声增强；"
+                "或 (b) 设 noise_enhancement_type=none 走 InfoNoise 自适应路径。"
+            )
+        return self
+
     # ---------------------------------------------------------------- 输出/保存
     output_dir: str = Field(
         "./output",
