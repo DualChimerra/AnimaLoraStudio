@@ -15,6 +15,7 @@ import { useTranslation } from 'react-i18next'
 import { useNavigate, useOutletContext } from 'react-router-dom'
 import {
   api,
+  PHASE_SKIPPABLE,
   type CurationView,
   type ProjectDetail,
   type Task,
@@ -334,7 +335,7 @@ function PhaseTimeline({
       {PHASE_ORDER_TIMELINE.map((p, i) => {
         const done = i < ci
         const here = i === ci
-        const skip = p.id === 'regularizing'
+        const skip = PHASE_SKIPPABLE.includes(p.id)
         // ADR-0007 §11.5-A：strict —— cursor 之后 (i > ci) 全部不许跳。
         // cursor+1 推进必须经 banner "继续 X →" 按钮（会调 advance API 校验完成条件）。
         const disabled = i > ci

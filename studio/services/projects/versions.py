@@ -42,10 +42,13 @@ class VersionPhase:
     """版本准备 cursor，仅 status=preparing 时有业务语义（ADR-0007 §11.3-B / §11.5-A）。
 
     顺序：curating → preprocessing → tagging → editing → regularizing → ready。
-    preprocessing / regularizing 可跳过（SKIPPABLE），其余必经。
+    preprocessing / tagging / regularizing 可跳过（SKIPPABLE），其余必经。
 
     ADR 0010 加 preprocessing phase（curating 之后）：用户筛选完图后对 train
     集做 upscale / crop / 去重等精细处理；可跳过 = 接受训练时默认放大算法。
+
+    tagging 可跳过 = 不强制每张图都有 caption：用户可上传自带 .txt caption、
+    手动填写、或裸训练；跳过即直接进 editing（仍可回到 tagging 重跑打标）。
     """
 
     CURATING = "curating"
@@ -59,7 +62,7 @@ class VersionPhase:
         CURATING, PREPROCESSING, TAGGING, EDITING, REGULARIZING, READY,
     )
     VALUES: frozenset[str] = frozenset(ORDER)
-    SKIPPABLE: frozenset[str] = frozenset({PREPROCESSING, REGULARIZING})
+    SKIPPABLE: frozenset[str] = frozenset({PREPROCESSING, TAGGING, REGULARIZING})
 
 
 def get_status(v: dict[str, Any]) -> str:

@@ -105,7 +105,7 @@ def test_version_phase_order_and_skippable() -> None:
     )
     assert len(versions.VersionPhase.VALUES) == 6
     assert versions.VersionPhase.SKIPPABLE == frozenset(
-        {"preprocessing", "regularizing"}
+        {"preprocessing", "tagging", "regularizing"}
     )
 
 
