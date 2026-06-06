@@ -51,11 +51,21 @@ def test_accept_png_uppercase_ext(tmp_path: Path) -> None:
 
 
 def test_reject_unsupported_format(tmp_path: Path) -> None:
+    out = uploads.accept_one("note.bin", io.BytesIO(b"hi"), tmp_path)
+    assert out.added == []
+    assert len(out.skipped) == 1
+    assert out.skipped[0]["name"] == "note.bin"
+    assert "格式不支持" in out.skipped[0]["reason"]
+
+
+def test_lone_caption_txt_skipped(tmp_path: Path) -> None:
+    """单独上传的 .txt（无对应图片）被跳过并报告，不落盘。"""
     out = uploads.accept_one("note.txt", io.BytesIO(b"hi"), tmp_path)
     assert out.added == []
     assert len(out.skipped) == 1
     assert out.skipped[0]["name"] == "note.txt"
-    assert "格式不支持" in out.skipped[0]["reason"]
+    assert "无对应图片" in out.skipped[0]["reason"]
+    assert not (tmp_path / "note.txt").exists()
 
 
 def test_accepts_extended_image_formats(tmp_path: Path) -> None:
@@ -249,3 +259,68 @@ def test_convert_off_preserves_raw_bytes(tmp_path: Path) -> None:
     out = uploads.accept_one("photo.jpg", io.BytesIO(raw), tmp_path)
     assert out.added == ["photo.jpg"]
     assert (tmp_path / "photo.jpg").read_bytes() == raw
+
+
+# ---------------------------------------------------------------------------
+# caption 配对（kohya_ss / sd-scripts 风格 .txt sidecar）
+# ---------------------------------------------------------------------------
+
+
+def test_zip_pairs_txt_caption_with_image(tmp_path: Path) -> None:
+    """zip 内 png + 同 stem .txt → caption 随图落盘。"""
+    blob = _zip_bytes({"a.png": b"AA", "a.txt": b"1girl, solo"})
+    out = uploads.accept_one("pack.zip", io.BytesIO(blob), tmp_path)
+    assert sorted(out.added) == ["a.png", "a.txt"]
+    assert out.skipped == []
+    assert (tmp_path / "a.png").read_bytes() == b"AA"
+    assert (tmp_path / "a.txt").read_bytes() == b"1girl, solo"
+
+
+def test_zip_orphan_txt_skipped(tmp_path: Path) -> None:
+    """zip 内有图但 .txt stem 对不上 → caption 跳过、不落盘。"""
+    blob = _zip_bytes({"a.png": b"AA", "other.txt": b"x"})
+    out = uploads.accept_one("pack.zip", io.BytesIO(blob), tmp_path)
+    assert out.added == ["a.png"]
+    assert any(
+        "other.txt" in s["name"] and "无对应图片" in s["reason"]
+        for s in out.skipped
+    )
+    assert not (tmp_path / "other.txt").exists()
+
+
+def test_accept_many_pairs_loose_png_and_txt(tmp_path: Path) -> None:
+    """同批拖拽 png + txt（不在同一 zip）也按 stem 配对。"""
+    files = [
+        ("1.png", io.BytesIO(b"P")),
+        ("1.txt", io.BytesIO(b"tag-a, tag-b")),
+    ]
+    out = uploads.accept_many(files, tmp_path)
+    assert sorted(out.added) == ["1.png", "1.txt"]
+    assert out.skipped == []
+    assert (tmp_path / "1.txt").read_bytes() == b"tag-a, tag-b"
+
+
+def test_caption_follows_png_conversion_stem(tmp_path: Path) -> None:
+    """convert_to_png 把 jpg → png 时，caption 跟随落盘后的 stem。"""
+    files = [
+        ("photo.jpg", io.BytesIO(_jpg_bytes())),
+        ("photo.txt", io.BytesIO(b"masterpiece")),
+    ]
+    out = uploads.accept_many(files, tmp_path, convert_to_png=True)
+    assert sorted(out.added) == ["photo.png", "photo.txt"]
+    assert (tmp_path / "photo.png").exists()
+    assert (tmp_path / "photo.txt").read_bytes() == b"masterpiece"
+
+
+def test_caption_follows_suffixed_collision(tmp_path: Path) -> None:
+    """1.png + 1.jpg + 1.txt（convert 模式）：caption 给先落盘的图，后缀副本不抢。"""
+    files = [
+        ("1.png", io.BytesIO(_png_bytes(color=(0, 0, 0)))),
+        ("1.jpg", io.BytesIO(_jpg_bytes(color=(255, 255, 255)))),
+        ("1.txt", io.BytesIO(b"caption-for-first")),
+    ]
+    out = uploads.accept_many(files, tmp_path, convert_to_png=True)
+    assert sorted(out.added) == ["1.png", "1.txt", "1_1.png"]
+    # caption 落到第一张（1.png），后缀化的 1_1.png 没有 caption
+    assert (tmp_path / "1.txt").read_bytes() == b"caption-for-first"
+    assert not (tmp_path / "1_1.txt").exists()

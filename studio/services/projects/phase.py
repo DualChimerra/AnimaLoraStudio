@@ -80,6 +80,27 @@ def check_regularizing(
     return CheckResult(True)
 
 
+def check_tagging_jobs(
+    conn: sqlite3.Connection, version_id: int
+) -> CheckResult:
+    """无 tag job 处于 pending/running（可跳过 tagging 用；不强求 caption 覆盖）。
+
+    跟 `check_regularizing` / `check_preprocessing` 同 pattern——skip tagging 时
+    不要求每张图都有 caption（接受裸训练 / 自带 .txt），仅防 concurrent 打标 job
+    撞车（避免 worker 正写 caption 时 cursor 已离开 tagging）。
+    """
+    row = conn.execute(
+        "SELECT COUNT(*) FROM project_jobs "
+        "WHERE version_id = ? "
+        "  AND kind = 'tag' "
+        "  AND status IN ('pending', 'running')",
+        (version_id,),
+    ).fetchone()
+    if int(row[0]) > 0:
+        return CheckResult(False, "打标任务进行中，请等待完成")
+    return CheckResult(True)
+
+
 def check_preprocessing(
     conn: sqlite3.Connection, version_id: int
 ) -> CheckResult:
@@ -187,10 +208,11 @@ def skip_phase(
     conn: sqlite3.Connection, version_id: int
 ) -> tuple[bool, CheckResult, Optional[str]]:
     """跳过当前 phase（仅 ``SKIPPABLE`` 集合允许；当前 = preprocessing /
-    regularizing）。
+    tagging / regularizing）。
 
     与 ``advance_phase`` 区别：不要求"完成条件"满足（如不要求生成正则集 /
-    不要求每张图都预处理过），仅校验"无 concurrent job"防止状态错乱。
+    不要求每张图都预处理过 / 不要求每张图都有 caption），仅校验"无 concurrent
+    job"防止状态错乱。
     """
     v = _versions.get_version(conn, version_id)
     if not v:
@@ -207,6 +229,10 @@ def skip_phase(
             return False, result, None
     elif current_phase == _versions.VersionPhase.PREPROCESSING:
         result = check_preprocessing(conn, version_id)
+        if not result.ok:
+            return False, result, None
+    elif current_phase == _versions.VersionPhase.TAGGING:
+        result = check_tagging_jobs(conn, version_id)
         if not result.ok:
             return False, result, None
 

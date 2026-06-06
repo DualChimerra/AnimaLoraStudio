@@ -246,6 +246,41 @@ def test_check_preprocessing_ok_without_running_job(isolated) -> None:
     assert result.ok
 
 
+def test_skip_phase_tagging_jumps_to_editing(isolated) -> None:
+    """tagging 可跳过（无 tag job running、不强求 caption 覆盖） → cursor 跳到 editing。"""
+    v = _make_version(isolated)
+    with db.connection_for(isolated["db"]) as conn:
+        versions.update_version(conn, v["id"], phase="tagging")
+        advanced, result, new_phase = versions_phase.skip_phase(conn, v["id"])
+    assert advanced
+    assert result.ok
+    assert new_phase == "editing"
+
+
+def test_skip_phase_tagging_blocked_by_running_job(isolated) -> None:
+    """有 tag job pending/running → 拒跳过（防 worker 写 caption 时 cursor 离开）。"""
+    v = _make_version(isolated)
+    with db.connection_for(isolated["db"]) as conn:
+        versions.update_version(conn, v["id"], phase="tagging")
+        conn.execute(
+            "INSERT INTO project_jobs(project_id, version_id, kind, params, status) "
+            "VALUES (?, ?, 'tag', '{}', 'running')",
+            (v["project_id"], v["id"]),
+        )
+        conn.commit()
+        advanced, result, _ = versions_phase.skip_phase(conn, v["id"])
+    assert not advanced
+    assert "打标" in result.reason
+
+
+def test_check_tagging_jobs_ok_without_running_job(isolated) -> None:
+    """无 concurrent tag job → OK（tagging 可跳过不强求 caption 覆盖）。"""
+    v = _make_version(isolated)
+    with db.connection_for(isolated["db"]) as conn:
+        result = versions_phase.check_tagging_jobs(conn, v["id"])
+    assert result.ok
+
+
 def test_skip_phase_regularizing_jumps_to_ready(isolated) -> None:
     """regularizing skip → cursor 跳 ready。"""
     v = _make_version(isolated)

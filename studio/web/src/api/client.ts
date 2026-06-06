@@ -591,7 +591,7 @@ export const PHASE_ORDER: VersionPhase[] = [
   'curating', 'preprocessing', 'tagging', 'editing', 'regularizing', 'ready',
 ]
 
-export const PHASE_SKIPPABLE: VersionPhase[] = ['preprocessing', 'regularizing']
+export const PHASE_SKIPPABLE: VersionPhase[] = ['preprocessing', 'tagging', 'regularizing']
 
 /** ADR-0007 §11.5-A: advance / skip phase endpoint response。 */
 export interface PhaseAdvanceResult {
