@@ -1,0 +1,556 @@
+"""PR-6 — model_downloader._on_log per-line print。
+PR-S3 — _resolve_endpoint env > secrets > None 优先级。
+MS-1  — _get_download_source / download_flat_ms rename+cleanup 逻辑。
+"""
+from __future__ import annotations
+
+import threading
+import time
+
+import pytest
+
+from studio.services import models as model_downloader
+
+
+@pytest.fixture
+def reset_downloads():
+    """每个测试用例独立，避免 _DOWNLOADS 全局状态污染。"""
+    with model_downloader._LOCK:
+        before = dict(model_downloader._DOWNLOADS)
+        model_downloader._DOWNLOADS.clear()
+    yield
+    with model_downloader._LOCK:
+        model_downloader._DOWNLOADS.clear()
+        model_downloader._DOWNLOADS.update(before)
+
+
+def _wait_done(key: str, timeout: float = 2.0) -> None:
+    """轮询等任务结束（避免依赖 bus / 线程加入）。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        with model_downloader._LOCK:
+            ds = model_downloader._DOWNLOADS.get(key)
+        if ds and ds.status in ("done", "failed"):
+            return
+        time.sleep(0.01)
+    raise AssertionError(f"download '{key}' didn't complete in {timeout}s")
+
+
+def test_on_log_writes_to_ring_buffer_and_stdout(
+    reset_downloads, capfd: pytest.CaptureFixture
+) -> None:
+    """on_log 同时写：(1) ring buffer ds.log，(2) stdout（print(line, flush=True)）。"""
+    lines_to_emit = ["downloading file 1", "downloading file 2", "✓ done"]
+
+    def fake_fn(on_log):
+        for line in lines_to_emit:
+            on_log(line)
+        return True
+
+    model_downloader.start_download_async("test-key", fake_fn)
+    _wait_done("test-key")
+
+    # ring buffer 完整保留
+    with model_downloader._LOCK:
+        ds = model_downloader._DOWNLOADS["test-key"]
+        assert ds.status == "done"
+        assert ds.log == lines_to_emit
+
+    # stdout 也都拿到（用 capfd 抓 fd 级 stdout，覆盖跨线程 print）
+    out = capfd.readouterr().out
+    for line in lines_to_emit:
+        assert line in out
+
+
+# ---------------------------------------------------------------------------
+# PR-S3 — _resolve_endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_endpoint_prefers_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """HF_ENDPOINT 环境变量优先于 secrets。"""
+    monkeypatch.setenv("HF_ENDPOINT", "https://my-mirror.example/")
+    # secrets 读到不同值，但应被 env 覆盖
+    from studio import secrets
+    monkeypatch.setattr(
+        secrets, "load",
+        lambda: secrets.Secrets(huggingface=secrets.HuggingFaceConfig(
+            token="", endpoint="https://hf-mirror.com",
+        )),
+    )
+    assert model_downloader._resolve_endpoint() == "https://my-mirror.example/"
+
+
+def test_resolve_endpoint_falls_back_to_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """无 env 时读 secrets.huggingface.endpoint。"""
+    monkeypatch.delenv("HF_ENDPOINT", raising=False)
+    from studio import secrets
+    monkeypatch.setattr(
+        secrets, "load",
+        lambda: secrets.Secrets(huggingface=secrets.HuggingFaceConfig(
+            token="", endpoint="https://hf-mirror.com",
+        )),
+    )
+    assert model_downloader._resolve_endpoint() == "https://hf-mirror.com"
+
+
+def test_resolve_endpoint_returns_none_for_empty_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """secrets.huggingface.endpoint='' → None（让 huggingface_hub 用默认 huggingface.co）。"""
+    monkeypatch.delenv("HF_ENDPOINT", raising=False)
+    from studio import secrets
+    monkeypatch.setattr(
+        secrets, "load",
+        lambda: secrets.Secrets(huggingface=secrets.HuggingFaceConfig(
+            token="", endpoint="",
+        )),
+    )
+    assert model_downloader._resolve_endpoint() is None
+
+
+def test_resolve_endpoint_handles_corrupt_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """secrets.load() 抛异常 → 静默回退 None，不阻断下载。"""
+    monkeypatch.delenv("HF_ENDPOINT", raising=False)
+    from studio import secrets
+
+    def boom():
+        raise RuntimeError("simulated corrupt secrets")
+
+    monkeypatch.setattr(secrets, "load", boom)
+    assert model_downloader._resolve_endpoint() is None
+
+
+def test_resolve_endpoint_env_with_whitespace_treated_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HF_ENDPOINT='  ' (空白) 视作未设；走 secrets 路径。"""
+    monkeypatch.setenv("HF_ENDPOINT", "   ")
+    from studio import secrets
+    monkeypatch.setattr(
+        secrets, "load",
+        lambda: secrets.Secrets(huggingface=secrets.HuggingFaceConfig(
+            token="", endpoint="https://hf-mirror.com",
+        )),
+    )
+    assert model_downloader._resolve_endpoint() == "https://hf-mirror.com"
+
+
+def test_on_log_does_not_hold_lock_during_print(
+    reset_downloads,
+) -> None:
+    """print 在锁外：on_log 调用本身不应让 _LOCK 在 I/O 期间被占着。
+
+    检测方式：让 print 阻塞（替成 sleep 兼带计时），同时另一线程尝试拿锁；
+    若锁外执行，并发 acquire 应当能立刻成功。
+    """
+    import builtins
+
+    print_started = threading.Event()
+    can_finish_print = threading.Event()
+
+    real_print = builtins.print
+
+    def slow_print(*args, **kwargs):
+        print_started.set()
+        can_finish_print.wait(timeout=2.0)
+        return real_print(*args, **kwargs)
+
+    def fake_fn(on_log):
+        builtins.print = slow_print
+        try:
+            on_log("first")
+        finally:
+            builtins.print = real_print
+        return True
+
+    model_downloader.start_download_async("test-lock", fake_fn)
+
+    assert print_started.wait(timeout=2.0), "fake_fn 没进 print"
+
+    # 此时 _on_log 应已离开 with _LOCK 块（先写 ring buffer 再 print），
+    # 主线程能在 100ms 内拿到锁
+    acquired = model_downloader._LOCK.acquire(timeout=0.1)
+    assert acquired, "_on_log 在 print 期间持锁，违反 PR-6 设计"
+    model_downloader._LOCK.release()
+
+    can_finish_print.set()
+    _wait_done("test-lock")
+
+
+# ---------------------------------------------------------------------------
+# MS-1 — ModelScope 下载源选择 + download_flat_ms rename/cleanup 逻辑
+# ---------------------------------------------------------------------------
+
+
+def test_get_download_source_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    """MODELSCOPE_SOURCE 环境变量优先于 secrets。"""
+    monkeypatch.setenv("MODELSCOPE_SOURCE", "modelscope")
+    from studio import secrets
+
+    monkeypatch.setattr(
+        secrets, "load",
+        lambda: secrets.Secrets(download_source="huggingface"),
+    )
+    assert model_downloader._get_download_source() == "modelscope"
+
+
+def test_get_download_source_falls_back_to_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
+    """无 env 时读 secrets.download_source。"""
+    monkeypatch.delenv("MODELSCOPE_SOURCE", raising=False)
+    from studio import secrets
+
+    monkeypatch.setattr(
+        secrets, "load",
+        lambda: secrets.Secrets(download_source="modelscope"),
+    )
+    assert model_downloader._get_download_source() == "modelscope"
+
+
+def test_get_download_source_default_huggingface(monkeypatch: pytest.MonkeyPatch) -> None:
+    """secrets 空串时回退 'huggingface'。"""
+    monkeypatch.delenv("MODELSCOPE_SOURCE", raising=False)
+    from studio import secrets
+
+    monkeypatch.setattr(
+        secrets, "load",
+        lambda: secrets.Secrets(download_source=""),
+    )
+    assert model_downloader._get_download_source() == "huggingface"
+
+
+def test_download_flat_ms_skips_existing(tmp_path: "Path") -> None:
+    """target 已存在时跳过，不调 modelscope API。"""
+    target = tmp_path / "model.safetensors"
+    target.write_bytes(b"dummy")
+
+    logs: list[str] = []
+    ok = model_downloader.download_flat_ms(
+        "some/repo", "split_files/foo.safetensors", target, on_log=logs.append
+    )
+    assert ok
+    assert any("已存在" in l for l in logs)
+
+
+def test_download_flat_ms_rename_and_cleanup(
+    tmp_path: "Path", monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """download_flat_ms 把 model_file_download 落盘的深路径文件移到 target，
+    并清理掉空的中间目录。"""
+    target = tmp_path / "model.safetensors"
+    repo_subpath = "split_files/text_encoders/qwen_3_06b_base.safetensors"
+
+    def fake_download(model_id, file_path, local_dir, **kwargs):
+        # 模拟 modelscope 在 local_dir/repo_subpath 落盘
+        dest = tmp_path / file_path
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"weights")
+
+    import types
+    fake_mod = types.ModuleType("modelscope.hub.file_download")
+    fake_mod.model_file_download = fake_download  # type: ignore[attr-defined]
+
+    import sys
+    monkeypatch.setitem(sys.modules, "modelscope", types.ModuleType("modelscope"))
+    monkeypatch.setitem(sys.modules, "modelscope.hub", types.ModuleType("modelscope.hub"))
+    monkeypatch.setitem(sys.modules, "modelscope.hub.file_download", fake_mod)
+
+    logs: list[str] = []
+    ok = model_downloader.download_flat_ms(
+        "circlestone-labs/Anima", repo_subpath, target, on_log=logs.append
+    )
+    assert ok, logs
+    assert target.exists()
+    assert target.read_bytes() == b"weights"
+    # 中间目录应已被清理
+    assert not (tmp_path / "split_files").exists()
+
+
+def test_download_qwen3_modelscope_builds_complete_directory(
+    tmp_path: "Path", monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ModelScope 源下载权重后，仍会从 HF 补齐 tokenizer/config 文件，
+    使 text_encoders/ 成为 transformers 可直接加载的完整目录。"""
+    monkeypatch.setattr("studio.services.models.sources._get_download_source", lambda: "modelscope")
+
+    ms_calls: list[tuple[str, str, str]] = []
+    hf_calls: list[tuple[str, str, str]] = []
+
+    def fake_download_flat_ms(repo_id, repo_subpath, target, *, on_log=print):
+        ms_calls.append((repo_id, repo_subpath, str(target)))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"ms-weights")
+        return True
+
+    def fake_download_flat(repo_id, repo_subpath, target, *, on_log=print):
+        hf_calls.append((repo_id, repo_subpath, str(target)))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(repo_subpath, encoding="utf-8")
+        return True
+
+    monkeypatch.setattr("studio.services.models.sources.download_flat_ms", fake_download_flat_ms)
+    monkeypatch.setattr("studio.services.models.sources.download_flat", fake_download_flat)
+
+    logs: list[str] = []
+    ok = model_downloader.download_qwen3(tmp_path, on_log=logs.append)
+
+    assert ok, logs
+    qwen_dir = tmp_path / "text_encoders"
+    assert (qwen_dir / "model.safetensors").read_bytes() == b"ms-weights"
+
+    assert ms_calls == [(
+        model_downloader.ANIMA_REPO,
+        model_downloader.MS_ANIMA_TEXT_ENCODER_PATH,
+        str(qwen_dir / "model.safetensors"),
+    )]
+
+    expected_hf_files = [f for f in model_downloader.QWEN_FILES if f != "model.safetensors"]
+    assert [repo_subpath for _, repo_subpath, _ in hf_calls] == expected_hf_files
+    for f in expected_hf_files:
+        assert (qwen_dir / f).read_text(encoding="utf-8") == f
+
+
+# ---------------------------------------------------------------------------
+# 预处理放大器
+# ---------------------------------------------------------------------------
+
+
+def test_upscaler_path_helpers(tmp_path: "Path") -> None:
+    """upscaler_dir / upscaler_target / find_upscaler 路径布局与存在性判断。"""
+    assert model_downloader.upscaler_dir(tmp_path) == tmp_path / "upscalers"
+
+    target = model_downloader.upscaler_target("4x-AnimeSharp", tmp_path)
+    assert target == tmp_path / "upscalers" / "4x-AnimeSharp.pth"
+
+    # 未下载
+    assert model_downloader.find_upscaler("4x-AnimeSharp", tmp_path) is None
+
+    # 已下载
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"weights")
+    assert model_downloader.find_upscaler("4x-AnimeSharp", tmp_path) == target
+
+
+def test_upscaler_target_unknown_label() -> None:
+    """非法 label 抛 ValueError，避免拼错落到错误路径。"""
+    with pytest.raises(ValueError, match="unknown upscaler"):
+        model_downloader.upscaler_target("4x-RealNotALabel")
+
+
+def test_download_upscaler_unknown_label_returns_false() -> None:
+    logs: list[str] = []
+    ok = model_downloader.download_upscaler("nope", on_log=logs.append)
+    assert not ok
+    assert any("未知放大器" in l for l in logs)
+
+
+def test_download_upscaler_delegates_to_download_flat(
+    tmp_path: "Path", monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """download_upscaler 应走 HF download_flat，参数从 UPSCALER_VARIANTS 取。"""
+    calls: list[tuple] = []
+
+    def fake_download_flat(repo_id, repo_subpath, target, *, on_log=print):
+        calls.append((repo_id, repo_subpath, str(target)))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"esrgan")
+        return True
+
+    monkeypatch.setattr("studio.services.models.sources.download_flat", fake_download_flat)
+
+    ok = model_downloader.download_upscaler("4x-AnimeSharp", tmp_path, on_log=lambda _l: None)
+    assert ok
+    assert calls == [(
+        "Kim2091/AnimeSharp",
+        "4x-AnimeSharp.pth",
+        str(tmp_path / "upscalers" / "4x-AnimeSharp.pth"),
+    )]
+
+
+def test_build_catalog_includes_upscalers(
+    tmp_path: "Path", monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """build_catalog 把 upscalers 段加上；未下载 exists=False；新 schema 字段齐。"""
+    from studio import secrets
+
+    monkeypatch.setattr(secrets, "load", lambda: secrets.Secrets())
+    cat = model_downloader.build_catalog(tmp_path)
+    assert "upscalers" in cat
+    section = cat["upscalers"]
+    assert section["default"] == "4x-AnimeSharp"
+    assert section["current"] == "4x-AnimeSharp"  # 默认从 selected_upscaler 来
+    labels = [v["label"] for v in section["variants"]]
+    assert "4x-AnimeSharp" in labels
+    # 新预设也要在
+    assert "R-ESRGAN_4x+Anime6B" in labels
+    sharp = next(v for v in section["variants"] if v["label"] == "4x-AnimeSharp")
+    assert sharp["exists"] is False
+    assert sharp["kind"] == "preset"
+    assert sharp["hf_repo"] == "Kim2091/AnimeSharp"
+    assert sharp["ms_repo"] == "libfishopen/upscaler"
+    assert sharp["size_mb"] == 64
+    assert sharp["filename"] == "4x-AnimeSharp.pth"
+    assert sharp["target_path"].endswith("4x-AnimeSharp.pth")
+
+
+def test_build_catalog_picks_up_custom_upscaler(
+    tmp_path: "Path", monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """upscalers/ 下不在预设里的 .pth 文件被列为 kind='custom'。"""
+    from studio import secrets
+
+    monkeypatch.setattr(secrets, "load", lambda: secrets.Secrets())
+    (tmp_path / "upscalers").mkdir()
+    (tmp_path / "upscalers" / "my-custom.pth").write_bytes(b"x" * 1024)
+
+    cat = model_downloader.build_catalog(tmp_path)
+    variants = cat["upscalers"]["variants"]
+    custom = next(v for v in variants if v["label"] == "my-custom.pth")
+    assert custom["kind"] == "custom"
+    assert custom["filename"] == "my-custom.pth"
+    assert custom["exists"] is True
+    assert custom["size"] == 1024
+    assert custom["hf_repo"] is None
+    assert custom["ms_repo"] is None
+
+
+def test_download_upscaler_uses_modelscope_when_configured(
+    tmp_path: "Path", monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """secrets.download_source='modelscope' → download_upscaler 走 download_flat_ms。"""
+    monkeypatch.setattr(
+        "studio.services.models.sources._get_download_source", lambda: "modelscope"
+    )
+    ms_calls: list[tuple] = []
+    hf_calls: list[tuple] = []
+
+    def fake_ms(repo_id, subpath, target, *, on_log=print):
+        ms_calls.append((repo_id, subpath, str(target)))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"ms")
+        return True
+
+    def fake_hf(repo_id, subpath, target, *, on_log=print):
+        hf_calls.append((repo_id, subpath, str(target)))
+        return True
+
+    monkeypatch.setattr("studio.services.models.sources.download_flat_ms", fake_ms)
+    monkeypatch.setattr("studio.services.models.sources.download_flat", fake_hf)
+
+    ok = model_downloader.download_upscaler("4x-AnimeSharp", tmp_path, on_log=lambda _l: None)
+    assert ok
+    assert ms_calls == [(
+        "libfishopen/upscaler",
+        "4x-AnimeSharp.pth",
+        str(tmp_path / "upscalers" / "4x-AnimeSharp.pth"),
+    )]
+    assert hf_calls == []
+
+
+def test_download_upscaler_fallback_to_ms_when_hf_missing(
+    tmp_path: "Path", monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R-ESRGAN_4x+Anime6B 没 HF 镜像；source=hf 时也应回退到 MS。"""
+    monkeypatch.setattr(
+        "studio.services.models.sources._get_download_source", lambda: "huggingface"
+    )
+    ms_calls: list[tuple] = []
+
+    def fake_ms(repo_id, subpath, target, *, on_log=print):
+        ms_calls.append((repo_id, subpath))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"ms")
+        return True
+
+    monkeypatch.setattr("studio.services.models.sources.download_flat_ms", fake_ms)
+    monkeypatch.setattr(
+        "studio.services.models.sources.download_flat",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("HF not expected"))
+    )
+
+    ok = model_downloader.download_upscaler(
+        "R-ESRGAN_4x+Anime6B", tmp_path, on_log=lambda _l: None
+    )
+    assert ok
+    assert ms_calls and ms_calls[0][0] == "libfishopen/upscaler"
+
+
+def test_download_upscaler_custom_hf(
+    tmp_path: "Path", monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """自定义 HF 下载落到 upscalers/{filename}。"""
+    calls: list[tuple] = []
+
+    def fake_hf(repo_id, subpath, target, *, on_log=print):
+        calls.append((repo_id, subpath, str(target)))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"x")
+        return True
+
+    monkeypatch.setattr("studio.services.models.sources.download_flat", fake_hf)
+
+    ok = model_downloader.download_upscaler_custom(
+        "hf", "Kim2091/UltraSharp", "4x-UltraSharp.pth",
+        tmp_path, on_log=lambda _l: None,
+    )
+    assert ok
+    assert calls == [(
+        "Kim2091/UltraSharp",
+        "4x-UltraSharp.pth",
+        str(tmp_path / "upscalers" / "4x-UltraSharp.pth"),
+    )]
+
+
+def test_download_upscaler_custom_rejects_bad_ext(
+    tmp_path: "Path",
+) -> None:
+    """非 .pth/.safetensors 扩展名直接拒绝（防穿越 / 误传）。"""
+    logs: list[str] = []
+    ok = model_downloader.download_upscaler_custom(
+        "hf", "foo/bar", "evil.sh", tmp_path, on_log=logs.append
+    )
+    assert not ok
+    assert any("扩展名" in l for l in logs)
+
+
+def test_download_upscaler_custom_rejects_bad_source(
+    tmp_path: "Path",
+) -> None:
+    logs: list[str] = []
+    ok = model_downloader.download_upscaler_custom(
+        "ftp", "foo/bar", "a.pth", tmp_path, on_log=logs.append
+    )
+    assert not ok
+    assert any("未知下载源" in l for l in logs)
+
+
+def test_upscaler_target_accepts_custom_filename(tmp_path: "Path") -> None:
+    """非预设但合法扩展名的 label 视作 custom 文件名。"""
+    target = model_downloader.upscaler_target("my-custom.pth", tmp_path)
+    assert target == tmp_path / "upscalers" / "my-custom.pth"
+
+
+def test_upscaler_target_blocks_path_traversal() -> None:
+    for bad in ("../foo.pth", "a/b.pth", "..\\x.pth"):
+        with pytest.raises(ValueError):
+            model_downloader.upscaler_target(bad)
+
+
+def test_selected_upscaler_falls_back_to_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """selected_upscaler 字段值为空 / 非法 / 不存在文件时回退 DEFAULT_UPSCALER。"""
+    from studio import secrets
+
+    class Fake:
+        class models:
+            selected_upscaler = ""
+    monkeypatch.setattr(secrets, "load", lambda: Fake())
+    assert model_downloader.selected_upscaler() == model_downloader.DEFAULT_UPSCALER
+
+    Fake.models.selected_upscaler = "totally-not-a-preset.pth"  # 不存在文件
+    assert model_downloader.selected_upscaler() == model_downloader.DEFAULT_UPSCALER

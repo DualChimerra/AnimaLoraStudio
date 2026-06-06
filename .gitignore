@@ -1,0 +1,89 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtualenv
+.venv/
+venv/
+ENV/
+
+# Logs / local outputs
+output/
+data_exports/
+monitor_data/
+config/autosave/
+*.log
+wandb/
+
+# Studio runtime data (SQLite, user configs, task logs)
+studio_data/
+
+# Studio frontend (Node deps and build artifacts)
+studio/web/node_modules/
+studio/web/dist/
+studio/web/.vite/
+
+# 顶层意外创建的 node_modules（vitest / 某些工具可能在 repo root 拉一份）
+/node_modules/
+
+# Studio 走 preset 池（studio_data/presets/，已被 studio_data/ 总规则覆盖），
+# 旧的 config/ 目录已删，不再需要 user yaml 排除规则。
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.vscode/
+.idea/
+.claude/
+
+# Caches (HF/Transformers etc.)
+**/.cache/
+
+
+# Model weights (keep code/config, ignore large weights)
+*.safetensors
+*.ckpt
+*.bin
+*.pt
+*.pth
+*.npz
+*.onnx
+models/text_encoders/tokenizer.json
+models/text_encoders/vocab.json
+models/wd14/
+models/taeflux/
+models/cltagger/
+
+# Dataset (training images)
+dataset/
+
+# Misc
+nul
+# Root-level AI agent files — gitignored so contributors can put personal
+# config / @docs/AGENTS.md import here without conflicting with the repo.
+# Project 公约 lives at docs/AGENTS.md (NOT ignored — note the leading /).
+/AGENTS.md
+/CLAUDE.md
+
+# 本地解压的设计稿原始目录（已整理进 mockup/）
+1/
+
+# 工具生成的临时目录
+.spec-workflow/
+
+# Self-update 进程间通信用的瞬时标志（server 写 → cli.py / wrapper 读后立即删）
+tmp/
+
+# 文档本地草稿（个人 TODO / 未定稿设计 / 临时笔记）
+docs/_local/

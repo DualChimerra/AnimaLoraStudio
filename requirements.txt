@@ -1,0 +1,84 @@
+﻿# Core dependencies
+torch>=2.0.0
+torchvision>=0.15.0
+diffusers>=0.32.0
+transformers>=4.35.0
+sentencepiece>=0.1.99
+protobuf>=3.20.0
+accelerate>=0.24.0
+peft>=0.8.0
+wandb>=0.16.0
+# bitsandbytes>=0.41.0   # Optional: 8-bit AdamW (may not work on Windows)
+lycoris-lora>=1.9.0
+prodigyopt>=1.0          # Prodigy 优化器（anima_train.py optimizer=prodigy 时必需）
+# ProdigyPlusScheduleFree (LoganBooker) — Flux/Qwen-Image LoRA 社区主流，解决 Prodigy 的
+# mutation ep 问题。pin >=2.0.0 因为 v1.9.2 ↔ v2.0.0 的 state_dict 不兼容。
+prodigy-plus-schedule-free>=2.0.0  # optimizer_type=prodigy_plus_schedulefree 时必需
+# optimum-quanto>=0.2.0     # Optional: optimizer_type=automagic 走 quanto 量化权重时
+                            # 才用到 QBytesTensor（utils/optimizer_utils.py 有 try/except
+                            # 兜底，未装就走 dense fp32/bf16 路径）。装：pip install 'optimum-quanto>=0.2.0'
+safetensors>=0.4.0
+Pillow>=10.0.0
+numpy>=1.24.0
+ImageHash>=4.3.0
+tqdm>=4.66.0
+omegaconf>=2.3.0
+einops>=0.7.0
+# xformers>=0.0.23       # Optional: memory efficient attention (may fail on Windows)
+# flash-attn>=2.4.0      # Optional: FlashAttention (usually Linux only)
+lpips>=0.1.4
+pytorch-fid>=0.3.0
+pytorch-msssim>=0.2.1
+scipy>=1.10.0
+scikit-image>=0.20.0
+matplotlib>=3.7.0
+pandas>=2.0.0
+pillow-jxl-plugin>=1.3.0
+# 预处理放大：spandrel 通用 super-resolution 模型 loader（自动识别 ESRGAN/RRDB/SwinIR 等
+# 架构）。4x-AnimeSharp 走 ESRGAN-RRDB，spandrel 直接 from_state_dict。
+spandrel>=0.4.0
+
+# GUI dependencies
+fastapi>=0.104.0
+uvicorn>=0.24.0
+python-multipart>=0.0.6
+pydantic>=2.5.0
+pyyaml>=6.0.1
+psutil>=5.9.0
+# topbar 系统监控小组件用：拿 GPU/VRAM。非 NVIDIA / 无驱动时 services/system_stats.py
+# 会 try/except 兜底，前端只显示 CPU/RAM；安装本身在所有平台都能 succeed (纯 Python wrapper)。
+# 用 nvidia-ml-py (NVIDIA 官方维护、新版 PyTorch 也是切到它) 而不是老的 pynvml；
+# 两者都导出 `import pynvml` 模块名，但老 pynvml 已 unmaintained 会打 deprecation 警告。
+nvidia-ml-py>=12.0
+rich>=13.7.0
+# requests[socks] / httpx[socks]：SOCKS5 代理支持。
+# 用户在 Settings → 代理 配 socks5:// URL 时，requests 走 PySocks（booru/modelscope
+# 下载链），huggingface_hub 1.x 走 httpx + socksio（HF 下载链）。两个 extras 都不装
+# 时，下载报 `'socksio' package is not installed` / `Missing dependencies for SOCKS`，
+# 安装本身无 C 扩展、跨平台。
+requests[socks]>=2.31.0
+httpx[socks]>=0.27
+
+# PP4 — WD14 打标
+# onnxruntime 由 studio 启动期按 GPU 检测自动安装（services/onnxruntime_setup.py）：
+# 有 NVIDIA GPU → onnxruntime-gpu>=1.20（PyPI default，CUDA 12.x，覆盖 RTX 30/40/50）
+# 无 → onnxruntime（CPU 兜底）
+# 用户也可在 Settings → WD14 → 重装按钮手动切换。
+huggingface_hub>=0.20.0
+
+# PP5.5 — 正则集分辨率聚类后处理（K-means + silhouette）
+scikit-learn>=1.3.0
+
+# 下载源：ModelScope 镜像（国内用户走魔搭，无 HF 映射时自动回退 HF）。
+# services/model_downloader.py 的 download_flat_ms / Anima TE / WD14 / 放大器
+# 路径都依赖；不装就整套 ModelScope 下载源不可用。
+modelscope>=1.20.0
+
+# ADR-0009 / PR-LOG-1：跨进程写日志文件锁支持（Windows webui + worker 同写 studio.log）。
+# pure Python 无 C 扩展。如果未安装，studio/infrastructure/logging.py 会 fallback
+# stdlib RotatingFileHandler（单进程写无锁问题；C7 跨进程开始才真正用得到这个包）。
+concurrent-log-handler>=0.9.25
+
+# Dev / tests (optional)
+# pytest>=8.0
+# httpx>=0.27   # required by FastAPI's TestClient
