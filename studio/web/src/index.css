@@ -1,0 +1,14 @@
+@import './styles/tokens.css';
+@import './styles/info-button.css';
+@import './styles/version-section.css';
+@import './styles/preprocess-crop.css';
+@import './styles/responsive.css';
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* 给所有 overflow-auto / overflow-y-auto 默认预留滚动槽，杜绝抖动 */
+.overflow-auto,
+.overflow-y-auto {
+  scrollbar-gutter: stable;
+}
