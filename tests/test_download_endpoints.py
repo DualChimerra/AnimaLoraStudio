@@ -324,43 +324,87 @@ def _zip_bytes(entries: dict[str, bytes]) -> bytes:
     return buf.getvalue()
 
 
-def test_upload_single_image(client: TestClient) -> None:
+def _run_upload(client: TestClient, pid: int, files: list) -> dict:
+    """POST /upload（异步：返回 pending job）→ 同步跑 upload_worker → 标 done →
+    返回 /upload/status JSON（含 result）。
+
+    把端点 + worker + status 串起来验证，等价于生产里 supervisor 调度 worker。
+    """
+    from studio.workers import upload_worker
+
+    r = client.post(f"/api/projects/{pid}/upload", files=files)
+    assert r.status_code == 200, r.text
+    job = r.json()
+    assert job["kind"] == "upload"
+    assert job["status"] == "pending"
+    rc = upload_worker.run(job["id"])
+    with db.connection_for() as conn:
+        if rc == 0:
+            project_jobs.mark_done(conn, job["id"])
+        else:
+            project_jobs.mark_failed(conn, job["id"], "worker failed")
+    return client.get(f"/api/projects/{pid}/upload/status").json()
+
+
+def test_upload_returns_pending_job(client: TestClient) -> None:
+    """端点秒回 pending job（不再同步处理），避免大 zip 触发 Cloudflare 524。"""
     p = _make_project(client)
     r = client.post(
         f"/api/projects/{p['id']}/upload",
         files=[("files", ("a.jpg", b"\xff\xd8jpgdata", "image/jpeg"))],
     )
     assert r.status_code == 200, r.text
-    body = r.json()
-    assert body["added"] == ["a.jpg"]
-    assert body["skipped"] == []
+    job = r.json()
+    assert job["kind"] == "upload"
+    assert job["status"] == "pending"
+
+
+def test_upload_single_image(client: TestClient) -> None:
+    p = _make_project(client)
+    st = _run_upload(
+        client, p["id"],
+        [("files", ("a.jpg", b"\xff\xd8jpgdata", "image/jpeg"))],
+    )
+    assert st["result"]["added"] == ["a.jpg"]
+    assert st["result"]["skipped"] == []
     pdir = projects.project_dir(p["id"], p["slug"]) / "download"
     assert (pdir / "a.jpg").read_bytes() == b"\xff\xd8jpgdata"
-    # ADR-0007 PR-5: upload 不再推 stage；download_image_count 派生即可
 
 
 def test_upload_zip_extracts_images(client: TestClient) -> None:
     p = _make_project(client)
     blob = _zip_bytes({"a.jpg": b"AA", "sub/b.png": b"BB", "skip.txt": b"X"})
-    r = client.post(
-        f"/api/projects/{p['id']}/upload",
-        files=[("files", ("pack.zip", blob, "application/zip"))],
+    st = _run_upload(
+        client, p["id"],
+        [("files", ("pack.zip", blob, "application/zip"))],
     )
-    body = r.json()
+    body = st["result"]
+    # skip.txt 的 stem 没有对应图片 → 当孤立 caption 跳过
     assert sorted(body["added"]) == ["a.jpg", "b.png"]
     assert any("skip.txt" in s["name"] for s in body["skipped"])
 
 
+def test_upload_zip_pairs_txt_caption(client: TestClient) -> None:
+    """zip 内 png + 同 stem .txt → caption 随图落盘（kohya 风格）。"""
+    p = _make_project(client)
+    blob = _zip_bytes({"a.png": b"AA", "a.txt": b"1girl, solo"})
+    st = _run_upload(
+        client, p["id"],
+        [("files", ("pack.zip", blob, "application/zip"))],
+    )
+    assert sorted(st["result"]["added"]) == ["a.png", "a.txt"]
+    pdir = projects.project_dir(p["id"], p["slug"]) / "download"
+    assert (pdir / "a.txt").read_bytes() == b"1girl, solo"
+
+
 def test_upload_rejects_unsupported_format(client: TestClient) -> None:
     p = _make_project(client)
-    r = client.post(
-        f"/api/projects/{p['id']}/upload",
-        files=[("files", ("note.txt", b"x", "text/plain"))],
+    st = _run_upload(
+        client, p["id"],
+        [("files", ("note.bin", b"x", "application/octet-stream"))],
     )
-    body = r.json()
-    assert body["added"] == []
-    assert len(body["skipped"]) == 1
-    # ADR-0007 PR-5: project 已无 stage；没添加文件即不动 download_image_count
+    assert st["result"]["added"] == []
+    assert len(st["result"]["skipped"]) == 1
 
 
 def test_upload_skip_existing(client: TestClient) -> None:
@@ -368,24 +412,19 @@ def test_upload_skip_existing(client: TestClient) -> None:
     pdir = projects.project_dir(p["id"], p["slug"]) / "download"
     pdir.mkdir(parents=True, exist_ok=True)
     (pdir / "x.png").write_bytes(b"old")
-    r = client.post(
-        f"/api/projects/{p['id']}/upload",
-        files=[("files", ("x.png", b"new", "image/png"))],
+    st = _run_upload(
+        client, p["id"],
+        [("files", ("x.png", b"new", "image/png"))],
     )
-    body = r.json()
-    assert body["added"] == []
-    assert body["skipped"][0]["reason"] == "已存在，跳过"
+    assert st["result"]["added"] == []
+    assert st["result"]["skipped"][0]["reason"] == "已存在，跳过"
     assert (pdir / "x.png").read_bytes() == b"old"
 
 
 def test_upload_convert_to_png_renames_and_dedups(
     client: TestClient,
 ) -> None:
-    """gelbooru.convert_to_png=True：上传 1.png + 1.jpg（不同图）→ 1.png + 1_1.png。
-
-    解决 caption `1.txt` 被 jpg/png 两张不同图共用的问题；同 stem 加 `_N` 后缀
-    保住第二张而不是跳过。
-    """
+    """gelbooru.convert_to_png=True：上传 1.png + 1.jpg（不同图）→ 1.png + 1_1.png。"""
     import io as _io
 
     from PIL import Image
@@ -404,17 +443,15 @@ def test_upload_convert_to_png_renames_and_dedups(
         return buf.getvalue()
 
     p = _make_project(client)
-    r = client.post(
-        f"/api/projects/{p['id']}/upload",
-        files=[
+    st = _run_upload(
+        client, p["id"],
+        [
             ("files", ("1.png", _png((0, 0, 0)), "image/png")),
             ("files", ("1.jpg", _jpg((255, 255, 255)), "image/jpeg")),
         ],
     )
-    assert r.status_code == 200, r.text
-    body = r.json()
-    assert sorted(body["added"]) == ["1.png", "1_1.png"]
-    assert body["skipped"] == []
+    assert sorted(st["result"]["added"]) == ["1.png", "1_1.png"]
+    assert st["result"]["skipped"] == []
     pdir = projects.project_dir(p["id"], p["slug"]) / "download"
     assert (pdir / "1.png").exists()
     assert (pdir / "1_1.png").exists()
@@ -434,6 +471,20 @@ def test_upload_400_for_no_files(client: TestClient) -> None:
     # 此测验证 422/400 两者皆可接受作为「客户端错」。
     r = client.post(f"/api/projects/{p['id']}/upload")
     assert r.status_code in (400, 422)
+
+
+def test_upload_staging_cleaned_after_worker(client: TestClient) -> None:
+    """worker 处理完应删掉 staging 暂存目录。"""
+    from studio.services.projects import jobs as _jobs
+
+    p = _make_project(client)
+    _run_upload(
+        client, p["id"],
+        [("files", ("a.jpg", b"\xff\xd8jpgdata", "image/jpeg"))],
+    )
+    staging_root = _jobs.JOB_LOGS_DIR.parent / "uploads"
+    leftover = list(staging_root.glob("*")) if staging_root.exists() else []
+    assert leftover == []
 
 
 # ---------------------------------------------------------------------------

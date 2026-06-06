@@ -542,6 +542,7 @@ function UploadPanel({
   const inputRef = useRef<HTMLInputElement>(null)
   const [picked, setPicked] = useState<File[]>([])
   const [uploading, setUploading] = useState(false)
+  const [processing, setProcessing] = useState(false)
   const [dragging, setDragging] = useState(false)
   const [showPathPicker, setShowPathPicker] = useState(false)
   const uploadProgress = useUploadProgress()
@@ -563,15 +564,32 @@ function UploadPanel({
     )
     onUploaded(r)
   }
+  // 后端改异步：上传字节后拿到 upload job，轮询 upload/status 等后台 worker
+  // 解压 / 转码完成。job 终态前返回 null，done 拿 result，failed 抛错。
+  const waitForUpload = async (): Promise<UploadResult> => {
+    for (;;) {
+      await new Promise((r) => window.setTimeout(r, 1500))
+      const st = await api.getUploadStatus(pid)
+      const job = st.job
+      if (!job) throw new Error(t('download.uploadJobMissing'))
+      if (job.status === 'done') return st.result ?? { added: [], skipped: [] }
+      if (job.status === 'failed') throw new Error(job.error_msg || t('download.uploadFailed'))
+      if (job.status === 'canceled') throw new Error(t('download.uploadCanceled'))
+    }
+  }
   const submit = async () => {
     if (picked.length === 0) return
     const totalBytes = picked.reduce((s, f) => s + f.size, 0)
     setUploading(true)
+    setProcessing(false)
     uploadProgress.start(totalBytes)
     try {
-      const r = await api.uploadProjectFiles(pid, picked, uploadProgress.onProgress)
+      await api.uploadProjectFiles(pid, picked, uploadProgress.onProgress)
       uploadProgress.finish()
-      applyUploadResult(r)
+      // 字节已传完，进入后台处理阶段（解压 / 转码）。
+      setProcessing(true)
+      const result = await waitForUpload()
+      applyUploadResult(result)
       reset()
       // 短延迟后清掉进度条；让用户看清完成状态
       window.setTimeout(() => uploadProgress.reset(), 800)
@@ -579,17 +597,21 @@ function UploadPanel({
       uploadProgress.fail(e)
       toast(String(e), 'error')
     } finally {
+      setProcessing(false)
       setUploading(false)
     }
   }
   const importFromPath = async (path: string) => {
     setShowPathPicker(false)
     setUploading(true)
+    setProcessing(true)
     try {
-      applyUploadResult(await api.uploadProjectFileFromPath(pid, path))
+      await api.uploadProjectFileFromPath(pid, path)
+      applyUploadResult(await waitForUpload())
     } catch (e) {
       toast(String(e), 'error')
     } finally {
+      setProcessing(false)
       setUploading(false)
     }
   }
@@ -653,7 +675,11 @@ function UploadPanel({
             disabled={uploading}
             className="btn btn-primary btn-sm"
           >
-            {uploading ? t('download.uploading') : t('download.uploadCount', { n: picked.length })}
+            {processing
+              ? t('download.uploadProcessing')
+              : uploading
+                ? t('download.uploading')
+                : t('download.uploadCount', { n: picked.length })}
           </button>
           <button
             onClick={reset}

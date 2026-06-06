@@ -312,6 +312,47 @@ def test_caption_follows_png_conversion_stem(tmp_path: Path) -> None:
     assert (tmp_path / "photo.txt").read_bytes() == b"masterpiece"
 
 
+def test_ingest_paths_streams_zip_and_pairs_caption(tmp_path: Path) -> None:
+    """ingest_paths（worker 用的流式入口）：zip 内 png+txt → 配对落盘。"""
+    src = tmp_path / "src"
+    src.mkdir()
+    blob = _zip_bytes({"a.png": b"AA", "a.txt": b"tag1, tag2", "b.jpg": b"BB"})
+    (src / "pack.zip").write_bytes(blob)
+    dest = tmp_path / "download"
+    out = uploads.ingest_paths([src / "pack.zip"], dest)
+    assert sorted(out.added) == ["a.png", "a.txt", "b.jpg"]
+    assert (dest / "a.txt").read_bytes() == b"tag1, tag2"
+    assert (dest / "a.png").read_bytes() == b"AA"
+
+
+def test_ingest_paths_pairs_loose_files_across_sources(tmp_path: Path) -> None:
+    """散文件路径：1.png + 1.txt 不同源也按 stem 配对。"""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "1.png").write_bytes(b"P")
+    (src / "1.txt").write_bytes(b"caption")
+    (src / "lonely.txt").write_bytes(b"orphan")
+    dest = tmp_path / "download"
+    out = uploads.ingest_paths(
+        [src / "1.png", src / "1.txt", src / "lonely.txt"], dest
+    )
+    assert sorted(out.added) == ["1.png", "1.txt"]
+    assert (dest / "1.txt").read_bytes() == b"caption"
+    assert any("lonely.txt" in s["name"] for s in out.skipped)
+    assert not (dest / "lonely.txt").exists()
+
+
+def test_ingest_paths_progress_callback(tmp_path: Path) -> None:
+    """on_progress 收到逐项 + summary 行（worker 接到 stdout 给前端看）。"""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.png").write_bytes(b"A")
+    lines: list[str] = []
+    uploads.ingest_paths([src / "a.png"], tmp_path / "d", on_progress=lines.append)
+    assert any(l.startswith("[add]") for l in lines)
+    assert any(l.startswith("[summary]") for l in lines)
+
+
 def test_caption_follows_suffixed_collision(tmp_path: Path) -> None:
     """1.png + 1.jpg + 1.txt（convert 模式）：caption 给先落盘的图，后缀副本不抢。"""
     files = [

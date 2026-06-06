@@ -19,7 +19,9 @@ from ...paths import STUDIO_DATA
 
 JOB_LOGS_DIR = STUDIO_DATA / "jobs"
 
-VALID_KINDS: frozenset[str] = frozenset({"download", "preprocess", "tag", "reg_build"})
+VALID_KINDS: frozenset[str] = frozenset(
+    {"download", "preprocess", "tag", "reg_build", "upload"}
+)
 VALID_STATUSES: frozenset[str] = frozenset({
     "pending", "running", "done", "failed", "canceled"
 })
@@ -40,6 +42,30 @@ class JobError(DomainError):
 def log_path_for(job_id: int) -> Path:
     JOB_LOGS_DIR.mkdir(parents=True, exist_ok=True)
     return JOB_LOGS_DIR / f"{job_id}.log"
+
+
+def result_path_for(job_id: int) -> Path:
+    """job 结果 JSON 旁文件（如 upload 的 added/skipped 汇总）。"""
+    JOB_LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    return JOB_LOGS_DIR / f"{job_id}.result.json"
+
+
+def write_result(job_id: int, payload: dict[str, Any]) -> None:
+    """worker 调：把结果落到旁文件，供 status endpoint 读回给前端。"""
+    result_path_for(job_id).write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def read_result(job_id: int) -> Optional[dict[str, Any]]:
+    """读 job 结果旁文件；不存在 / 解析失败返回 None。"""
+    path = result_path_for(job_id)
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return None
 
 
 def _row_to_dict(row: Optional[sqlite3.Row]) -> Optional[dict[str, Any]]:

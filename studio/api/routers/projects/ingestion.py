@@ -24,8 +24,9 @@
 """
 from __future__ import annotations
 
-import io
 import logging
+import shutil
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -48,7 +49,6 @@ from ....services.preprocess import core as preprocess_svc
 from ....services import model_downloader
 from ....services.booru import downloader
 from ....services.preprocess import manifest as preprocess_manifest
-from ....services.dataset import uploads as uploads_svc
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -137,23 +137,52 @@ def start_download(pid: int, body: DownloadRequest) -> dict[str, Any]:
     return job
 
 
-def _apply_project_upload_result(pid: int, result: uploads_svc.UploadResult) -> dict[str, Any]:
-    # ADR-0007 PR-5: project 无 stage 字段；upload 完成由前端实时扫 download/ 派生数字
-    return result.as_dict()
+_UPLOAD_CHUNK = 1 << 20  # 1 MiB 流式落盘块
+
+
+def _staging_root() -> Path:
+    """上传暂存根目录 = STUDIO_DATA/uploads。
+
+    用 ``project_jobs.JOB_LOGS_DIR.parent`` 派生（而非直接 STUDIO_DATA 常量），
+    这样测试 monkeypatch JOB_LOGS_DIR 时暂存目录也跟着进 tmp，不污染仓库。
+    """
+    return project_jobs.JOB_LOGS_DIR.parent / "uploads"
+
+
+def _safe_name(name: str) -> str:
+    """剥掉路径段，只留 basename（防穿越）。"""
+    return (name or "").replace("\\", "/").rsplit("/", 1)[-1]
+
+
+async def _stage_upload_files(files: list[UploadFile], staging_dir: Path) -> int:
+    """把上传文件流式落到 staging_dir（分块，不整包进内存）。返回落盘文件数。"""
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    n = 0
+    for f in files:
+        name = _safe_name(f.filename or "")
+        if not name:
+            continue
+        dest = staging_dir / name
+        with dest.open("wb") as out:
+            while True:
+                chunk = await f.read(_UPLOAD_CHUNK)
+                if not chunk:
+                    break
+                out.write(chunk)
+        n += 1
+    return n
 
 
 @router.post("/api/projects/{pid}/upload")
 async def upload_local_files(
     pid: int, files: list[UploadFile] = File(...),
 ) -> dict[str, Any]:
-    """本地上传：单图（jpg/png）或 zip 包（自动解压）→ project 的 download/。
+    """本地上传：单图 / zip 包 / 同名 .txt caption → 后台 job 处理。
 
-    与 booru 下载共用同一份「全量备份」目录；上传不走 job 系统，端点同步处理
-    并返回 added / skipped 列表。任一文件成功即把项目 stage 推到 downloading。
-
-    复用 `gelbooru.convert_to_png` / `remove_alpha_channel` 设置：开启时上传图
-    也归一到 PNG（同 stem 加 `_1` 后缀避免 caption 撞车），与 booru 下载链路
-    保持一致。
+    端点只把上传文件**流式落到 staging 目录**就立刻创建 upload job 返回（秒级），
+    真正的解压 / convert_to_png / caption 配对在 upload_worker 后台跑。这样大 zip
+    不会卡在同步请求里触发 Cloudflare 100s 超时（524）。前端轮询
+    `upload/status` 看进度 + 结果。
     """
     if not files:
         raise HTTPException(400, "没有上传文件")
@@ -161,26 +190,31 @@ async def upload_local_files(
         p = projects.get_project(conn, pid)
     if not p:
         raise HTTPException(404, f"项目不存在: id={pid}")
-    pdir = projects.project_dir(p["id"], p["slug"]) / "download"
 
-    # 全量读入内存交给 service 解析；FastAPI 的 UploadFile 内部本就是 SpooledTemporaryFile，
-    # 大文件会落临时盘，所以这里 read() 不会立即吃光内存。
-    pairs: list[tuple[str, io.BytesIO]] = []
-    for f in files:
-        data = await f.read()
-        pairs.append((f.filename or "", io.BytesIO(data)))
-    sec = secrets.load()
-    result = uploads_svc.accept_many(
-        pairs, pdir,
-        convert_to_png=sec.gelbooru.convert_to_png,
-        remove_alpha_channel=sec.gelbooru.remove_alpha_channel,
-    )
-    return _apply_project_upload_result(pid, result)
+    staging_dir = _staging_root() / f"{pid}_{uuid.uuid4().hex}"
+    try:
+        staged = await _stage_upload_files(files, staging_dir)
+    except Exception:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise
+    if staged == 0:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise HTTPException(400, "没有有效文件名")
+
+    with db.connection_for() as conn:
+        job = project_jobs.create_job(
+            conn,
+            project_id=pid,
+            kind="upload",
+            params={"staging_dir": str(staging_dir), "source": "upload"},
+        )
+    _publish_job_state(job)
+    return job
 
 
 @router.post("/api/projects/{pid}/upload-from-path")
 def upload_local_file_from_path(pid: int, body: UploadFromPathBody) -> dict[str, Any]:
-    """从 server 可见路径导入单图或 zip → project 的 download/。"""
+    """从 server 可见路径导入单图 / zip → 后台 upload job（不拷贝、不删原文件）。"""
     with db.connection_for() as conn:
         p = projects.get_project(conn, pid)
     if not p:
@@ -194,15 +228,45 @@ def upload_local_file_from_path(pid: int, body: UploadFromPathBody) -> dict[str,
         raise HTTPException(404, f"文件不存在: {body.path}")
     if not src.is_file():
         raise HTTPException(400, "请选择文件")
-    pdir = projects.project_dir(p["id"], p["slug"]) / "download"
-    sec = secrets.load()
-    with src.open("rb") as fh:
-        result = uploads_svc.accept_many(
-            [(src.name, fh)], pdir,
-            convert_to_png=sec.gelbooru.convert_to_png,
-            remove_alpha_channel=sec.gelbooru.remove_alpha_channel,
+
+    with db.connection_for() as conn:
+        job = project_jobs.create_job(
+            conn,
+            project_id=pid,
+            kind="upload",
+            params={"paths": [str(src)], "source": "path"},
         )
-    return _apply_project_upload_result(pid, result)
+    _publish_job_state(job)
+    return job
+
+
+@router.get("/api/projects/{pid}/upload/status")
+def upload_status(pid: int) -> dict[str, Any]:
+    """最近一条 upload job + log_tail + 结果（added/skipped）。
+
+    前端上传完字节后轮询这里：job 终态前显示「处理中」，done 后用 result 弹
+    added/skipped 汇总并刷新图库；failed 显示 error_msg。
+    """
+    with db.connection_for() as conn:
+        if not projects.get_project(conn, pid):
+            raise HTTPException(404, f"项目不存在: id={pid}")
+        job = project_jobs.latest_for(conn, project_id=pid, kind="upload")
+    if not job:
+        return {"job": None, "log_tail": "", "result": None}
+    log_path = Path(job.get("log_path") or "")
+    tail = ""
+    if log_path.exists():
+        try:
+            text = log_path.read_text(encoding="utf-8", errors="replace")
+            tail = "\n".join(text.splitlines()[-50:])
+        except Exception:
+            tail = ""
+    result = (
+        project_jobs.read_result(job["id"])
+        if job.get("status") == "done"
+        else None
+    )
+    return {"job": job, "log_tail": tail, "result": result}
 
 
 @router.get("/api/projects/{pid}/download/status")
