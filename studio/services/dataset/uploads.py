@@ -35,7 +35,7 @@ import zipfile
 from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
-from typing import BinaryIO, Iterable, Optional
+from typing import BinaryIO, Callable, Iterable, Optional
 
 from PIL import Image
 
@@ -300,4 +300,121 @@ def accept_many(
         remove_alpha_channel=remove_alpha_channel,
     )
     result.skipped = pre_skipped + result.skipped
+    return result
+
+
+def _collect_captions_from_zip(
+    src: Path, cap_by_stem: dict[str, list[tuple[str, bytes]]]
+) -> None:
+    """zip 内所有 .txt 读进 caption 表（caption 体积小，全量入内存无压力）。"""
+    try:
+        with zipfile.ZipFile(src) as zf:
+            for info in zf.infolist():
+                if info.is_dir():
+                    continue
+                inner = _safe_basename(info.filename)
+                if inner and _is_caption_ext(inner):
+                    cap_by_stem.setdefault(Path(inner).stem, []).append(
+                        (f"{src.name}:{info.filename}", zf.read(info))
+                    )
+    except zipfile.BadZipFile:
+        pass  # 坏 zip 在 pass-2 落 skipped
+
+
+def ingest_paths(
+    sources: Iterable[Path],
+    dest_dir: Path,
+    *,
+    convert_to_png: bool = False,
+    remove_alpha_channel: bool = False,
+    on_progress: Optional[Callable[[str], None]] = None,
+) -> UploadResult:
+    """从磁盘上的文件路径批量落盘（图片 / zip / .txt caption），按 stem 配对 caption。
+
+    与 ``accept_many`` 同语义，但**流式**处理：图片逐张读（zip entry 逐个 open），
+    只有体积极小的 caption 全量入内存。适合后台 worker 处理大 zip——不会把整包
+    解压进 RAM（``accept_many`` 会），从而避免 OOM / 长时间卡顿。
+
+    `on_progress(line)` 可选：worker 把它接到 stdout，前端读 log_tail 看进度。
+    """
+    result = UploadResult()
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    def log(line: str) -> None:
+        if on_progress is not None:
+            on_progress(line)
+
+    srcs = list(sources)
+
+    # pass 1：收集所有来源（散文件 + zip 内）的 caption，按 stem 入 FIFO 队列。
+    cap_by_stem: dict[str, list[tuple[str, bytes]]] = {}
+    for src in srcs:
+        suffix = src.suffix.lower()
+        if suffix == CAPTION_EXT:
+            cap_by_stem.setdefault(src.stem, []).append((src.name, src.read_bytes()))
+        elif suffix == ZIP_EXT:
+            _collect_captions_from_zip(src, cap_by_stem)
+
+    def place_image(base: str, stream: BinaryIO, report: str) -> None:
+        final = _write_image_entry(
+            base, stream, dest_dir,
+            convert_to_png=convert_to_png,
+            remove_alpha_channel=remove_alpha_channel,
+            report_name=report,
+            result=result,
+        )
+        if final is None:
+            return
+        queue = cap_by_stem.get(Path(base).stem)
+        if queue:
+            _rep, data = queue.pop(0)
+            cap_path = dest_dir / (final.stem + CAPTION_EXT)
+            cap_path.write_bytes(data)
+            result.added.append(cap_path.name)
+        log(f"[add] {final.name}")
+
+    # pass 2：图片流式落盘 + 配 caption；非图非 caption / 坏 zip 记 skipped。
+    for src in srcs:
+        suffix = src.suffix.lower()
+        if suffix in ALLOWED_IMAGE_EXTS:
+            with src.open("rb") as fh:
+                place_image(src.name, fh, src.name)
+        elif suffix == CAPTION_EXT:
+            continue  # 已在 pass-1 入表，由对应图片领取
+        elif suffix == ZIP_EXT:
+            try:
+                with zipfile.ZipFile(src) as zf:
+                    for info in zf.infolist():
+                        if info.is_dir():
+                            continue
+                        inner = _safe_basename(info.filename)
+                        label = f"{src.name}:{info.filename}"
+                        if not inner:
+                            continue
+                        inner_suffix = Path(inner).suffix.lower()
+                        if inner_suffix in ALLOWED_IMAGE_EXTS:
+                            with zf.open(info) as entry:
+                                place_image(inner, entry, label)
+                        elif inner_suffix == CAPTION_EXT:
+                            continue
+                        else:
+                            result.skipped.append(
+                                {"name": label, "reason": "格式不支持"}
+                            )
+            except zipfile.BadZipFile:
+                result.skipped.append({"name": src.name, "reason": "zip 损坏"})
+        else:
+            allowed = ", ".join(sorted(ALLOWED_IMAGE_EXTS)) + ", .txt, .zip"
+            result.skipped.append(
+                {"name": src.name, "reason": f"格式不支持（仅 {allowed}）"}
+            )
+
+    # 没配上图的 caption → 跳过并报告。
+    for queue in cap_by_stem.values():
+        for rep, _data in queue:
+            result.skipped.append(
+                {"name": rep, "reason": "无对应图片，已忽略 caption"}
+            )
+
+    log(f"[summary] added={len(result.added)} skipped={len(result.skipped)}")
     return result

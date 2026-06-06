@@ -1,7 +1,7 @@
 {
   "version": 1,
   "generated_from": "studio.server.app",
-  "count": 160,
+  "count": 165,
   "routes": [
     {
       "path": "/",
@@ -463,6 +463,14 @@
         "POST"
       ],
       "name": "upload_local_file_from_path",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/projects/{pid}/upload/status",
+      "methods": [
+        "GET"
+      ],
+      "name": "upload_status",
       "type": "APIRoute"
     },
     {
@@ -996,6 +1004,14 @@
     {
       "path": "/api/queue/{task_id}/outputs",
       "methods": [
+        "DELETE"
+      ],
+      "name": "delete_task_output_files",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/queue/{task_id}/outputs",
+      "methods": [
         "GET"
       ],
       "name": "list_task_outputs",
@@ -1170,6 +1186,38 @@
       "type": "APIRoute"
     },
     {
+      "path": "/api/tag-dictionary/data",
+      "methods": [
+        "GET"
+      ],
+      "name": "get_data",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/tag-dictionary/meta",
+      "methods": [
+        "GET"
+      ],
+      "name": "get_meta",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/tag-dictionary/reset",
+      "methods": [
+        "POST"
+      ],
+      "name": "reset",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/tag-dictionary/upload",
+      "methods": [
+        "POST"
+      ],
+      "name": "upload",
+      "type": "APIRoute"
+    },
+    {
       "path": "/api/tagger/{name}/check",
       "methods": [
         "GET"
@@ -1284,12 +1332,6 @@
       ],
       "name": "get_sample",
       "type": "APIRoute"
-    },
-    {
-      "path": "/studio",
-      "methods": [],
-      "name": "studio",
-      "type": "Mount"
     }
   ]
 }

@@ -653,7 +653,7 @@ export interface ProjectDetail extends ProjectSummary {
 // ---- jobs (PP2) -----------------------------------------------------------
 
 export type JobStatus = 'pending' | 'running' | 'done' | 'failed' | 'canceled'
-export type JobKind = 'download' | 'preprocess' | 'tag' | 'reg_build'
+export type JobKind = 'download' | 'preprocess' | 'tag' | 'reg_build' | 'upload'
 
 export interface Job {
   id: number
@@ -1795,24 +1795,32 @@ export const api = {
       `/api/projects/${pid}/download/status`
     ),
   /**
-   * 本地上传：单图（jpg/png）或 zip 包。走 XHR 以拿到 upload progress 事件
-   * （fetch 没有 request body progress）。后端同步解 zip / 落盘，所以
-   * progress 到 100% 后还有一段 server processing 时间。
+   * 本地上传：单图 / zip 包 / 同名 .txt caption。走 XHR 拿 upload progress 事件
+   * （fetch 没有 request body progress）。
+   *
+   * 后端改异步：字节落盘后立刻返回一个 `upload` job（避免大 zip 同步处理触发
+   * Cloudflare 524）。真正解压 / 转码在后台 worker 跑，调用方上传完后轮询
+   * `getUploadStatus` 等 job 终态拿 added/skipped。
    */
   uploadProjectFiles: (
     pid: number,
     files: File[],
     onProgress?: (e: UploadProgressEvent) => void,
-  ): Promise<UploadResult> => {
+  ): Promise<Job> => {
     const fd = new FormData()
     for (const f of files) fd.append('files', f, f.name)
-    return xhrUpload<UploadResult>(`/api/projects/${pid}/upload`, fd, onProgress)
+    return xhrUpload<Job>(`/api/projects/${pid}/upload`, fd, onProgress)
   },
   uploadProjectFileFromPath: (pid: number, path: string) =>
-    req<UploadResult>(`/api/projects/${pid}/upload-from-path`, {
+    req<Job>(`/api/projects/${pid}/upload-from-path`, {
       method: 'POST',
       body: JSON.stringify({ path }),
     }),
+  /** 上传 job 状态轮询：job 终态前 result 为 null；done 后含 added/skipped。 */
+  getUploadStatus: (pid: number) =>
+    req<{ job: Job | null; log_tail: string; result: UploadResult | null }>(
+      `/api/projects/${pid}/upload/status`
+    ),
   listFiles: (pid: number, bucket = 'download') =>
     req<{ items: DownloadFile[]; count: number }>(
       `/api/projects/${pid}/files?bucket=${encodeURIComponent(bucket)}`
