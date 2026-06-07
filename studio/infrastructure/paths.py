@@ -1,10 +1,28 @@
 """Studio 内部使用的路径常量与目录初始化。"""
 from __future__ import annotations
+import os
 from pathlib import Path
 
 # PR-7：本文件从 studio/paths.py 搬到 studio/infrastructure/paths.py，多嵌一层；
 # REPO_ROOT 要再上跳一层（__file__ → infrastructure/ → studio/ → repo root）。
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+
+
+def _resolve_studio_data() -> Path:
+    """studio_data 根目录。
+
+    优先读环境变量 `ALS_STUDIO_DATA`（绝对路径），否则回退到 `REPO_ROOT/studio_data`。
+
+    云端（Colab / Kaggle 等）部署时强烈建议把工作目录放在**本机快速盘**，
+    再单独把它同步到 Google Drive —— 直接把 studio_data 软链到 Google Drive
+    FUSE 挂载点会让 SQLite（WAL/锁）和大量小文件写入不可靠：项目 / 预设
+    丢失、第二个项目目录不落盘、下载的 zip 损坏等问题几乎都源于此。
+    详见 docs / Colab notebook 注释。
+    """
+    env = os.environ.get("ALS_STUDIO_DATA", "").strip()
+    if env:
+        return Path(env).expanduser()
+    return REPO_ROOT / "studio_data"
 
 # 训练侧已有。`OUTPUT_DIR` 仅给 `/samples/{name}` 端点（无 task_id 时）兜底用，
 # CLI 用户用 `./output/samples/...`；Studio 模式样本落到
@@ -17,7 +35,7 @@ DATA_EXPORTS = REPO_ROOT / "data_exports"
 
 
 # Studio 持久化（SQLite + 用户保存的 preset + 任务日志）
-STUDIO_DATA = REPO_ROOT / "studio_data"
+STUDIO_DATA = _resolve_studio_data()
 STUDIO_DB = STUDIO_DATA / "studio.db"
 USER_PRESETS_DIR = STUDIO_DATA / "presets"
 USER_CONFIGS_DIR = USER_PRESETS_DIR  # 兼容别名（PP0 后将随 configs_io 一起移除）

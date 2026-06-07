@@ -9,6 +9,7 @@ mirror（那些在 sources.py）。
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any, Optional
 
@@ -137,8 +138,14 @@ def safe_dir_name(model_id: str) -> str:
 def models_root() -> Path:
     """模型根目录（所有训练 / WD14 模型共用）。
 
-    优先读 `secrets.models.root`（用户在设置页配置），未设 / 空字符串时回退
-    到 `{REPO_ROOT}/models/`。解决云端机系统盘小需要把模型放数据盘的场景。
+    解析优先级：
+      1. `secrets.models.root`（用户在设置页配置的绝对路径）
+      2. 环境变量 `ALS_MODELS_ROOT`（云端 notebook 注入；让模型一次性下载到
+         持久盘 / Google Drive 后跨会话复用，无需用户手动进 Settings 配置）
+      3. `{REPO_ROOT}/models/`（默认）
+
+    云端机系统盘是临时盘 —— 不设 1/2 时模型每次新连接都会重新下载（Anima
+    主模型 + Qwen3 + T5 等好几个 GB）。把根指到 Drive 即可「下载一次，永久复用」。
 
     注意目录命名：与 schema.py 里的 `transformer_path` 默认值（同 `models/`）
     + WD14 的 `models/wd14/` 对齐；HF repo 内部命名 `diffusion_models/`，本地
@@ -150,6 +157,9 @@ def models_root() -> Path:
         cfg_root = None
     if cfg_root and str(cfg_root).strip():
         return Path(str(cfg_root).strip()).expanduser()
+    env_root = os.environ.get("ALS_MODELS_ROOT", "").strip()
+    if env_root:
+        return Path(env_root).expanduser()
     return REPO_ROOT / "models"
 
 

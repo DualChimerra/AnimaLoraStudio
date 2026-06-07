@@ -5,6 +5,7 @@ studio_data/configs/{config_name}.yaml）。
 """
 from __future__ import annotations
 
+import os
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -12,6 +13,19 @@ from pathlib import Path
 from typing import Any, Iterator, Optional
 
 from .paths import STUDIO_DB
+
+
+def _journal_mode() -> str:
+    """SQLite journal 模式。默认 WAL（本机盘最快）。
+
+    环境变量 `ALS_SQLITE_JOURNAL` 可覆盖（如 `TRUNCATE` / `DELETE`）。云端
+    部署若要把整个 studio_data 周期性 rsync 到 Google Drive，建议设 `TRUNCATE`：
+    WAL 会额外维护 `-wal` / `-shm` 边车文件，FUSE 盘上同步 / 复制时容易出现
+    撕裂或丢提交；single-file 的 TRUNCATE 模式只有一个 `studio.db`，复制更安全。
+    """
+    mode = os.environ.get("ALS_SQLITE_JOURNAL", "").strip().upper()
+    valid = {"WAL", "TRUNCATE", "DELETE", "PERSIST", "MEMORY", "OFF"}
+    return mode if mode in valid else "WAL"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS tasks (
@@ -42,9 +56,12 @@ def connect(path: Optional[Path] = None) -> sqlite3.Connection:
     """打开连接；调用方负责关闭（建议用 `with connection_for(...)`）。"""
     db_path = path or STUDIO_DB
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path), check_same_thread=False, timeout=10.0)
+    conn = sqlite3.connect(str(db_path), check_same_thread=False, timeout=30.0)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute(f"PRAGMA journal_mode={_journal_mode()}")
+    # 多线程（supervisor + HTTP worker）下并发写：锁等待 30s 再 raise，
+    # 避免「database is locked」直接打断入队 / 状态更新。
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
