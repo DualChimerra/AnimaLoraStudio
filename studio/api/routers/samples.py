@@ -87,8 +87,11 @@ def get_sample(
             raise HTTPException(404)
         resolved = path
 
-    # w 给了走缩略图；w<=0 或没给 → 原图。复用 thumb_cache，盘上落 .jpg；
-    # 浏览器走弱 etag + no-cache，304 命中很轻。
-    if w is not None and w > 0:
-        return _thumb_response(resolved, w)
-    return _thumb_response(resolved, 0)  # size=0 内部直接返回 src，不缩
+    # w 给了走缩略图；w<=0 或没给 → 原图。复用 thumb_cache，盘上落 .jpg。
+    # task-scoped 采样图内容不可变（文件名带 epoch/step，重训得新 task_id），
+    # URL (`/samples/{file}?task_id=N&w=W`) 是稳定唯一 key → immutable 长缓存，
+    # 浏览器重开不再回源（云端隧道场景每张图省一次 304 RTT）。无 task_id 的
+    # 兜底（CLI OUTPUT_DIR/samples，同名可能被覆盖）保持 no-cache 重验。
+    immutable = task_id is not None
+    size = w if (w is not None and w > 0) else 0
+    return _thumb_response(resolved, size, immutable=immutable)

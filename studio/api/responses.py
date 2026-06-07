@@ -24,12 +24,19 @@ EMPTY_STATE: dict[str, Any] = {
 }
 
 
-def _thumb_response(src: Path, size: int) -> FileResponse:
-    """统一 thumb 响应：弱 etag（基于 src mtime+size）+ no-cache 强制重验。
+def _thumb_response(src: Path, size: int, immutable: bool = False) -> FileResponse:
+    """统一 thumb 响应：弱 etag（基于 src mtime+size）。
 
-    早先用 `Cache-Control: public, max-age=86400` 会让浏览器记住所有响应 24h，
-    包括重启过渡期的失败响应；用户视角就是「重启后图片加载不了」。改用 etag +
-    no-cache 后，浏览器每次发条件请求，命中走 304 几 ms，错过响应不再阻塞。
+    默认 `no-cache 强制重验`：早先用 `max-age=86400` 会让浏览器记住所有响应
+    24h，包括重启过渡期的失败响应；用户视角就是「重启后图片加载不了」。改用
+    etag + no-cache 后，浏览器每次发条件请求，命中走 304 几 ms。
+
+    `immutable=True`：内容一旦写就不会变（且 URL 已是稳定唯一 key，如训练
+    采样图 `?task_id=N` + 带 epoch/step 的文件名）。此时用
+    `max-age=1y, immutable` 让浏览器**完全不再回源**——云端走 cloudflared
+    隧道时，每张图省掉一次 RTT 的 304 往返，监控页采样图条秒开、重开不再
+    重新加载。重启过渡期的隐患不适用：只有 `.exists()` 命中、真返回图片时
+    才发这个头，404 / 失败响应不带缓存头。
 
     PR-6：从 server.py 抽到 api/responses.py 给 samples router 和 server.py 内的
     project_thumb（PR-6.5 之前还留 server.py）共用。
@@ -40,10 +47,15 @@ def _thumb_response(src: Path, size: int) -> FileResponse:
     except OSError:
         mtime_ns = 0
     etag = f'W/"{mtime_ns}-{size}"'
+    cache_control = (
+        "public, max-age=31536000, immutable"
+        if immutable
+        else "no-cache, must-revalidate"
+    )
     return FileResponse(
         out,
         headers={
-            "Cache-Control": "no-cache, must-revalidate",
+            "Cache-Control": cache_control,
             "ETag": etag,
         },
     )
