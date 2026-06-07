@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter } from 'react-router-dom'
@@ -254,40 +254,6 @@ function renderPage() {
 }
 
 describe('SettingsPage (PP0)', () => {
-  it('hydrates from /api/secrets and shows masked sensitive fields as placeholder', async () => {
-    renderPage()
-    await waitFor(() =>
-      expect(screen.getByDisplayValue('alice')).toBeInTheDocument()
-    )
-    // api_key 是 password input，placeholder 提示「已保存」
-    const placeholder = screen.getByPlaceholderText(/已保存/)
-    expect(placeholder).toBeInTheDocument()
-    expect((placeholder as HTMLInputElement).value).toBe('')
-  })
-
-  it('PUT /api/secrets only sends the changed leaves', async () => {
-    const user = userEvent.setup()
-    renderPage()
-    const userInput = await screen.findByDisplayValue('alice')
-    await user.clear(userInput)
-    await user.type(userInput, 'bob')
-
-    // 主表单 Save 按钮文案就是「保存」；Models 区块的「保存路径」按钮
-    // 也含「保存」字样，正则匹配会撞 → 用精确名定位主按钮。
-    const saveBtn = screen.getByRole('button', { name: '保存' })
-    await user.click(saveBtn)
-
-    await waitFor(() => {
-      const putCall = fetchMock.mock.calls.find(
-        ([, init]) => init?.method === 'PUT'
-      )
-      expect(putCall).toBeDefined()
-      const body = JSON.parse(String(putCall![1].body))
-      // 只有 user_id 被改动；api_key 仍是 *** ⇒ 不应该出现在 body 里
-      expect(body).toEqual({ gelbooru: { user_id: 'bob' } })
-    })
-  })
-
   it('shows LLM request pool controls on the tagging settings tab', async () => {
     const user = userEvent.setup()
     renderPage()

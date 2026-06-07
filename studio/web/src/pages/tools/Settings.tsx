@@ -22,7 +22,6 @@ import {
   type SystemVersion,
   type TorchCuTag,
   type TorchStatus,
-  type WandBConfig,
   type WD14Runtime,
 } from '../../api/client'
 import { useDialog } from '../../components/Dialog'
@@ -62,7 +61,7 @@ type Section =
   | 'generate'
   | 'proxy'
 
-type Tab = 'dataset' | 'tagging' | 'preprocess' | 'training' | 'monitor' | 'testing' | 'appearance' | 'system'
+type Tab = 'tagging' | 'training' | 'testing' | 'appearance' | 'system'
 
 // 外部页面通过 `?section=<id>` 跳转到 SettingsPage 的特定 section 时，用这个
 // 反向映射决定要先切到哪个 tab。只列出能从外部链接到的 sections。
@@ -74,11 +73,8 @@ const SECTION_TO_TAB: Record<string, Tab> = {
 }
 
 const TAB_LIST: { id: Tab; labelKey: string }[] = [
-  { id: 'dataset', labelKey: 'settings.tabDataset' },
-  { id: 'preprocess', labelKey: 'settings.tabPreprocess' },
   { id: 'tagging', labelKey: 'settings.tabTagging' },
   { id: 'training', labelKey: 'settings.tabTraining' },
-  { id: 'monitor', labelKey: 'settings.tabMonitor' },
   { id: 'testing', labelKey: 'settings.tabGenerate' },
   { id: 'appearance', labelKey: 'settings.tabAppearance' },
   { id: 'system', labelKey: 'settings.tabSystem' },
@@ -87,15 +83,6 @@ const TAB_LIST: { id: Tab; labelKey: string }[] = [
 // 每个 tab 的 section index — 用于右侧 sticky 导航。id 与各 section 的 DOM id
 // 对应；label 在导航里直接显示。修改 section 顺序时记得同步这里。
 const TAB_SECTIONS: Record<Tab, { id: string; labelKey: string }[]> = {
-  dataset: [
-    { id: 'gelbooru', labelKey: 'settings.gelbooru' },
-    { id: 'danbooru', labelKey: 'settings.danbooru' },
-    { id: 'download-global', labelKey: 'settings.downloadGlobal' },
-    { id: 'proxy', labelKey: 'settings.proxy.sectionTitle' },
-  ],
-  preprocess: [
-    { id: 'upscalers', labelKey: 'settings.upscalers' },
-  ],
   tagging: [
     { id: 'llm-tagger', labelKey: 'settings.llmTagger' },
     { id: 'wd14', labelKey: 'settings.wd14' },
@@ -110,9 +97,6 @@ const TAB_SECTIONS: Record<Tab, { id: string; labelKey: string }[]> = {
     { id: 'flash-attn', labelKey: 'settings.flashAttn' },
     { id: 'xformers', labelKey: 'settings.xformers' },
     { id: 'models', labelKey: 'settings.trainingModels' },
-  ],
-  monitor: [
-    { id: 'wandb', labelKey: 'settings.wandb' },
   ],
   testing: [
     { id: 'preview', labelKey: 'settings.intermediatePreview' },
@@ -176,14 +160,13 @@ function getStoredTab(): Tab {
   try {
     const v = localStorage.getItem(TAB_STORAGE_KEY)
     if (
-      v === 'dataset' || v === 'tagging' || v === 'preprocess' || v === 'training'
-      || v === 'monitor' || v === 'testing' || v === 'appearance'
-      || v === 'system'
+      v === 'tagging' || v === 'training' || v === 'testing'
+      || v === 'appearance' || v === 'system'
     ) return v
   } catch {
     /* ignore localStorage errors */
   }
-  return 'dataset'
+  return 'tagging'
 }
 
 const EMPTY: Secrets = {
@@ -270,13 +253,6 @@ const MODEL_DESCRIPTION_KEYS: Record<string, string> = {
   t5_tokenizer: 'settings.modelDescriptions.t5Tokenizer',
   wd14: 'settings.modelDescriptions.wd14',
   cltagger: 'settings.modelDescriptions.cltagger',
-}
-
-const UPSCALER_DESCRIPTION_KEYS: Record<string, string> = {
-  '4x-AnimeSharp': 'settings.upscalerDescriptions.animeSharp',
-  'R-ESRGAN_4x+Anime6B': 'settings.upscalerDescriptions.realEsrganAnime6B',
-  '4x_foolhardy_Remacri': 'settings.upscalerDescriptions.remacri',
-  'ESRGAN_4x': 'settings.upscalerDescriptions.esrgan4x',
 }
 
 function translatedCatalogText(keys: Record<string, string>, id: string, fallback: string | undefined, t: TFunction): string {
@@ -599,188 +575,6 @@ export default function SettingsPage() {
         </div>
       )}
 
-      {tab === 'dataset' && (<>
-      <SettingsSection id="gelbooru" title="Gelbooru">
-        <SettingsField label="user_id">
-          <SettingsInput
-            type="text"
-            value={draft.gelbooru.user_id}
-            onChange={(v) => update('gelbooru', 'user_id', v)}
-            autoComplete="off"
-            data-lpignore="true"
-            data-1p-ignore
-            data-form-type="other"
-            className={textInputClass}
-          />
-        </SettingsField>
-        <SettingsField label="api_key">
-          <SensitiveInput
-            value={draft.gelbooru.api_key}
-            serverValue={server?.gelbooru.api_key ?? ''}
-            onChange={(v) => update('gelbooru', 'api_key', v)}
-          />
-        </SettingsField>
-        <SettingsField label="save_tags">
-          <Bool value={draft.gelbooru.save_tags} onChange={(v) => update('gelbooru', 'save_tags', v)} />
-        </SettingsField>
-        <SettingsField label="convert_to_png">
-          <Bool value={draft.gelbooru.convert_to_png} onChange={(v) => update('gelbooru', 'convert_to_png', v)} />
-        </SettingsField>
-        <SettingsField label="remove_alpha_channel">
-          <Bool value={draft.gelbooru.remove_alpha_channel} onChange={(v) => update('gelbooru', 'remove_alpha_channel', v)} />
-        </SettingsField>
-      </SettingsSection>
-
-      <SettingsSection id="danbooru" title="Danbooru">
-        <SettingsField label="username">
-          <SettingsInput
-            type="text"
-            value={draft.danbooru.username}
-            onChange={(v) => update('danbooru', 'username', v)}
-            placeholder={t('settings.danbooruUsernamePlaceholder')}
-            autoComplete="off"
-            data-lpignore="true"
-            data-1p-ignore
-            data-form-type="other"
-            className={textInputClass}
-          />
-        </SettingsField>
-        <SettingsField label="api_key">
-          <SensitiveInput
-            value={draft.danbooru.api_key}
-            serverValue={server?.danbooru.api_key ?? ''}
-            onChange={(v) => update('danbooru', 'api_key', v)}
-          />
-        </SettingsField>
-        <SettingsField label="account_type">
-          <select
-            value={draft.danbooru.account_type}
-            onChange={(e) => update('danbooru', 'account_type', e.target.value as 'free' | 'gold' | 'platinum')}
-            className={textInputClass}          >
-            <option value="free">{t('settings.accountFree')}</option>
-            <option value="gold">{t('settings.accountGold')}</option>
-            <option value="platinum">{t('settings.accountPlatinum')}</option>
-          </select>
-        </SettingsField>
-      </SettingsSection>
-
-      <SettingsSection id="download-global" title={t('settings.downloadGlobal')}>
-        <SettingsField
-          label="exclude_tags"
-          desc={t('settings.commaSeparated')}
-          helpTooltip={<p><Trans i18nKey="settings.excludeTagsHelp" components={{ code: <code /> }} /></p>}
-        >
-          <SettingsInput
-            type="text"
-            value={draft.download.exclude_tags.join(', ')}
-            onChange={(v) =>
-              update('download', 'exclude_tags',
-                v.split(',').map((t) => t.trim().replace(/^-+/, '')).filter(Boolean)
-              )
-            }
-            placeholder={t('settings.excludeTagsPlaceholder')}
-            className={textInputClass}
-          />
-        </SettingsField>
-
-        <div className="grid grid-cols-3 gap-3 pt-2 border-t border-subtle">
-          <div className="flex flex-col gap-1">
-            <label className="text-xs text-fg-secondary font-mono">parallel_workers</label>
-            <SettingsInput
-              type="number" min={1} max={16}
-              value={draft.download.parallel_workers}
-              onChange={(v) => update('download', 'parallel_workers', Math.max(1, Number(v) || 1))}
-              className={`${textInputClass} max-w-24`}
-            />
-          </div>
-          <div className="flex flex-col gap-1">
-            <label className="text-xs text-fg-secondary font-mono">api_rate_per_sec</label>
-            <SettingsInput
-              type="number" step="0.5" min={0.5} max={10}
-              value={draft.download.api_rate_per_sec}
-              onChange={(v) => update('download', 'api_rate_per_sec', Math.max(0.5, Number(v) || 0.5))}
-              className={`${textInputClass} max-w-24`}
-            />
-          </div>
-          <div className="flex flex-col gap-1">
-            <label className="text-xs text-fg-secondary font-mono">cdn_rate_per_sec</label>
-            <SettingsInput
-              type="number" step="1" min={1} max={20}
-              value={draft.download.cdn_rate_per_sec}
-              onChange={(v) => update('download', 'cdn_rate_per_sec', Math.max(1, Number(v) || 1))}
-              className={`${textInputClass} max-w-24`}
-            />
-          </div>
-        </div>
-      </SettingsSection>
-
-      <SettingsSection id="proxy" title={t('settings.proxy.sectionTitle')}>
-        <SettingsField label={t('settings.proxy.enableLabel')}>
-          <Bool
-            value={draft.proxy.enabled}
-            onChange={(v) => update('proxy', 'enabled', v)}
-          />
-          <p className="text-xs text-fg-tertiary mt-1">
-            {t('settings.proxy.enableDesc')}
-          </p>
-        </SettingsField>
-
-        <SettingsField
-          label={t('settings.proxy.httpLabel')}
-          desc={t('settings.proxy.httpDesc')}
-        >
-          <SettingsInput
-            type="text"
-            value={draft.proxy.http_proxy}
-            onChange={(v) => update('proxy', 'http_proxy', v)}
-            placeholder="http://127.0.0.1:7890"
-            className={textInputClass}
-            disabled={!draft.proxy.enabled}
-          />
-        </SettingsField>
-
-        <SettingsField
-          label={t('settings.proxy.httpsLabel')}
-          desc={t('settings.proxy.httpsDesc')}
-        >
-          <SettingsInput
-            type="text"
-            value={draft.proxy.https_proxy}
-            onChange={(v) => update('proxy', 'https_proxy', v)}
-            placeholder="http://127.0.0.1:7890"
-            className={textInputClass}
-            disabled={!draft.proxy.enabled}
-          />
-        </SettingsField>
-
-        <SettingsField
-          label={t('settings.proxy.noProxyLabel')}
-          desc={t('settings.proxy.noProxyDesc')}
-        >
-          <SettingsInput
-            type="text"
-            value={draft.proxy.no_proxy}
-            onChange={(v) => update('proxy', 'no_proxy', v)}
-            placeholder="localhost,127.0.0.1"
-            className={textInputClass}
-            disabled={!draft.proxy.enabled}
-          />
-        </SettingsField>
-
-        <div className="text-xs text-fg-tertiary border-t border-subtle pt-3 mt-1">
-          <p className="m-0">{t('settings.proxy.tipsTitle')}</p>
-          <ul className="list-disc pl-4 m-0 mt-1 space-y-0.5">
-            <li>{t('settings.proxy.tips1')}</li>
-            <li>
-              {t('settings.proxy.tips2')}
-              <code className="text-fg-primary">http://user:pass@host:port</code>
-            </li>
-            <li>{t('settings.proxy.tips3')}</li>
-          </ul>
-        </div>
-      </SettingsSection>
-      </>)}
-
       {tab === 'tagging' && (<>
       {/* LLMTaggerWorkspace 自带 card；title 渲染在 card 内最顶部跟 WD14/CLTagger 视觉对齐。
        * 外层 div 只承担 id（给 section index 滚动定位用）+ scroll-mt-24 锚点偏移。 */}
@@ -1022,168 +816,6 @@ export default function SettingsPage() {
         t={t}
       />
       </>)}
-
-      {tab === 'monitor' && (<>
-      <SettingsSection id="wandb" title="Weights & Biases">
-        <SettingsField label={t('settings.enableWandb')} desc={t('settings.enableWandbHint')}>
-          <Bool value={draft.wandb.enabled} onChange={(v) => update('wandb', 'enabled', v)} />
-        </SettingsField>
-        <SettingsField label="api_key">
-          <SensitiveInput
-            value={draft.wandb.api_key}
-            serverValue={server?.wandb.api_key ?? ''}
-            onChange={(v) => update('wandb', 'api_key', v)}
-          />
-        </SettingsField>
-        <SettingsField label="project">
-          <SettingsInput
-            type="text"
-            value={draft.wandb.project}
-            onChange={(v) => update('wandb', 'project', v)}
-            placeholder="AnimaLoraStudio"
-            className={textInputClass}
-          />
-        </SettingsField>
-        <SettingsField label="entity" desc={t('settings.wandbEntityHint')}>
-          <SettingsInput
-            type="text"
-            value={draft.wandb.entity}
-            onChange={(v) => update('wandb', 'entity', v)}
-            className={textInputClass}
-          />
-        </SettingsField>
-        <SettingsField label="base_url" desc={t('settings.wandbBaseUrlHint')}>
-          <SettingsInput
-            type="text"
-            value={draft.wandb.base_url}
-            onChange={(v) => update('wandb', 'base_url', v)}
-            placeholder="https://api.wandb.ai"
-            className={textInputClass}
-          />
-        </SettingsField>
-        <div className="grid grid-cols-2 gap-3">
-          <SettingsField label="mode">
-            <select
-              value={draft.wandb.mode}
-              onChange={(e) => update('wandb', 'mode', e.target.value as WandBConfig['mode'])}
-              className={textInputClass}
-            >
-              <option value="online">online</option>
-              <option value="offline">offline</option>
-              <option value="disabled">disabled</option>
-            </select>
-          </SettingsField>
-          <SettingsField
-            label={t('settings.logSamples')}
-            helpTooltip={
-              <p><Trans i18nKey="settings.logSamplesHelp" components={{ code: <code /> }} /></p>
-            }
-          >
-            <Bool value={draft.wandb.log_samples} onChange={(v) => update('wandb', 'log_samples', v)} />
-          </SettingsField>
-        </div>
-        {draft.wandb.log_samples && (
-          <div className="grid grid-cols-2 gap-3">
-            <SettingsField
-              label={t('settings.sampleMaxSide')}
-              helpTooltip={<p>{t('settings.sampleMaxSideHelp')}</p>}
-            >
-              <SettingsInput
-                type="number"
-                min={64}
-                step={64}
-                value={draft.wandb.sample_max_side}
-                onChange={(v) => update('wandb', 'sample_max_side', Math.max(64, parseInt(v) || 1216))}
-                className={textInputClass}
-              />
-            </SettingsField>
-            <SettingsField
-              label={t('settings.sampleEveryNSteps')}
-              helpTooltip={
-                <p><Trans i18nKey="settings.sampleEveryNStepsHelp" components={{ code: <code /> }} /></p>
-              }
-            >
-              <SettingsInput
-                type="number"
-                min={0}
-                step={50}
-                value={draft.wandb.sample_every_n_steps}
-                onChange={(v) => update('wandb', 'sample_every_n_steps', Math.max(0, parseInt(v) || 0))}
-                className={textInputClass}
-              />
-            </SettingsField>
-
-            <h4 className="text-xs font-semibold text-zinc-400 uppercase tracking-wider mt-4 mb-2">
-              {t('settings.uploadArtifacts')}
-            </h4>
-            <SettingsField
-              label={t('settings.uploadModel')}
-              helpTooltip={<p>{t('settings.uploadModelHelp')}</p>}
-            >
-              <div className="flex items-center gap-3">
-                <Bool value={draft.wandb.upload_model} onChange={(v) => update('wandb', 'upload_model', v)} />
-                {draft.wandb.upload_model && (
-                  <select
-                    value={draft.wandb.upload_model_policy}
-                    onChange={(e) => update('wandb', 'upload_model_policy', e.target.value as 'all' | 'last')}
-                    className={textInputClass + ' w-auto'}
-                  >
-                    <option value="last">{t('settings.policyLast')}</option>
-                    <option value="all">{t('settings.policyAll')}</option>
-                  </select>
-                )}
-              </div>
-            </SettingsField>
-            <SettingsField
-              label={t('settings.uploadStateManual')}
-              helpTooltip={<p>{t('settings.uploadStateManualHelp')}</p>}
-            >
-              <div className="flex items-center gap-3">
-                <Bool value={draft.wandb.upload_state_manual} onChange={(v) => update('wandb', 'upload_state_manual', v)} />
-                {draft.wandb.upload_state_manual && (
-                  <select
-                    value={draft.wandb.upload_state_manual_policy}
-                    onChange={(e) => update('wandb', 'upload_state_manual_policy', e.target.value as 'all' | 'last')}
-                    className={textInputClass + ' w-auto'}
-                  >
-                    <option value="last">{t('settings.policyLast')}</option>
-                    <option value="all">{t('settings.policyAll')}</option>
-                  </select>
-                )}
-              </div>
-            </SettingsField>
-            <SettingsField
-              label={t('settings.uploadStateAuto')}
-              helpTooltip={<p>{t('settings.uploadStateAutoHelp')}</p>}
-            >
-              <div className="flex items-center gap-3">
-                <Bool value={draft.wandb.upload_state_auto} onChange={(v) => update('wandb', 'upload_state_auto', v)} />
-                {draft.wandb.upload_state_auto && (
-                  <select
-                    value={draft.wandb.upload_state_auto_policy}
-                    onChange={(e) => update('wandb', 'upload_state_auto_policy', e.target.value as 'all' | 'last')}
-                    className={textInputClass + ' w-auto'}
-                  >
-                    <option value="last">{t('settings.policyLast')}</option>
-                    <option value="all">{t('settings.policyAll')}</option>
-                  </select>
-                )}
-              </div>
-            </SettingsField>
-          </div>
-        )}
-      </SettingsSection>
-      </>)}
-
-      {tab === 'preprocess' && (
-        <UpscalerSection
-          catalog={catalog}
-          busy={downloadBusy}
-          start={startDownload}
-          reloadCatalog={reloadCatalog}
-          t={t}
-        />
-      )}
 
       {tab === 'testing' && (<>
         {/* attention 后端走全局 auto-detect，UI 不暴露切换；想强制覆盖
@@ -1931,202 +1563,6 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
               </summary>
               <div className="mt-1 flex flex-col gap-2">
                 {Object.values(catalog.downloads).map((d) => (
-                  <div key={d.key} className="rounded-sm border border-subtle bg-sunken p-2">
-                    <div className="flex items-center gap-2 mb-1">
-                      <code className="font-mono text-fg-secondary">{d.key}</code>
-                      <ModelStatusBadge exists={d.status === 'done'} size={0} status={d.status} />
-                      {d.message && <span className="text-err overflow-hidden text-ellipsis whitespace-nowrap">{d.message}</span>}
-                    </div>
-                    <pre className="text-xs font-mono text-fg-tertiary max-h-32 overflow-auto whitespace-pre-wrap m-0">
-                      {d.log_tail.join('\n') || t('settings.emptyLog')}
-                    </pre>
-                  </div>
-                ))}
-              </div>
-            </details>
-          )}
-        </div>
-      )}
-    </SettingsSection>
-  )
-}
-
-function UpscalerSection({
-  catalog, busy, start, reloadCatalog, t,
-}: {
-  catalog: ModelsCatalog | null
-  busy: Set<string>
-  start: (model_id: string, variant?: string) => Promise<void>
-  reloadCatalog: () => Promise<void>
-  t: TFunction
-}) {
-  const { toast } = useToast()
-  const [customSource, setCustomSource] = useState<'hf' | 'ms'>('hf')
-  const [customRepo, setCustomRepo] = useState('')
-  const [customFile, setCustomFile] = useState('')
-  const [customBusy, setCustomBusy] = useState(false)
-
-  const pickUpscaler = async (label: string) => {
-    try {
-      await api.selectUpscaler(label)
-      toast(t('settings.defaultUpscaler', { name: label }), 'success')
-      await reloadCatalog()
-    } catch (e) {
-      toast(String(e), 'error')
-    }
-  }
-
-  const submitCustom = async () => {
-    const repo = customRepo.trim()
-    const file = customFile.trim()
-    if (!repo || !file) {
-      toast(t('settings.repoAndFilenameRequired'), 'error')
-      return
-    }
-    setCustomBusy(true)
-    try {
-      await api.startUpscalerCustomDownload({
-        source: customSource, repo_id: repo, filename: file,
-      })
-      toast(t('settings.downloadStarted', { name: file }), 'success')
-      setCustomRepo('')
-      setCustomFile('')
-      // SSE 推 model_download_changed 会刷 catalog；这里兜底
-      setTimeout(() => void reloadCatalog(), 1500)
-    } catch (e) {
-      toast(String(e), 'error')
-    } finally {
-      setCustomBusy(false)
-    }
-  }
-
-  const variants = catalog?.upscalers?.variants ?? []
-  const current = catalog?.upscalers?.current ?? ''
-
-  return (
-    <SettingsSection id="upscalers" title={t('settings.upscalersPreprocess')}>
-      {!catalog ? (
-        <p className="text-fg-tertiary text-xs">{t('common.loading')}</p>
-      ) : (
-        <div className="flex flex-col gap-2">
-          <ModelGroupCard
-            title={t('settings.availableUpscalers')}
-            helpTooltip={
-              <>
-                <p><Trans i18nKey="settings.upscalersHelpPath" values={{ path: catalog.upscalers?.target_dir }} components={{ code: <code /> }} /></p>
-                <p>{t('settings.upscalersHelpDefault')}</p>
-              </>
-            }
-          >
-            <ul className="list-none m-0 p-0 flex flex-col gap-1">
-              {variants.map((v) => {
-                const key = v.kind === 'custom'
-                  ? `upscaler:custom:${v.filename}`
-                  : `upscaler:${v.label}`
-                const dl = catalog.downloads[key]
-                const isSel = v.label === current
-                const canSelect = v.exists && dl?.status !== 'running'
-                return (
-                  <li key={v.label} className={`flex items-center gap-2 text-xs px-1.5 py-1 rounded-sm ${
-                    isSel ? 'bg-accent-soft border border-accent' : 'bg-transparent border border-transparent'
-                  }`}>
-                    <input
-                      type="radio"
-                      name="selected_upscaler"
-                      checked={isSel}
-                      disabled={!canSelect}
-                      onChange={() => void pickUpscaler(v.label)}
-                      className="shrink-0"
-                      style={{ accentColor: 'var(--accent)' }}
-                      title={canSelect ? t('settings.selectDefaultPreprocess') : v.exists ? t('settings.downloadInProgress') : t('settings.notDownloaded')}
-                    />
-                    <div className="flex flex-col min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
-                        <code className="font-mono text-fg-primary truncate">{v.label}</code>
-                        {v.kind === 'custom' && (
-                          <span className="text-[10px] px-1 py-0 rounded-sm bg-sunken text-fg-tertiary">custom</span>
-                        )}
-                      </div>
-                      <span className="text-fg-tertiary text-[11px] truncate">
-                        {translatedCatalogText(UPSCALER_DESCRIPTION_KEYS, v.label, v.description, t)}
-                        {v.hf_repo && <> · HF <code>{v.hf_repo}</code></>}
-                        {v.ms_repo && <> · MS <code>{v.ms_repo}</code></>}
-                        {v.size_mb != null && <> · ~{v.size_mb} MB</>}
-                      </span>
-                    </div>
-                    <ModelStatusBadge exists={v.exists} size={v.size} status={dl?.status} />
-                    {v.kind === 'preset' && (
-                      <DownloadButton
-                        exists={v.exists}
-                        status={dl?.status}
-                        busy={busy.has(`upscaler:${v.label}`)}
-                        onClick={() => void start('upscaler', v.label)}
-                      />
-                    )}
-                  </li>
-                )
-              })}
-            </ul>
-          </ModelGroupCard>
-
-          <ModelGroupCard
-            title={t('settings.customDownload')}
-            helpTooltip={
-              <>
-                <p><Trans i18nKey="settings.customUpscalerHelpTypes" components={{ code: <code /> }} /></p>
-                <p><Trans i18nKey="settings.customUpscalerHelpSources" components={{ code: <code /> }} /></p>
-                <p>{t('settings.customUpscalerHelpEnable')}</p>
-              </>
-            }
-          >
-            <div className="flex flex-col gap-2 text-xs">
-              <SettingsField label={t('settings.source')}>
-                <select
-                  value={customSource}
-                  onChange={(e) => setCustomSource(e.target.value as 'hf' | 'ms')}
-                  className="input text-xs"
-                  style={{ width: 'auto' }}
-                >
-                  <option value="hf">HuggingFace</option>
-                  <option value="ms">ModelScope</option>
-                </select>
-              </SettingsField>
-              <SettingsField label={t('settings.repoId')}>
-                <input
-                  type="text"
-                  value={customRepo}
-                  onChange={(e) => setCustomRepo(e.target.value)}
-                  placeholder={customSource === 'hf' ? 'Kim2091/UltraSharp' : 'libfishopen/upscaler'}
-                  className={`${textInputClass} flex-1 font-mono`}
-                />
-              </SettingsField>
-              <SettingsField label={t('common.filename')}>
-                <input
-                  type="text"
-                  value={customFile}
-                  onChange={(e) => setCustomFile(e.target.value)}
-                  placeholder="4x-UltraSharp.pth"
-                  className={`${textInputClass} flex-1 font-mono`}
-                />
-              </SettingsField>
-              <div className="flex justify-end">
-                <button
-                  onClick={() => void submitCustom()}
-                  disabled={customBusy || !customRepo.trim() || !customFile.trim()}
-                  className="btn btn-primary btn-sm"
-                >
-                  {customBusy ? t('settings.downloadInProgress') : t('common.download')}
-                </button>
-              </div>
-            </div>
-          </ModelGroupCard>
-
-          {/* 下载日志 */}
-          {Object.values(catalog.downloads).filter((d) => d.key.startsWith('upscaler') && (d.status === 'running' || d.status === 'failed')).length > 0 && (
-            <details className="text-xs">
-              <summary className="cursor-pointer text-fg-tertiary">{t('settings.upscalerDownloadLogs')}</summary>
-              <div className="mt-1 flex flex-col gap-2">
-                {Object.values(catalog.downloads).filter((d) => d.key.startsWith('upscaler')).map((d) => (
                   <div key={d.key} className="rounded-sm border border-subtle bg-sunken p-2">
                     <div className="flex items-center gap-2 mb-1">
                       <code className="font-mono text-fg-secondary">{d.key}</code>
