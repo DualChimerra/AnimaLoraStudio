@@ -414,7 +414,7 @@ function NewProjectDialog({
           />
         </FieldLabel>
 
-        <FieldLabel label={t('common.notes')} hint="note（可选）">
+        <FieldLabel label={t('common.notes')} hint="note (optional)">
           <textarea
             className="input"
             value={form.note}

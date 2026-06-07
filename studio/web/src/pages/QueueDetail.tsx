@@ -807,13 +807,13 @@ export function OutputsTab({ taskId }: { taskId: number }) {
           <div className="flex flex-col gap-3">
             {regularFiles.length > 0 && (
               <section className="flex flex-col gap-1.5">
-                <div className="px-1 text-xs font-semibold text-fg-secondary">输出文件</div>
+                <div className="px-1 text-xs font-semibold text-fg-secondary">Output files</div>
                 {renderFileTable(regularFiles)}
               </section>
             )}
             {stateFiles.length > 0 && (
               <section className="flex flex-col gap-1.5">
-                <div className="px-1 text-xs font-semibold text-warn">训练状态</div>
+                <div className="px-1 text-xs font-semibold text-warn">Training state</div>
                 {renderFileTable(stateFiles)}
               </section>
             )}
@@ -998,7 +998,7 @@ export function SnapshotConfigTab({ task }: { task: Task | null }) {
 // ── ConfirmDialog ───────────────────────────────────────────────────────────
 
 function ConfirmDialog({
-  title, message, confirmLabel = '确认', cancelLabel = '取消', danger = false, busy = false,
+  title, message, confirmLabel = 'Confirm', cancelLabel = 'Cancel', danger = false, busy = false,
   onConfirm, onCancel,
 }: {
   title: string; message: React.ReactNode; confirmLabel?: string; cancelLabel?: string

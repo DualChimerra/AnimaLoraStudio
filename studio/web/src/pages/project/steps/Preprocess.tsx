@@ -435,7 +435,7 @@ export default function PreprocessPage() {
             visibleRows[previewIdx].folder, 1600,
           ) + `&_=${visibleRows[previewIdx].mtime}`}
           caption={`${visibleRows[previewIdx].name} · ${
-            visibleRows[previewIdx].status === 'processed' ? '✓ 已处理' : '⊘ 未处理'
+            visibleRows[previewIdx].status === 'processed' ? '✓ Processed' : '⊘ Not processed'
           }`}
           hasPrev={previewIdx > 0}
           hasNext={previewIdx < visibleRows.length - 1}

@@ -69,7 +69,7 @@ export default function ImagePreviewModal({
             onClose()
           }}
           className="absolute top-3 right-4 z-10 rounded bg-black/50 px-3 py-1 text-slate-300 hover:text-white text-2xl"
-          aria-label="关闭"
+          aria-label="Close"
         >
           ×
         </button>
@@ -80,7 +80,7 @@ export default function ImagePreviewModal({
               onPrev()
             }}
             className="absolute left-4 top-1/2 z-10 -translate-y-1/2 text-slate-300 hover:text-white text-5xl px-4 py-3 bg-black/30 rounded"
-            aria-label="上一张"
+            aria-label="Previous"
           >
             ‹
           </button>
@@ -92,7 +92,7 @@ export default function ImagePreviewModal({
               onNext()
             }}
             className="absolute right-4 top-1/2 z-10 -translate-y-1/2 text-slate-300 hover:text-white text-5xl px-4 py-3 bg-black/30 rounded"
-            aria-label="下一张"
+            aria-label="Next"
           >
             ›
           </button>

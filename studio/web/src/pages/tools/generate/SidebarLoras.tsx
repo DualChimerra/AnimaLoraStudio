@@ -101,7 +101,7 @@ export default function SidebarLoras({
           e.currentTarget.style.borderColor = 'var(--border-subtle)'
         }}
       >
-        + 添加 LoRA
+        + Add LoRA
       </button>
 
       {externalForIdx !== null && (

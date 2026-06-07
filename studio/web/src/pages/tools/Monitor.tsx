@@ -57,14 +57,14 @@ export default function MonitorPage() {
         <span className="text-fg-tertiary">|</span>
 
         {/* 任务选择 */}
-        <span className="text-fg-tertiary">任务</span>
+        <span className="text-fg-tertiary">Task</span>
         <select
           value={taskId ?? ''}
           onChange={(e) => setTaskId(e.target.value === '' ? null : Number(e.target.value))}
           className="rounded-sm bg-sunken border border-subtle text-xs text-fg-primary"
           style={{ padding: '4px 10px', outline: 'none' }}
         >
-          <option value="">（最新 running，没有则显示空）</option>
+          <option value="">(latest running, empty if none)</option>
           {tasks.map((t) => (
             <option key={t.id} value={t.id}>
               #{t.id} · {t.name} · {t.status}
@@ -91,8 +91,8 @@ export default function MonitorPage() {
         ) : (
           <div className="flex items-center justify-center h-full text-fg-tertiary text-sm flex-col gap-2">
             <span className="text-xl">📊</span>
-            <span>暂无训练任务</span>
-            <span className="text-xs">启动训练后将自动显示监控数据</span>
+            <span>No training tasks</span>
+            <span className="text-xs">Monitoring data appears automatically once training starts</span>
           </div>
         )}
       </div>
@@ -113,11 +113,11 @@ function statusBadge(status: string): string {
 
 function statusLabel(status: string): string {
   switch (status) {
-    case 'running': return '运行中'
-    case 'pending': return '排队中'
-    case 'done': return '已完成'
-    case 'failed': return '失败'
-    case 'canceled': return '已取消'
+    case 'running': return 'Running'
+    case 'pending': return 'Pending'
+    case 'done': return 'Done'
+    case 'failed': return 'Failed'
+    case 'canceled': return 'Canceled'
     default: return status
   }
 }

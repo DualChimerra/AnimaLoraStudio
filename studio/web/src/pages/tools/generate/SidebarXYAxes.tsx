@@ -84,11 +84,11 @@ function AxisLoraCkptPicker({
             color: 'var(--fg-tertiary)',
           }}
         >
-          <span>扫:</span>
+          <span>Scan:</span>
           <span className="font-medium" style={{ color: 'var(--fg-secondary)' }}>
             {matched ? `${matched.projectTitle} / ${matched.versionLabel}` : ckptStemFromPath(bound.path)}
           </span>
-          <span className="font-mono">· {pickedCount} 个 ckpt</span>
+          <span className="font-mono">· {pickedCount} ckpts</span>
         </div>
       )}
       <InlineLoraPicker
@@ -155,8 +155,8 @@ function AxisCard({
           <button
             onClick={onRemove}
             className="btn btn-ghost btn-sm text-fg-tertiary hover:text-err shrink-0 px-1.5"
-            title="移除 Y 轴（退化到单轴）"
-            aria-label="移除 Y 轴"
+            title="Remove Y axis (back to single axis)"
+            aria-label="Remove Y axis"
           >
             ×
           </button>
@@ -218,7 +218,7 @@ export default function SidebarXYAxes({
   return (
     <div className="card" style={{ padding: 18 }}>
       <div className="flex items-center justify-between mb-3">
-        <div className="text-md font-semibold">XY 轴</div>
+        <div className="text-md font-semibold">XY axes</div>
       </div>
       <div className="flex flex-col gap-2">
         <AxisCard
@@ -241,7 +241,7 @@ export default function SidebarXYAxes({
             })}
             className="btn btn-ghost btn-sm self-start text-xs text-fg-tertiary"
           >
-            + 添加 Y 轴
+            + Add Y axis
           </button>
         )}
       </div>

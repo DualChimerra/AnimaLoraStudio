@@ -332,9 +332,9 @@ export default function TaggingPage() {
               className="input text-sm"
               style={{ padding: '3px 8px' }}
             >
-              <option value="wd14">WD14（本地 ONNX）</option>
-              <option value="cltagger">CLTagger（本地 ONNX）</option>
-              <option value="llm">LLM（OpenAI compatible，含 JoyCaption preset）</option>
+              <option value="wd14">WD14 (local ONNX)</option>
+              <option value="cltagger">CLTagger (local ONNX)</option>
+              <option value="llm">LLM (OpenAI compatible, incl. JoyCaption preset)</option>
             </select>
             <span
               className={

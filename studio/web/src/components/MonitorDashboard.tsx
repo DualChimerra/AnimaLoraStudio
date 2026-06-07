@@ -135,7 +135,7 @@ function SeriesChart({ data, rawColor, smoothColor, fillColor, emaAlpha, yFormat
     <div ref={wrapperRef} style={wrapperStyle}>
       {!data.length ? (
         <div className="grid place-items-center text-fg-tertiary text-sm h-full">
-          等待数据…
+          Waiting for data…
         </div>
       ) : size ? (
         <ChartSvg
@@ -298,7 +298,7 @@ function SampleViewer({ samples, taskId }: {
 
   if (!list.length) return (
     <div className="grid place-items-center h-[300px] text-fg-tertiary text-sm">
-      等待采样图…
+      Waiting for samples…
     </div>
   )
 
@@ -456,7 +456,7 @@ export default function MonitorDashboard({ taskId }: { taskId: number }) {
   if (!state && !connected) {
     return (
       <div className="grid place-items-center h-[200px] text-fg-tertiary text-sm">
-        等待训练数据…
+        Waiting for training data…
       </div>
     )
   }
@@ -473,7 +473,7 @@ export default function MonitorDashboard({ taskId }: { taskId: number }) {
       {/* Connection status + progress */}
       <div className="flex items-center gap-2.5 text-xs text-fg-tertiary font-mono shrink-0">
         <span className={`w-[7px] h-[7px] rounded-full inline-block shrink-0 ${connected ? 'bg-ok animate-pulse' : 'bg-err'}`} />
-        {connected ? '实时' : '已断开'}
+        {connected ? 'Live' : 'Disconnected'}
         {totalSteps > 0 && (
           <>
             <span className="text-dim">·</span>
@@ -486,11 +486,11 @@ export default function MonitorDashboard({ taskId }: { taskId: number }) {
                 style={{ width: `${progress}%` }}
               />
             </div>
-            <span>已用 {elapsed}</span>
+            <span>Elapsed {elapsed}</span>
             {eta !== '--' && (
               <>
                 <span className="text-dim">·</span>
-                <span>剩余 {eta}</span>
+                <span>ETA {eta}</span>
               </>
             )}
           </>
@@ -502,7 +502,7 @@ export default function MonitorDashboard({ taskId }: { taskId: number }) {
           rel="noopener"
           className="text-fg-tertiary no-underline hover:text-fg-primary transition-colors"
         >
-          独立监控 ↗
+          Standalone monitor ↗
         </a>
       </div>
 
@@ -542,8 +542,8 @@ export default function MonitorDashboard({ taskId }: { taskId: number }) {
         {/* 左：采样图 */}
         <div className="card p-0 overflow-hidden flex flex-col min-h-0">
           <div className="px-3.5 py-2.5 border-b border-subtle flex items-center justify-between shrink-0">
-            <span className="text-sm font-semibold">采样</span>
-            <span className="text-xs text-fg-tertiary font-mono">{samples.length} 张</span>
+            <span className="text-sm font-semibold">Samples</span>
+            <span className="text-xs text-fg-tertiary font-mono">{samples.length} imgs</span>
           </div>
           <div className="flex-1 p-3 flex flex-col min-h-0">
             <SampleViewer samples={samples} taskId={taskId} />

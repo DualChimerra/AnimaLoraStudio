@@ -214,10 +214,10 @@ function DialogRoot({ state, onCancel, onOk }: RootProps) {
   const title =
     state.options.title ??
     (state.type === 'confirm'
-      ? '确认操作'
+      ? 'Confirm action'
       : state.type === 'prompt'
-        ? '输入'
-        : '提示')
+        ? 'Input'
+        : 'Notice')
 
   return (
     <div
@@ -265,7 +265,7 @@ function DialogRoot({ state, onCancel, onOk }: RootProps) {
               onClick={onCancel}
               className="btn btn-secondary"
             >
-              {state.options.cancelText ?? '取消'}
+              {state.options.cancelText ?? 'Cancel'}
             </button>
           )}
           <button
@@ -274,10 +274,10 @@ function DialogRoot({ state, onCancel, onOk }: RootProps) {
           >
             {state.options.okText ??
               (state.type === 'confirm'
-                ? '确认'
+                ? 'Confirm'
                 : state.type === 'prompt'
-                  ? '确定'
-                  : '知道了')}
+                  ? 'OK'
+                  : 'Got it')}
           </button>
         </div>
       </form>

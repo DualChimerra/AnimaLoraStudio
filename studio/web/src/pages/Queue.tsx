@@ -48,10 +48,10 @@ function inferKind(task: Task): TaskKind {
 
 function fmtAgo(ts: number): string {
   const sec = Math.max(0, Date.now() / 1000 - ts)
-  if (sec < 60) return '刚刚'
-  if (sec < 3600) return `${Math.floor(sec / 60)}m 前`
-  if (sec < 86400) return `${Math.floor(sec / 3600)}h 前`
-  return `${Math.floor(sec / 86400)}d 前`
+  if (sec < 60) return 'just now'
+  if (sec < 3600) return `${Math.floor(sec / 60)}m ago`
+  if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`
+  return `${Math.floor(sec / 86400)}d ago`
 }
 
 function fmtDuration(start: number | null, end: number | null): string {
@@ -191,7 +191,7 @@ export default function QueuePage() {
   const estimateEta = useCallback((task: Task): string | null => {
     if (task.status !== 'running' || !task.started_at) return null
     const elapsed = (Date.now() / 1000 - task.started_at) * 1000
-    return `已运行 ${fmtDurationShort(elapsed)}`
+    return `Running for ${fmtDurationShort(elapsed)}`
   }, [])
 
   // 用 runningTask 派生比 tasks.some 再扫一遍便宜（runningTask 已经 memo 过）
@@ -291,7 +291,7 @@ export default function QueuePage() {
   const cancelRunning = async () => {
     if (!runningTask) return
     const ok = await confirm(
-      `取消当前任务 #${runningTask.id}？任务会在安全点停止，且无法恢复（重启训练会从 0 开始）。`,
+      `Cancel current task #${runningTask.id}? It will stop at a safe point and cannot be resumed (restarting training begins from 0).`,
       { tone: 'warn', okText: t('queue.cancelCurrent') },
     )
     if (!ok) return
@@ -385,7 +385,7 @@ export default function QueuePage() {
               try {
                 const r = await api.importQueue(payload)
                 const renamedCount = Object.keys(r.renamed).length
-                toast(t('queue.imported', { n: r.imported_count, renamed: renamedCount ? `（${renamedCount} 个改名）` : '' }), 'success')
+                toast(t('queue.imported', { n: r.imported_count, renamed: renamedCount ? ` (${renamedCount} renamed)` : '' }), 'success')
                 await reload()
               } catch (e) { setError(String(e)) }
               finally { setBusy(false) }
@@ -555,7 +555,7 @@ export default function QueuePage() {
                         <>
                           {eta && <span className="text-accent">{eta}</span>}
                           {eta && <br />}
-                          <span className="text-xs">{fmtAgo(task.started_at!)} 开始</span>
+                          <span className="text-xs">started {fmtAgo(task.started_at!)}</span>
                         </>
                       ) : isPaused ? (
                         <span className="flex flex-col items-end gap-1">

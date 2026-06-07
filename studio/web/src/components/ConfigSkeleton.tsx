@@ -24,7 +24,7 @@ interface ConfigSkeletonProps {
 const DEFAULT_GROUPS = [5, 6, 4, 5]
 
 export default function ConfigSkeleton({
-  label = '加载配置中',
+  label = 'Loading config…',
   groups = DEFAULT_GROUPS,
   variant = 'card',
 }: ConfigSkeletonProps) {

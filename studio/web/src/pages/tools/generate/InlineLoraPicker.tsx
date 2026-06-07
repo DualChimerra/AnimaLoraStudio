@@ -234,22 +234,22 @@ export default function InlineLoraPicker(props: Props) {
     >
       {/* header */}
       <div className="flex items-center gap-2">
-        <span className="text-xs font-semibold text-fg-secondary shrink-0">选 LoRA</span>
+        <span className="text-xs font-semibold text-fg-secondary shrink-0">Select LoRA</span>
         <span className="flex-1" />
         {onPickExternal && (
           <button
             onClick={onPickExternal}
             className="btn btn-ghost btn-sm text-2xs text-fg-tertiary"
-            title="选系统中任意 .safetensors 文件"
+            title="Pick any .safetensors file on the system"
           >
-            外部文件
+            External file
           </button>
         )}
         <button
           onClick={onClose}
           className="btn btn-ghost btn-sm text-fg-tertiary px-1.5"
-          title={isSingle ? '移除这个 LoRA 槽' : '关闭面板'}
-          aria-label={isSingle ? '移除 LoRA' : '关闭挑选区'}
+          title={isSingle ? 'Remove this LoRA slot' : 'Close panel'}
+          aria-label={isSingle ? 'Remove LoRA' : 'Close picker'}
         >
           ×
         </button>
@@ -261,9 +261,9 @@ export default function InlineLoraPicker(props: Props) {
           className="input text-xs flex-1"
           value={pid ?? ''}
           onChange={(e) => setPid(e.target.value ? Number(e.target.value) : null)}
-          aria-label="选项目"
+          aria-label="Select project"
         >
-          <option value="">选项目…</option>
+          <option value="">Select project…</option>
           {projects.map((p) => (
             <option key={p.id} value={p.id}>{p.title}</option>
           ))}
@@ -273,12 +273,12 @@ export default function InlineLoraPicker(props: Props) {
           value={vid ?? ''}
           onChange={(e) => setVid(e.target.value ? Number(e.target.value) : null)}
           disabled={versions.length === 0}
-          aria-label="选版本"
+          aria-label="Select version"
         >
-          <option value="">选版本…</option>
+          <option value="">Select version…</option>
           {versions.map((v) => (
             <option key={v.id} value={v.id}>
-              {v.label}{v.status === 'training' ? '（训练中）' : ''}
+              {v.label}{v.status === 'training' ? ' (training)' : ''}
             </option>
           ))}
         </select>
@@ -288,7 +288,7 @@ export default function InlineLoraPicker(props: Props) {
       <input
         type="text"
         className="input text-xs"
-        placeholder="搜索 ckpt 文件名…"
+        placeholder="Search ckpt filename…"
         value={search}
         onChange={(e) => setSearch(e.target.value)}
         disabled={!pid || !vid || ckpts.length === 0}
@@ -297,22 +297,22 @@ export default function InlineLoraPicker(props: Props) {
       {error && <div className="text-2xs text-err">{error}</div>}
       {currentVersion?.status === 'training' && (
         <div className="text-2xs text-fg-tertiary">
-          <span className="badge badge-info" style={{ fontSize: 10, marginRight: 4 }}>训练中</span>
-          ckpt 列表会随训练进度刷新
+          <span className="badge badge-info" style={{ fontSize: 10, marginRight: 4 }}>training</span>
+          ckpt list refreshes as training progresses
         </div>
       )}
 
       {/* ckpt chip 列表 */}
       <div className="flex flex-wrap gap-1.5 overflow-y-auto" style={{ maxHeight: 280, padding: 2 }}>
-        {loading && <div className="text-2xs text-fg-tertiary px-1 py-2">加载中…</div>}
+        {loading && <div className="text-2xs text-fg-tertiary px-1 py-2">Loading…</div>}
         {!loading && projects.length === 0 && (
           <div className="text-fg-tertiary text-xs px-1 py-4 text-center w-full">
-            还没有训练好的 LoRA —— 先去训练一个{onPickExternal ? '，或用「外部文件」' : ''}
+            No trained LoRA yet — train one first{onPickExternal ? ', or use “External file”' : ''}
           </div>
         )}
         {!loading && projects.length > 0 && pid !== null && vid !== null && ckpts.length === 0 && !error && (
           <div className="text-2xs text-fg-tertiary px-1 py-4 text-center w-full">
-            该版本没扫到 ckpt 文件
+            No ckpt files found for this version
           </div>
         )}
         {!loading && filtered.map((c) => {
@@ -350,7 +350,7 @@ export default function InlineLoraPicker(props: Props) {
           )
         })}
         {!loading && ckpts.length > 0 && filtered.length === 0 && (
-          <div className="text-fg-tertiary text-xs px-1 py-4 text-center w-full">没有匹配的 ckpt</div>
+          <div className="text-fg-tertiary text-xs px-1 py-4 text-center w-full">No matching ckpt</div>
         )}
       </div>
 
@@ -364,7 +364,7 @@ export default function InlineLoraPicker(props: Props) {
             className="font-mono text-fg-tertiary shrink-0"
             style={{ fontSize: 10, letterSpacing: '0.08em', textTransform: 'uppercase' }}
           >
-            权重
+            Weight
           </span>
           <input
             type="range"
@@ -374,7 +374,7 @@ export default function InlineLoraPicker(props: Props) {
             value={internalWeight}
             onChange={(e) => onWeightChange(Number(e.target.value))}
             className="flex-1"
-            aria-label="LoRA 权重"
+            aria-label="LoRA weight"
             style={{ accentColor: 'var(--accent)' }}
           />
           <input
@@ -386,7 +386,7 @@ export default function InlineLoraPicker(props: Props) {
             onChange={(e) => onWeightChange(Number(e.target.value))}
             className="input font-mono text-center"
             style={{ width: 54, padding: '3px 6px', fontSize: 12 }}
-            aria-label="LoRA 权重数值"
+            aria-label="LoRA weight value"
           />
         </div>
       )}
@@ -394,18 +394,18 @@ export default function InlineLoraPicker(props: Props) {
       {/* multi 模式：commit footer（live 模式下不渲染，chip 即所见即所得） */}
       {!isSingle && !isLive && picked.size > 0 && (
         <div className="flex items-center gap-2 justify-end">
-          <span className="text-2xs text-fg-tertiary mr-auto">已选 {picked.size}</span>
+          <span className="text-2xs text-fg-tertiary mr-auto">Selected {picked.size}</span>
           <button
             onClick={() => setPicked(new Set())}
             className="btn btn-ghost btn-sm text-xs"
           >
-            取消
+            Cancel
           </button>
           <button
             onClick={commitMulti}
             className="btn btn-primary btn-sm text-xs"
           >
-            添加 {picked.size} 个
+            Add {picked.size}
           </button>
         </div>
       )}

@@ -161,10 +161,10 @@ function _makeFallbackPreset(id: string, label: string, output_format: 'json' | 
 }
 
 const DEFAULT_LLM_PRESETS: LLMPreset[] = [
-  _makeFallbackPreset('style_json', '画风 LoRA JSON', 'json'),
-  _makeFallbackPreset('general_json', '通用 LoRA JSON', 'json'),
-  _makeFallbackPreset('txt_tags', 'TXT 标签列表', 'json'),
-  _makeFallbackPreset('joycaption', 'JoyCaption（vLLM 本地）', 'text', {
+  _makeFallbackPreset('style_json', 'Style LoRA JSON', 'json'),
+  _makeFallbackPreset('general_json', 'General LoRA JSON', 'json'),
+  _makeFallbackPreset('txt_tags', 'TXT tag list', 'json'),
+  _makeFallbackPreset('joycaption', 'JoyCaption (vLLM local)', 'text', {
     base_url: 'http://localhost:8000/v1',
     model: 'fancyfeast/llama-joycaption-beta-one-hf-llava',
     temperature: 0.6,

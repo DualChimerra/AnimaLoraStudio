@@ -32,16 +32,16 @@ interface ArOption {
   h: number | null
 }
 const AR_OPTIONS: ArOption[] = [
-  { id: 'free',  label: '自由（不锁）', w: null, h: null },
-  { id: '1:1',   label: '1:1 正方',    w: 1,  h: 1 },
-  { id: '4:3',   label: '4:3 横',      w: 4,  h: 3 },
-  { id: '3:2',   label: '3:2 横',      w: 3,  h: 2 },
-  { id: '16:9',  label: '16:9 宽屏',   w: 16, h: 9 },
-  { id: '3:4',   label: '3:4 竖',      w: 3,  h: 4 },
-  { id: '2:3',   label: '2:3 竖',      w: 2,  h: 3 },
-  { id: '9:16',  label: '9:16 手机',   w: 9,  h: 16 },
-  { id: '4:5',   label: '4:5 竖',      w: 4,  h: 5 },
-  { id: 'custom', label: '自定义…',    w: null, h: null },
+  { id: 'free',  label: 'Free (unlocked)', w: null, h: null },
+  { id: '1:1',   label: '1:1 Square',    w: 1,  h: 1 },
+  { id: '4:3',   label: '4:3 Landscape',      w: 4,  h: 3 },
+  { id: '3:2',   label: '3:2 Landscape',      w: 3,  h: 2 },
+  { id: '16:9',  label: '16:9 Widescreen',   w: 16, h: 9 },
+  { id: '3:4',   label: '3:4 Portrait',      w: 3,  h: 4 },
+  { id: '2:3',   label: '2:3 Portrait',      w: 2,  h: 3 },
+  { id: '9:16',  label: '9:16 Phone',   w: 9,  h: 16 },
+  { id: '4:5',   label: '4:5 Portrait',      w: 4,  h: 5 },
+  { id: 'custom', label: 'Custom…',    w: null, h: null },
 ]
 
 type Filter = 'all' | 'pending' | 'cropped'
@@ -242,7 +242,7 @@ export default function PreprocessCropPage() {
             id: newId,
             x: Math.min(1 - src.w, src.x + 0.04),
             y: Math.min(1 - src.h, src.y + 0.04),
-            label: src.label + ' 副本',
+            label: src.label + ' copy',
           },
         ],
       }
@@ -273,7 +273,7 @@ export default function PreprocessCropPage() {
       newCrops[a.id] = [{
         id: 'cl_' + a.id,
         x: a.rect.x, y: a.rect.y, w: a.rect.w, h: a.rect.h,
-        label: `聚类 ${a.targetAr.w}:${a.targetAr.h}`,
+        label: `Cluster ${a.targetAr.w}:${a.targetAr.h}`,
         fromCluster: true,
       }]
     }
@@ -942,9 +942,9 @@ function RightRail({
           <span className="inline-block w-1.5 h-1.5 rounded-full shrink-0 bg-accent" />
           {t('preprocessCrop.rrProgress')}
         </h3>
-        <StatRow label={t('preprocessCrop.rrWorkspace')} value={`${totalImages} 张`} />
-        <StatRow label={t('preprocessCrop.rrConfigured')} value={`${configuredImages} 张`} accent={configuredImages > 0 ? 'ok' : undefined} />
-        <StatRow label={t('preprocessCrop.rrPending')} value={`${totalImages - configuredImages} 张`} accent={totalImages - configuredImages > 0 ? 'warn' : undefined} />
+        <StatRow label={t('preprocessCrop.rrWorkspace')} value={`${totalImages} imgs`} />
+        <StatRow label={t('preprocessCrop.rrConfigured')} value={`${configuredImages} imgs`} accent={configuredImages > 0 ? 'ok' : undefined} />
+        <StatRow label={t('preprocessCrop.rrPending')} value={`${totalImages - configuredImages} imgs`} accent={totalImages - configuredImages > 0 ? 'warn' : undefined} />
         <div className="mt-2 h-1.5 rounded bg-sunken overflow-hidden">
           <div className="h-full bg-accent rounded transition-[width] duration-300 ease-out" style={{ width: `${pct}%` }} />
         </div>
@@ -956,10 +956,10 @@ function RightRail({
           <span className="inline-block w-1.5 h-1.5 rounded-full shrink-0 bg-ok" />
           {t('preprocessCrop.rrOutputs')}
         </h3>
-        <StatRow label={t('preprocessCrop.rrOutputFiles')} value={`${totalRects} 张`} />
+        <StatRow label={t('preprocessCrop.rrOutputFiles')} value={`${totalRects} imgs`} />
         <StatRow label={t('preprocessCrop.rrConfiguredImages')} value={`${configuredImages} / ${totalImages}`} />
         {lastClusterK !== null && (
-          <StatRow label={t('preprocessCrop.rrSource')} value={`聚类 k=${lastClusterK}`} accent="ok" />
+          <StatRow label={t('preprocessCrop.rrSource')} value={`Cluster k=${lastClusterK}`} accent="ok" />
         )}
         <p className="text-[11px] text-fg-tertiary mt-1.5 leading-snug">
           {t('preprocessCrop.rrNote')}

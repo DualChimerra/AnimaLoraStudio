@@ -91,13 +91,13 @@ export default function SystemStats() {
         label="CPU"
         value={`${stats.cpu_pct.toFixed(0)}%`}
         pct={stats.cpu_pct}
-        tooltip={`CPU 占用 ${stats.cpu_pct.toFixed(1)}%`}
+        tooltip={`CPU usage ${stats.cpu_pct.toFixed(1)}%`}
       />
       <Pill
         label="MEM"
         value={fmtGb(stats.ram_used_gb, stats.ram_total_gb)}
         pct={ramPct}
-        tooltip={`内存 ${stats.ram_used_gb.toFixed(1)} / ${stats.ram_total_gb.toFixed(1)} GB (${ramPct.toFixed(0)}%)`}
+        tooltip={`RAM ${stats.ram_used_gb.toFixed(1)} / ${stats.ram_total_gb.toFixed(1)} GB (${ramPct.toFixed(0)}%)`}
       />
       {gpu0 && (
         <>
@@ -105,13 +105,13 @@ export default function SystemStats() {
             label="GPU"
             value={`${gpu0.util_pct}%`}
             pct={gpu0.util_pct}
-            tooltip={`GPU 利用率 · ${gpuLabel}`}
+            tooltip={`GPU utilization · ${gpuLabel}`}
           />
           <Pill
             label="VRAM"
             value={fmtGb(gpu0.vram_used_gb, gpu0.vram_total_gb)}
             pct={vramPct}
-            tooltip={`显存 ${gpu0.vram_used_gb.toFixed(1)} / ${gpu0.vram_total_gb.toFixed(1)} GB (${vramPct.toFixed(0)}%) · ${gpuLabel}`}
+            tooltip={`VRAM ${gpu0.vram_used_gb.toFixed(1)} / ${gpu0.vram_total_gb.toFixed(1)} GB (${vramPct.toFixed(0)}%) · ${gpuLabel}`}
           />
         </>
       )}
