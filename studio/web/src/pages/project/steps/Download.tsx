@@ -29,14 +29,6 @@ interface Ctx {
   reload: () => Promise<void>
 }
 
-interface Estimate {
-  tag: string
-  api_source: 'gelbooru' | 'danbooru'
-  exclude_tags: string[]
-  effective_query: string
-  count: number // -1 表示未知
-}
-
 const STATUS_COLOR: Record<Job['status'], string> = {
   pending: 'badge badge-neutral',
   running: 'badge badge-warn',
@@ -58,13 +50,6 @@ export default function DownloadPage() {
   const [anchor, setAnchor] = useState<string | null>(null)
   const [deleting, setDeleting] = useState(false)
   const [previewIdx, setPreviewIdx] = useState<number | null>(null)
-  const [tag, setTag] = useState('')
-  const [apiSource, setApiSource] = useState<'gelbooru' | 'danbooru'>(
-    'gelbooru'
-  )
-  const [estimate, setEstimate] = useState<Estimate | null>(null)
-  const [count, setCount] = useState<number>(20)
-  const [busy, setBusy] = useState(false)
   const [lastUpload, setLastUpload] = useState<UploadResult | null>(null)
 
   const refreshFiles = useCallback(async () => {
@@ -111,54 +96,6 @@ export default function DownloadPage() {
     }
   })
 
-  useEffect(() => {
-    setEstimate(null)
-  }, [tag, apiSource])
-
-  const doEstimate = async () => {
-    if (!tag.trim()) {
-      toast(t('download.tagEmpty'), 'error')
-      return
-    }
-    setBusy(true)
-    try {
-      const r = await api.estimateDownload(project.id, {
-        tag,
-        api_source: apiSource,
-      })
-      setEstimate(r)
-      if (r.count > 0) setCount(Math.min(r.count, 200))
-      else if (r.count === 0) setCount(0)
-      else setCount(20)
-    } catch (e) {
-      toast(String(e), 'error')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const start = async () => {
-    if (!estimate) return
-    if (estimate.count === 0)
-      return toast(t('download.noResults'), 'error')
-    if (count < 1) return toast(t('download.countMin'), 'error')
-    setBusy(true)
-    try {
-      const j = await api.startDownload(project.id, {
-        tag,
-        count,
-        api_source: apiSource,
-      })
-      setJob(j)
-      setLogs([])
-      toast(t('download.started', { id: j.id }), 'success')
-    } catch (e) {
-      toast(String(e), 'error')
-    } finally {
-      setBusy(false)
-    }
-  }
-
   const cancel = async () => {
     if (!job) return
     try {
@@ -170,7 +107,6 @@ export default function DownloadPage() {
   }
 
   const isLive = job?.status === 'running' || job?.status === 'pending'
-  const maxCount = estimate && estimate.count > 0 ? estimate.count : 5000
 
   return (
     <StepShell
@@ -186,22 +122,8 @@ export default function DownloadPage() {
         {/* 左栏 */}
         <div className="flex flex-col gap-2 min-h-0 min-w-0">
 
-          {/* 操作行：两个紧凑 panel 并排（窄屏堆叠） */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-2 shrink-0">
-            <BooruPanel
-              tag={tag}
-              setTag={setTag}
-              apiSource={apiSource}
-              setApiSource={setApiSource}
-              estimate={estimate}
-              count={count}
-              setCount={setCount}
-              maxCount={maxCount}
-              busy={busy}
-              isLive={!!isLive}
-              onEstimate={doEstimate}
-              onStart={start}
-            />
+          {/* 操作行：本地上传 */}
+          <div className="shrink-0">
             <UploadPanel
               pid={project.id}
               onUploaded={(r) => {
@@ -390,138 +312,6 @@ function DownloadedGrid({
           emptyHint={t('download.emptyHint')}
         />
       </div>
-    </section>
-  )
-}
-
-// ---------------------------------------------------------------------------
-// Booru 紧凑 panel
-// ---------------------------------------------------------------------------
-
-interface BooruPanelProps {
-  tag: string
-  setTag: (v: string) => void
-  apiSource: 'gelbooru' | 'danbooru'
-  setApiSource: (v: 'gelbooru' | 'danbooru') => void
-  estimate: Estimate | null
-  count: number
-  setCount: (n: number) => void
-  maxCount: number
-  busy: boolean
-  isLive: boolean
-  onEstimate: () => void
-  onStart: () => void
-}
-
-function BooruPanel({
-  tag,
-  setTag,
-  apiSource,
-  setApiSource,
-  estimate,
-  count,
-  setCount,
-  maxCount,
-  busy,
-  isLive,
-  onEstimate,
-  onStart,
-}: BooruPanelProps) {
-  const { t } = useTranslation()
-  const disabled = busy || isLive
-  return (
-    <section className="flex flex-col gap-1.5 rounded-md border border-subtle bg-surface px-3 py-2.5">
-      <PanelTitle accent="cyan">{t('download.booruPanel')}</PanelTitle>
-      <div className="flex items-center gap-1.5">
-        <select
-          value={apiSource}
-          onChange={(e) =>
-            setApiSource(e.target.value as 'gelbooru' | 'danbooru')
-          }
-          disabled={disabled}
-          className="input text-sm"
-          style={{ width: 'auto', padding: '3px 8px' }}
-        >
-          <option value="gelbooru">Gelbooru</option>
-          <option value="danbooru">Danbooru</option>
-        </select>
-        <input
-          value={tag}
-          onChange={(e) => setTag(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && tag.trim() && !disabled) onEstimate()
-          }}
-          disabled={disabled}
-          placeholder={t('download.tagPlaceholder')}
-          className="input flex-1 text-sm"
-          style={{ padding: '3px 8px' }}
-        />
-        <button
-          onClick={onEstimate}
-          disabled={disabled || !tag.trim()}
-          className="btn btn-secondary btn-sm"
-        >
-          {busy && !estimate ? t('download.querying') : t('download.query')}
-        </button>
-      </div>
-      {estimate && (
-        <div className="flex items-center gap-1.5 flex-wrap text-sm text-fg-secondary">
-          <span>
-            {t('download.matches')}{' '}
-            {estimate.count >= 0 ? (
-              <strong className="text-accent">{estimate.count}</strong>
-            ) : (
-              <strong className="text-warn">{t('download.matchesUnknown')}</strong>
-            )}
-          </span>
-          {estimate.count !== 0 && (
-            <>
-              <span className="text-dim">·</span>
-              <span className="text-fg-tertiary">count</span>
-              <input
-                type="number"
-                min={1}
-                max={maxCount}
-                value={count}
-                onChange={(e) =>
-                  setCount(Math.min(Number(e.target.value) || 1, maxCount))
-                }
-                disabled={disabled}
-                className="input input-mono"
-                style={{ width: 80, padding: '2px 6px' }}
-              />
-              {estimate.count > 0 && (
-                <button
-                  onClick={() => setCount(estimate.count)}
-                  disabled={disabled}
-                  className="btn btn-ghost btn-sm"
-                >
-                  {t('download.allN', { n: estimate.count })}
-                </button>
-              )}
-              <button
-                onClick={onStart}
-                disabled={disabled || count < 1}
-                className="btn btn-primary btn-sm ml-auto"
-              >
-                {isLive ? t('download.downloading') : t('download.startCount', { n: count })}
-              </button>
-            </>
-          )}
-          <span
-            className="basis-full truncate text-xs text-fg-tertiary"
-            title={estimate.effective_query}
-          >
-            query: <code>{estimate.effective_query}</code>
-            {estimate.exclude_tags.length > 0 && (
-              <>
-                {' · exclude: '}
-                <code>{estimate.exclude_tags.join(', ')}</code>
-              </>
-            )}
-          </span>
-        </div>
-      )}
     </section>
   )
 }

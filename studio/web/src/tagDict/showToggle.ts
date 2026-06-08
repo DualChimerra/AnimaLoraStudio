@@ -24,7 +24,7 @@ function writeRaw(v: string): void {
 }
 
 function defaultFromLang(): boolean {
-  const lang = (getStoredLang() ?? 'zh').toLowerCase()
+  const lang = (getStoredLang() ?? 'en').toLowerCase()
   return lang.startsWith('zh')
 }
 

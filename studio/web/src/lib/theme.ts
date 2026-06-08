@@ -1,20 +1,16 @@
-/** 主题 + 字号密度的 runtime 切换。
+/** 字号密度的 runtime 切换（暗色主题已移除，UI 固定日间配色）。
  *
- * tokens.css 里定义了三组 CSS variable layer：
- *   - .theme-dark  → 暗色调色板（不加这个类即为日间默认）
+ * tokens.css 里定义了字号密度 layer：
  *   - .density-tight / .density-loose → 紧凑 / 宽松字号 + 间距（无类即默认）
  *
- * 这个模块负责把用户选择持久化到 localStorage，并在 boot 时（main.tsx 里
- * `initTheme()`）和 Settings 页里手动切换时把对应类挂在 documentElement 上。
+ * 这个模块负责在 boot 时（main.tsx 里 `initTheme()`）确保不残留暗色类、
+ * 并应用持久化的密度选择。
  */
 
-export type Theme = 'light' | 'dark'
 export type Density = 'tight' | 'default' | 'loose'
 
-const KEY_THEME = 'studio.theme'
 const KEY_DENSITY = 'studio.density'
 
-const DEFAULT_THEME: Theme = 'light'
 const DEFAULT_DENSITY: Density = 'default'
 
 function safeGet(key: string): string | null {
@@ -22,29 +18,6 @@ function safeGet(key: string): string | null {
 }
 function safeSet(key: string, val: string) {
   try { localStorage.setItem(key, val) } catch { /* ignore */ }
-}
-
-// ── theme ──────────────────────────────────────────────────────────────────
-export function getStoredTheme(): Theme {
-  const v = safeGet(KEY_THEME)
-  return v === 'dark' ? 'dark' : 'light'
-}
-
-export function setStoredTheme(t: Theme): void {
-  safeSet(KEY_THEME, t)
-}
-
-export function applyTheme(t: Theme): void {
-  const root = document.documentElement
-  if (t === 'dark') root.classList.add('theme-dark')
-  else root.classList.remove('theme-dark')
-}
-
-export function toggleTheme(): Theme {
-  const next: Theme = getStoredTheme() === 'dark' ? 'light' : 'dark'
-  setStoredTheme(next)
-  applyTheme(next)
-  return next
 }
 
 // ── density ────────────────────────────────────────────────────────────────
@@ -67,6 +40,7 @@ export function applyDensity(d: Density): void {
 
 // ── boot ───────────────────────────────────────────────────────────────────
 export function initTheme(): void {
-  applyTheme(getStoredTheme() || DEFAULT_THEME)
+  // 强制日间配色：清掉任何历史残留的暗色类。
+  document.documentElement.classList.remove('theme-dark')
   applyDensity(getStoredDensity() || DEFAULT_DENSITY)
 }

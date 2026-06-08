@@ -3,7 +3,6 @@ import { useTranslation } from 'react-i18next'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { api, PHASE_ORDER, PHASE_SKIPPABLE, type Version, type VersionPhase, type VersionStatus } from '../api/client'
 import { useSettingsDrawer } from '../lib/SettingsDrawer'
-import { getStoredTheme, toggleTheme, type Theme } from '../lib/theme'
 import { useToast } from './Toast'
 
 /** ADR-0007 §11.2 / §11.5: cursor 派生 step 完成态。
@@ -435,32 +434,6 @@ function ProjectStepperNav({ pid, activeVid, currentStep, version, collapsed }: 
   )
 }
 
-// ── theme toggle ───────────────────────────────────────────────────────────
-function ThemeToggle({ collapsed }: { collapsed: boolean }) {
-  const { t } = useTranslation()
-  const [theme, setTheme] = useState<Theme>(() => getStoredTheme())
-
-  const handleToggle = () => {
-    setTheme(toggleTheme())
-  }
-
-  const isDark = theme === 'dark'
-  return (
-    <button
-      onClick={handleToggle}
-      title={isDark ? t('sidebar.switchToLight') : t('sidebar.switchToDark')}
-      className={[
-        'flex items-center gap-2.5 rounded-md text-sm no-underline transition-colors bg-transparent border-none cursor-pointer w-full',
-        collapsed ? 'py-[9px] px-0 justify-center' : 'py-2 px-3 justify-start',
-        'text-fg-secondary font-medium hover:bg-overlay',
-      ].join(' ')}
-    >
-      {isDark ? I.sun : I.moon}
-      {!collapsed && <span>{isDark ? t('sidebar.themeLight') : t('sidebar.themeDark')}</span>}
-    </button>
-  )
-}
-
 // ── sidebar ────────────────────────────────────────────────────────────────
 const SIDEBAR_KEY = 'studio.sidebar.expanded'
 
@@ -540,7 +513,6 @@ export default function Sidebar() {
           active={false}
           collapsed={collapsed}
         />
-        <ThemeToggle collapsed={collapsed} />
         <button
           onClick={toggle}
           title={collapsed ? t('sidebar.expand') : t('sidebar.collapse')}
