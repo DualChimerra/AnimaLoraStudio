@@ -61,7 +61,7 @@ def _make_train_task(env: dict) -> int:
 
 
 def _make_tag_job(env: dict, *, slug: str = "p") -> int:
-    """造一个 tag job pending。"""
+    """造一个 GPU-bound job pending（reg_build）。"""
     with db.connection_for(env["db"]) as conn:
         from studio.services.projects import projects, versions
         p = projects.create_project(conn, title="P", slug=slug)
@@ -70,7 +70,7 @@ def _make_tag_job(env: dict, *, slug: str = "p") -> int:
             conn,
             project_id=p["id"],
             version_id=v["id"],
-            kind="tag",
+            kind="reg_build",
             params={},
         )
         return int(job["id"])

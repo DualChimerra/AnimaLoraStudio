@@ -1,7 +1,7 @@
 {
   "version": 1,
   "generated_from": "studio.server.app",
-  "count": 165,
+  "count": 153,
   "routes": [
     {
       "path": "/",
@@ -866,14 +866,6 @@
       "type": "APIRoute"
     },
     {
-      "path": "/api/projects/{pid}/versions/{vid}/tag",
-      "methods": [
-        "POST"
-      ],
-      "name": "start_tag",
-      "type": "APIRoute"
-    },
-    {
       "path": "/api/projects/{pid}/versions/{vid}/thumb",
       "methods": [
         "GET"
@@ -1090,99 +1082,11 @@
       "type": "APIRoute"
     },
     {
-      "path": "/api/system/dev_commits",
-      "methods": [
-        "GET"
-      ],
-      "name": "system_dev_commits",
-      "type": "APIRoute"
-    },
-    {
-      "path": "/api/system/init_git",
-      "methods": [
-        "POST"
-      ],
-      "name": "system_init_git",
-      "type": "APIRoute"
-    },
-    {
-      "path": "/api/system/preflight",
-      "methods": [
-        "GET"
-      ],
-      "name": "system_preflight",
-      "type": "APIRoute"
-    },
-    {
-      "path": "/api/system/release_notes",
-      "methods": [
-        "GET"
-      ],
-      "name": "system_release_notes",
-      "type": "APIRoute"
-    },
-    {
-      "path": "/api/system/restart",
-      "methods": [
-        "POST"
-      ],
-      "name": "system_restart",
-      "type": "APIRoute"
-    },
-    {
-      "path": "/api/system/rollback",
-      "methods": [
-        "POST"
-      ],
-      "name": "system_rollback",
-      "type": "APIRoute"
-    },
-    {
       "path": "/api/system/stats",
       "methods": [
         "GET"
       ],
       "name": "get_system_stats",
-      "type": "APIRoute"
-    },
-    {
-      "path": "/api/system/update",
-      "methods": [
-        "POST"
-      ],
-      "name": "system_update",
-      "type": "APIRoute"
-    },
-    {
-      "path": "/api/system/update_check",
-      "methods": [
-        "GET"
-      ],
-      "name": "system_update_check",
-      "type": "APIRoute"
-    },
-    {
-      "path": "/api/system/update_log",
-      "methods": [
-        "GET"
-      ],
-      "name": "system_update_log",
-      "type": "APIRoute"
-    },
-    {
-      "path": "/api/system/update_status",
-      "methods": [
-        "GET"
-      ],
-      "name": "system_update_status",
-      "type": "APIRoute"
-    },
-    {
-      "path": "/api/system/version",
-      "methods": [
-        "GET"
-      ],
-      "name": "system_version",
       "type": "APIRoute"
     },
     {
@@ -1215,14 +1119,6 @@
         "POST"
       ],
       "name": "upload",
-      "type": "APIRoute"
-    },
-    {
-      "path": "/api/tagger/{name}/check",
-      "methods": [
-        "GET"
-      ],
-      "name": "check_tagger",
       "type": "APIRoute"
     },
     {
@@ -1332,6 +1228,12 @@
       ],
       "name": "get_sample",
       "type": "APIRoute"
+    },
+    {
+      "path": "/studio",
+      "methods": [],
+      "name": "studio",
+      "type": "Mount"
     }
   ]
 }

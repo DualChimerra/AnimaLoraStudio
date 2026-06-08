@@ -522,7 +522,6 @@ def _stub_run_bootstrap(
     monkeypatch.setattr(cli, "WEB_DIST", dist)
     monkeypatch.setattr(cli, "_web_dist_is_stale", lambda: False)
     monkeypatch.setattr(cli, "_ensure_python_deps", lambda: 0)
-    monkeypatch.setattr(cli, "_apply_update_pending", lambda: None)
     monkeypatch.setattr(cli, "_apply_pending_install", lambda: None)
     monkeypatch.setattr(cli, "_check_torch_cuda", lambda: None)
     monkeypatch.setattr(cli, "_try_enable_flash_attn", lambda: None)

@@ -81,7 +81,6 @@ function useBreadcrumbs(): Crumb[] {
       crumbs.push({ label: versionLabel, mono: true })
       const stepLabels: Record<string, string> = {
         curate: t('breadcrumb.curate'),
-        tag: t('breadcrumb.tag'),
         edit: t('breadcrumb.tagEdit'),
         reg: t('breadcrumb.reg'),
         train: t('breadcrumb.train'),

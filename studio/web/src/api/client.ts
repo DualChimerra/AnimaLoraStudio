@@ -373,16 +373,6 @@ export interface GenerateSecretsConfig {
   attention_backend: AttentionBackend
 }
 
-/** 系统级偏好（ADR 0002 / 0005）。update_channel 是用户视图偏好（"stable" /
- *  "dev"），与 git 工作树状态解耦：toggle 切换不触发 git 操作，仅改 UI 展示
- *  的通道；真正"切到 dev HEAD" / "更新到 vX.Y.Z" 是单独按钮。
- *  show_dev_channel 是 deprecated 字段（pydantic 兼容），新代码用 update_channel。 */
-export interface SystemPrefsConfig {
-  update_channel: 'stable' | 'dev'
-  /** @deprecated use update_channel */
-  show_dev_channel: boolean
-}
-
 export interface ProxyConfig {
     enabled: boolean;
     http_proxy: string;
@@ -427,7 +417,6 @@ export interface Secrets {
   models: ModelsConfig
   queue: QueueConfig
   generate: GenerateSecretsConfig
-  system: SystemPrefsConfig
   proxy: ProxyConfig
 }
 
@@ -577,21 +566,20 @@ export type VersionStatus =
   | 'canceled'
 
 /** ADR-0007 §11.3-B 新模型：version 准备 cursor（仅 status=preparing 时有意义）。
- *  按 PHASE_ORDER 顺序：curating → preprocessing → tagging → editing →
- *  regularizing → ready（ADR 0010 amendment 加 preprocessing）。 */
+ *  按 PHASE_ORDER 顺序：curating → preprocessing → editing →
+ *  regularizing → ready（自动打标步骤已移除）。 */
 export type VersionPhase =
   | 'curating'
   | 'preprocessing'
-  | 'tagging'
   | 'editing'
   | 'regularizing'
   | 'ready'
 
 export const PHASE_ORDER: VersionPhase[] = [
-  'curating', 'preprocessing', 'tagging', 'editing', 'regularizing', 'ready',
+  'curating', 'preprocessing', 'editing', 'regularizing', 'ready',
 ]
 
-export const PHASE_SKIPPABLE: VersionPhase[] = ['preprocessing', 'tagging', 'regularizing']
+export const PHASE_SKIPPABLE: VersionPhase[] = ['preprocessing', 'regularizing']
 
 /** ADR-0007 §11.5-A: advance / skip phase endpoint response。 */
 export interface PhaseAdvanceResult {
@@ -653,7 +641,7 @@ export interface ProjectDetail extends ProjectSummary {
 // ---- jobs (PP2) -----------------------------------------------------------
 
 export type JobStatus = 'pending' | 'running' | 'done' | 'failed' | 'canceled'
-export type JobKind = 'download' | 'preprocess' | 'tag' | 'reg_build' | 'upload'
+export type JobKind = 'download' | 'preprocess' | 'reg_build' | 'upload'
 
 export interface Job {
   id: number
@@ -921,16 +909,7 @@ export interface DuplicateApplyResult {
   skipped: string[]
 }
 
-// ---- tagging (PP4) --------------------------------------------------------
-
-export type TaggerName = 'wd14' | 'cltagger' | 'joycaption' | 'llm'
-
-export interface TaggerStatus {
-  name: TaggerName
-  ok: boolean
-  msg: string
-  requires_service: boolean
-}
+// ---- captions (PP4) -------------------------------------------------------
 
 export interface CaptionPreview {
   name: string
@@ -1929,63 +1908,12 @@ export const api = {
   getLatestVersionJob: (
     pid: number,
     vid: number,
-    kind: 'download' | 'tag' | 'reg_build',
+    kind: 'download' | 'reg_build',
   ) =>
     req<{ job: Job | null; log: string }>(
       `/api/projects/${pid}/versions/${vid}/jobs/latest?kind=${kind}`,
     ),
 
-  // Tagging (PP4) --------------------------------------------------------
-  checkTagger: (name: TaggerName) =>
-    req<TaggerStatus>(`/api/tagger/${name}/check`),
-  startTag: (
-    pid: number,
-    vid: number,
-    body: {
-      tagger: TaggerName
-      output_format?: 'txt' | 'json'
-      /**
-       * wd14 本次任务的临时覆盖；仅在 worker 进程生效，不写回 settings。
-       * 字段为 undefined / null 时沿用全局 settings。
-       */
-      wd14_overrides?: {
-        threshold_general?: number | null
-        threshold_character?: number | null
-        model_id?: string | null
-        local_dir?: string | null
-        blacklist_tags?: string[] | null
-      }
-      cltagger_overrides?: {
-        threshold_general?: number | null
-        threshold_character?: number | null
-        model_id?: string | null
-        model_path?: string | null
-        tag_mapping_path?: string | null
-        local_dir?: string | null
-        add_copyright_tag?: boolean | null
-        add_meta_tag?: boolean | null
-        add_model_tag?: boolean | null
-        add_rating_tag?: boolean | null
-        add_quality_tag?: boolean | null
-        blacklist_tags?: string[] | null
-      }
-      // current_preset 切换 active preset；其他字段覆盖 preset 同名字段。
-      // api_key / model_ids / id / label / builtin 不允许 override。
-      // PR #34 (P0-2) 的 `_output_format` 被本次重构吸收 — preset 自己有 output_format 字段。
-      llm_overrides?:
-        & { current_preset?: string }
-        & Partial<Omit<LLMPreset, 'id' | 'label' | 'builtin' | 'api_key' | 'model_ids'>>
-      /**
-       * 触发词；空串 / undefined = 不启用。worker 端写 caption 时 prepend 为
-       * 第一个 tag，并同步落库到 version.trigger_word，后续 train 读出。
-       */
-      trigger_word?: string
-    }
-  ) =>
-    req<Job>(`/api/projects/${pid}/versions/${vid}/tag`, {
-      method: 'POST',
-      body: JSON.stringify(body),
-    }),
   listCaptions: (pid: number, vid: number, folder?: string) => {
     const qs = folder ? `?folder=${encodeURIComponent(folder)}` : ''
     return req<{ folder: string | null; items: CaptionPreview[] }>(
@@ -2478,198 +2406,6 @@ export const api = {
     const qs = path ? `?path=${encodeURIComponent(path)}` : ''
     return req<BrowseResult>(`/api/browse${qs}`)
   },
-
-  // System lifecycle (ADR 0002) ----------------------------------------
-  // 重启 server。后端写 tmp/restart + 给自己发 SIGINT 触发 uvicorn graceful
-  // shutdown；cli.py 的 loop 拾起并重启。前端调完后应进入"重启中"等待状态，
-  // 轮询 /api/health 直到服务回来。
-  restartServer: () =>
-    req<{ ok: boolean; message: string }>('/api/system/restart', {
-      method: 'POST',
-    }),
-
-  // 当前仓库 git 状态：__version__ / commit / tag / branch / dirty
-  getSystemVersion: () => req<SystemVersion>('/api/system/version'),
-
-  // git fetch + 比对。master 通道 24h cache；force=true 强制重 fetch。
-  // dev 通道（PR-D）每次都 fetch，不缓存。
-  checkSystemUpdate: (channel: 'master' | 'dev' = 'master', force = false) => {
-    const qs = new URLSearchParams({ channel, force: String(force) })
-    return req<SystemUpdateCheck>(`/api/system/update_check?${qs.toString()}`)
-  },
-
-  // 请求 update：写 .update_pending + 触发 SIGINT 重启。
-  // 422 = running task 或 dirty working tree。
-  performSystemUpdate: (target: string = 'origin/master') =>
-    req<{ ok: boolean; message: string }>('/api/system/update', {
-      method: 'POST',
-      body: JSON.stringify({ target }),
-    }),
-
-  // 回滚到 .last_version 记录的上一版本（PR-C）。
-  // 422 = running task / dirty；409 = 没有 .last_version 或 commit 已 GC。
-  rollbackSystem: () =>
-    req<{ ok: boolean; message: string; target: string }>('/api/system/rollback', {
-      method: 'POST',
-    }),
-
-  // 最近一次 update 的结构化结果（PR-C）。status: null = 从未 update 过。
-  getSystemUpdateStatus: () => req<SystemUpdateStatus>('/api/system/update_status'),
-
-  // 完整 .update_log 文本（PR-C，失败时 UI 弹 modal 用）。
-  getSystemUpdateLog: () => req<{ content: string }>('/api/system/update_log'),
-
-  // chunk 2 — 解析 CHANGELOG.md，返回指定 tag 的 release notes
-  // （MasterCard 用此填进 change-block；缺失时 found=false 优雅退化）
-  getReleaseNotes: (tag: string) =>
-    req<ReleaseNotes>(`/api/system/release_notes?tag=${encodeURIComponent(tag)}`),
-
-  // chunk 3 — git fetch + log origin/dev，返回最近 N 个 commit
-  // （DevCard 时间线 + 任意 commit 切换用）。limit 默认 10，clamp 1-50。
-  getDevCommits: (limit = 10) =>
-    req<DevCommitsResult>(`/api/system/dev_commits?limit=${limit}`),
-
-  // chunk 4 — 更新前置检查。VersionSection preview 状态展开时拉取，渲染
-  // pre-flight 行；任一 level=err → blocking=true 禁用确认按钮。
-  // target 接受任意 git ref（tag / branch / commit sha）。
-  getPreflight: (target: string) =>
-    req<PreflightResult>(`/api/system/preflight?target=${encodeURIComponent(target)}`),
-
-  // 0.8.1 hotfix — zip 安装用户一键初始化 git 仓库。幂等：已是 git 仓库
-  // 直接返 ok=true + already_initialized=true。失败 500 + detail.error。
-  initGitRepo: () =>
-    req<{ ok: boolean; already_initialized: boolean; anchor?: string; anchor_kind?: string }>(
-      '/api/system/init_git',
-      { method: 'POST' },
-    ),
-}
-
-export interface SystemVersion {
-  version: string
-  commit: string
-  commit_short: string
-  commit_time_iso: string
-  /** @deprecated UI 用 installed_kind / installed_label；branch 仅 debug */
-  branch: string
-  tag: string | null
-  is_dirty: boolean
-  /** 产品视角的"装了什么"分类（ADR 0005）。
-   *  - stable：HEAD 命中 vX.Y.Z release tag，或 __version__ 匹某 release tag 且 tree 一致
-   *  - dev：commit == origin/dev HEAD
-   *  - custom：feature branch / detached / 未识别 commit
-   *  - zip：REPO_ROOT/.git 缺失（zip 解压用户，0.8.1 hotfix） */
-  installed_kind: 'stable' | 'dev' | 'custom' | 'zip'
-  /** 用户可读 label，如 "v0.8.0" / "dev @ f6f202b · 2026-05-16" / "自定义（feat/foo @ a1b2c3d）"。
-   *  dirty 时追加 "· 未提交修改" */
-  installed_label: string
-  /** "vX.Y.Z" 形式，仅 installed_kind=stable 时填；前端做版本号比对用 */
-  stable_version: string | null
-  /** False = zip 安装 / 没有 origin remote。前端显示 init banner 时用（0.8.1 hotfix） */
-  is_git_repo: boolean
-  /** False = git binary 不在 PATH。zip 用户 + 没装 git → 显示"先装 git"提示而非 init 按钮 */
-  git_available: boolean
-}
-
-export interface SystemUpdateCheck {
-  channel: 'master' | 'dev'
-  current_commit: string
-  latest_commit: string
-  /** @deprecated 前端用 behind_count；commits_ahead 是 git 词汇 */
-  commits_ahead: number
-  /** @deprecated 前端用 state；has_update = (state === 'update_available') */
-  has_update: boolean
-  latest_tag: string | null
-  checked_at: number
-  error: string | null
-  /** 状态机（ADR 0005）。
-   *  - up_to_date：已是最新（版本号 / commit 一致）
-   *  - update_available：远端有更新
-   *  - ahead：本地领先远端（罕见，常见于回滚后又抢跑）
-   *  - detached：当前 commit 不在 channel 历史上（feature branch / 离群） */
-  state: 'up_to_date' | 'update_available' | 'ahead' | 'detached'
-  /** 当前装的稳定版（master 通道）："vX.Y.Z" / null（没装 stable） */
-  installed_version: string | null
-  /** 远端最新稳定版（master 通道）："vX.Y.Z" / null（远端没 tag / dev 通道） */
-  latest_version: string | null
-  /** 前端文案"N 项更新"用（= commits_ahead，但语义更清楚） */
-  behind_count: number
-}
-
-/** PR-C — 最近一次 update 的结构化结果。
- *  - status=null：从未 update 过，UI 不展示 banner
- *  - status='ok'：可选展示"已更新到 X"
- *  - status='aborted' / 'failed' / 'partial'：红色 banner + reason + "查看日志"
- *  - rollback_target：.last_version 内容（commit sha），UI 用它判断是否显示回滚按钮
- */
-export interface SystemUpdateStatus {
-  status: 'ok' | 'aborted' | 'failed' | 'partial' | null
-  reason?: string
-  target?: string
-  from_commit?: string
-  to_commit?: string
-  started_at?: number
-  finished_at?: number
-  deps_changed?: boolean
-  log_excerpt?: string
-  rollback_target?: string | null
-  /** rollback target commit 的 exact tag（如 v0.6.0）。后端 git describe
-   *  --tags --exact-match 拿；commit 没打 tag → null。UI 优先显示 tag，
-   *  fallback 到 sha 前 8 位 */
-  rollback_target_tag?: string | null
-}
-
-/** chunk 2 重做 — release_notes.yaml 派生的 release notes。
- *  schema + 编写规范见 docs/release-notes-spec.md。`found=false` → UI 退化到 CHANGELOG 链接。 */
-export type ReleaseNotesKind =
-  | 'added' | 'changed' | 'improved' | 'fixed' | 'removed' | 'deprecated' | 'security'
-
-export interface ReleaseNotesEntry {
-  kind: ReleaseNotesKind
-  summary: string         // ≤ 80 chars, plain text, user-facing
-  pr_refs: number[]       // 关联 PR 号；空 list 表示无关联 PR
-  detail: string | null   // optional markdown 多行说明
-}
-
-export interface ReleaseNotes {
-  tag: string             // caller 传入的 tag（v 前缀保留）
-  found: boolean
-  date: string | null     // ISO YYYY-MM-DD
-  summary: string | null  // 整版本一句话总览（block-level summary）
-  entries: ReleaseNotesEntry[]
-}
-
-/** chunk 3 — dev 通道最近 commit 摘要。fetched=false 时表示 git fetch 失败
- *  （离线 / 网络问题），commits 是本地 origin/dev 缓存。error 文案给 UI 提示。 */
-export interface DevCommit {
-  sha: string           // full sha，作为 performSystemUpdate target
-  short_sha: string     // 前 8 位
-  msg: string           // commit subject
-  time_iso: string      // ISO8601
-  author: string
-}
-export interface DevCommitsResult {
-  commits: DevCommit[]
-  fetched: boolean
-  error: string | null
-}
-
-/** chunk 4 — 更新前置检查。任一 level=err → blocking=true 禁用确认按钮。 */
-export interface PreflightCheck {
-  key: 'dirty' | 'running_tasks' | 'requirements_diff' | 'last_version'
-  level: 'ok' | 'warn' | 'err'
-  label: string
-}
-export interface PreflightRequirementsDiff {
-  added: string[]
-  removed: string[]
-  changed: { name: string; from: string; to: string }[]
-}
-export interface PreflightResult {
-  target: string
-  target_resolved: string | null
-  checks: PreflightCheck[]
-  blocking: boolean
-  requirements_diff: PreflightRequirementsDiff
 }
 
 export interface BrowseEntry {

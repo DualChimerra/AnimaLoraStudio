@@ -85,14 +85,14 @@ def test_advance_curating_to_preprocessing_with_image(client: TestClient) -> Non
     assert body["version"]["phase"] == "preprocessing"
 
 
-def test_advance_tagging_fails_with_missing_caption(client: TestClient) -> None:
+def test_advance_editing_fails_with_missing_caption(client: TestClient) -> None:
     p, v = _make_pv(client)
     vdir = versions.version_dir(p["id"], p["slug"], v["label"])
     _put_image(vdir / "train" / "5_concept", "001", with_caption=False)
     _put_image(vdir / "train" / "5_concept", "002", with_caption=True)
-    # cursor 推到 tagging
+    # cursor 推到 editing（caption 兜底校验同旧 tagging）
     with db.connection_for() as conn:
-        versions.update_version(conn, v["id"], phase="tagging")
+        versions.update_version(conn, v["id"], phase="editing")
 
     resp = client.post(f"/api/projects/{p['id']}/versions/{v['id']}/advance-phase")
     body = resp.json()

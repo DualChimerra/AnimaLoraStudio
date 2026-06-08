@@ -315,10 +315,9 @@ function BannerProgress({
 const PHASE_ORDER_TIMELINE: { id: VersionPhase; n: string; key: string }[] = [
   { id: 'curating',      n: '①', key: 'nav.curate' },
   { id: 'preprocessing', n: '②', key: 'nav.preprocess' },
-  { id: 'tagging',       n: '③', key: 'nav.tag' },
-  { id: 'editing',       n: '④', key: 'nav.tagEdit' },
-  { id: 'regularizing',  n: '⑤', key: 'nav.reg' },
-  { id: 'ready',         n: '⑥', key: 'nav.train' },
+  { id: 'editing',       n: '③', key: 'nav.tagEdit' },
+  { id: 'regularizing',  n: '④', key: 'nav.reg' },
+  { id: 'ready',         n: '⑤', key: 'nav.train' },
 ]
 
 function PhaseTimeline({
@@ -604,7 +603,6 @@ function StatusBanner({
 const PHASE_TO_STEP_LOCAL: Record<VersionPhase, string> = {
   curating:      'curate',
   preprocessing: 'preprocess',
-  tagging:       'tag',
   editing:       'edit',
   regularizing:  'reg',
   ready:         'train',

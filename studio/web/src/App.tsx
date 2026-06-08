@@ -22,7 +22,6 @@ import DownloadPage from './pages/project/steps/Download'
 import PreprocessHub from './pages/project/steps/PreprocessHub'
 import RegularizationPage from './pages/project/steps/Regularization'
 import TagEditPage from './pages/project/steps/TagEdit'
-import TaggingPage from './pages/project/steps/Tagging'
 import TrainPage from './pages/project/steps/Train'
 import GeneratePage from './pages/tools/Generate'
 import MonitorPage from './pages/tools/Monitor'
@@ -106,7 +105,6 @@ const router = createBrowserRouter(
                 { path: 'curate', element: <CurationPage /> },
                 // ADR 0010: preprocess 从 project scope 移到 version scope
                 { path: 'preprocess', element: <PreprocessHub /> },
-                { path: 'tag', element: <TaggingPage /> },
                 { path: 'edit', element: <TagEditPage /> },
                 { path: 'reg', element: <RegularizationPage /> },
                 { path: 'train', element: <TrainPage /> },

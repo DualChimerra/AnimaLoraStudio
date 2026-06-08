@@ -80,25 +80,6 @@ def check_regularizing(
     return CheckResult(True)
 
 
-def check_tagging_jobs(
-    conn: sqlite3.Connection, version_id: int
-) -> CheckResult:
-    """无 tag job 处于 pending/running（可跳过 tagging 用；不强求 caption 覆盖）。
-
-    跟 `check_regularizing` / `check_preprocessing` 同 pattern——skip tagging 时
-    不要求每张图都有 caption（接受裸训练 / 自带 .txt），仅防 concurrent 打标 job
-    撞车（避免 worker 正写 caption 时 cursor 已离开 tagging）。
-    """
-    row = conn.execute(
-        "SELECT COUNT(*) FROM project_jobs "
-        "WHERE version_id = ? "
-        "  AND kind = 'tag' "
-        "  AND status IN ('pending', 'running')",
-        (version_id,),
-    ).fetchone()
-    if int(row[0]) > 0:
-        return CheckResult(False, "打标任务进行中，请等待完成")
-    return CheckResult(True)
 
 
 def check_preprocessing(
@@ -153,8 +134,6 @@ def check_phase(
         return check_curating(_versions.stats_for_version(p, v))
     if phase == P.PREPROCESSING:
         return check_preprocessing(conn, version_id)
-    if phase == P.TAGGING:
-        return check_tagging(_versions.stats_for_version(p, v))
     if phase == P.EDITING:
         return check_editing(_versions.stats_for_version(p, v))
     if phase == P.REGULARIZING:
@@ -229,10 +208,6 @@ def skip_phase(
             return False, result, None
     elif current_phase == _versions.VersionPhase.PREPROCESSING:
         result = check_preprocessing(conn, version_id)
-        if not result.ok:
-            return False, result, None
-    elif current_phase == _versions.VersionPhase.TAGGING:
-        result = check_tagging_jobs(conn, version_id)
         if not result.ok:
             return False, result, None
 

@@ -86,7 +86,7 @@ def test_download_job_runs_in_parallel_with_training_task(isolated, tmp_path) ->
 
 
 def test_gpu_job_deferred_during_training_by_default(isolated, tmp_path) -> None:
-    """PP10.2.b：训练 task 在跑时，tag / reg_build job 默认推迟（避免抢 GPU）。"""
+    """PP10.2.b：训练 task 在跑时，GPU-bound job（reg_build）默认推迟（避免抢 GPU）。"""
     p = _setup_project(isolated)
     events: list[dict] = []
     task_sleep = lambda t, _cfg: [
@@ -110,7 +110,7 @@ def test_gpu_job_deferred_during_training_by_default(isolated, tmp_path) -> None
     with db.connection_for(isolated["db"]) as conn:
         tid = db.create_task(conn, name="t1", config_name="fake")
         job = project_jobs.create_job(
-            conn, project_id=p["id"], kind="tag", params={}
+            conn, project_id=p["id"], kind="reg_build", params={}
         )
     sup.start()
     try:
@@ -173,7 +173,7 @@ def test_gpu_job_runs_during_training_when_allowed(isolated, tmp_path, monkeypat
     with db.connection_for(isolated["db"]) as conn:
         tid = db.create_task(conn, name="t1", config_name="fake")
         job = project_jobs.create_job(
-            conn, project_id=p["id"], kind="tag", params={}
+            conn, project_id=p["id"], kind="reg_build", params={}
         )
     sup.start()
     try:

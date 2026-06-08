@@ -15,7 +15,6 @@ import { useToast } from './Toast'
 const STEP_KEY_TO_PHASE: Record<string, VersionPhase> = {
   curate:     'curating',
   preprocess: 'preprocessing',
-  tag:        'tagging',
   edit:       'editing',
   reg:        'regularizing',
   train:      'ready',
@@ -24,7 +23,6 @@ const STEP_KEY_TO_PHASE: Record<string, VersionPhase> = {
 const PHASE_TO_STEP_KEY: Record<VersionPhase, string> = {
   curating:      'curate',
   preprocessing: 'preprocess',
-  tagging:       'tag',
   editing:       'edit',
   regularizing:  'reg',
   ready:         'train',
@@ -270,10 +268,9 @@ function ProjectStepperNav({ pid, activeVid, currentStep, version, collapsed }: 
     { key: 'download',   labelKey: 'nav.download',   idx: '',  icon: I.download, scope: 'project' as const },
     { key: 'curate',     labelKey: 'nav.curate',     idx: '1', icon: I.filter,   scope: 'version' as const },
     { key: 'preprocess', labelKey: 'nav.preprocess', idx: '2', icon: I.upscale,  scope: 'version' as const },
-    { key: 'tag',        labelKey: 'nav.tag',        idx: '3', icon: I.tag,      scope: 'version' as const },
-    { key: 'edit',       labelKey: 'nav.tagEdit',    idx: '4', icon: I.edit,     scope: 'version' as const },
-    { key: 'reg',        labelKey: 'nav.reg',        idx: '5', icon: I.reg,      scope: 'version' as const },
-    { key: 'train',      labelKey: 'nav.train',      idx: '6', icon: I.train,    scope: 'version' as const },
+    { key: 'edit',       labelKey: 'nav.tagEdit',    idx: '3', icon: I.edit,     scope: 'version' as const },
+    { key: 'reg',        labelKey: 'nav.reg',        idx: '4', icon: I.reg,      scope: 'version' as const },
+    { key: 'train',      labelKey: 'nav.train',      idx: '5', icon: I.train,    scope: 'version' as const },
   ]
 
   const overviewActive = currentStep === null
