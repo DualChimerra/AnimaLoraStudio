@@ -5,7 +5,6 @@ import { useProjectCtx } from '../context/ProjectContext'
 import { api, type Task } from '../api/client'
 import { useEventStream, type StudioEvent } from '../lib/useEventStream'
 import { useMonitorProgress } from '../lib/useMonitorProgress'
-import { useSettingsDrawer } from '../lib/SettingsDrawer'
 import CommandPalette from './CommandPalette'
 import SystemStats from './SystemStats'
 
@@ -107,24 +106,11 @@ export default function Topbar() {
   const crumbs = useBreadcrumbs()
   const navigate = useNavigate()
   const ctx = useProjectCtx()
-  const settingsDrawer = useSettingsDrawer()
   const [paletteOpen, setPaletteOpen] = useState(false)
   const searchBtnRef = useRef<HTMLButtonElement>(null)
 
   const [runningTask, setRunningTask] = useState<Task | null>(null)
   const [pendingCount, setPendingCount] = useState(0)
-
-  const [updateInfo, setUpdateInfo] = useState<{ has_update: boolean; latest_tag: string | null; latest_commit: string } | null>(null)
-  useEffect(() => {
-    let cancelled = false
-    void api.checkSystemUpdate('master').then((r) => {
-      if (cancelled) return
-      if (r.has_update) {
-        setUpdateInfo({ has_update: true, latest_tag: r.latest_tag, latest_commit: r.latest_commit })
-      }
-    }).catch(() => { /* silent */ })
-    return () => { cancelled = true }
-  }, [])
 
   const { state: monitor } = useMonitorProgress(runningTask?.id ?? null)
 
@@ -234,17 +220,6 @@ export default function Topbar() {
         </div>
 
         <SystemStats />
-
-        {updateInfo?.has_update && (
-          <button
-            onClick={() => settingsDrawer.open({ section: 'version' })}
-            title={t('topbar.newVersion', { tag: updateInfo.latest_tag ?? updateInfo.latest_commit.slice(0, 8) })}
-            className="flex items-center gap-1.5 px-2 py-[5px] rounded-md text-xs font-mono text-accent bg-accent-soft border border-accent cursor-pointer hover:bg-accent/10 transition-colors shrink-0"
-          >
-            <span className="w-1.5 h-1.5 rounded-full bg-accent" />
-            <span>{updateInfo.latest_tag ?? t('topbar.newVersion', { tag: '' }).trim()}</span>
-          </button>
-        )}
 
         {runningTask && (
           <button

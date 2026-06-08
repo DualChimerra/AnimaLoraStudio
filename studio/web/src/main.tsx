@@ -3,7 +3,6 @@ import ReactDOM from 'react-dom/client'
 import App from './App'
 import { DialogProvider } from './components/Dialog'
 import { ErrorBoundary } from './components/ErrorBoundary'
-import { FirstRunLangModal } from './components/FirstRunLangModal'
 import { ToastProvider } from './components/Toast'
 import { installGlobalErrorHandlers } from './lib/errors/setup'
 import { SettingsDataProvider } from './lib/SettingsData'
@@ -24,7 +23,6 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
         <DialogProvider>
           <SettingsDataProvider>
             <SettingsDrawerProvider>
-              <FirstRunLangModal />
               <App />
             </SettingsDrawerProvider>
           </SettingsDataProvider>

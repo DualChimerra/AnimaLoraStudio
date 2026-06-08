@@ -12,7 +12,6 @@ import { useToast } from '../../components/Toast'
 import { useEventStream } from '../../lib/useEventStream'
 import { useMonitorProgress } from '../../lib/useMonitorProgress'
 import { useLocalStorageState } from '../../lib/useLocalStorageState'
-import AspectChips, { aspectFromDimensions, type AspectName } from './generate/AspectChips'
 import DaemonControls from './generate/DaemonControls'
 import DaemonLogDrawer from './generate/DaemonLogDrawer'
 import GenerateProgressBar, { type GenerateProgress } from './generate/GenerateProgress'
@@ -39,7 +38,6 @@ const DEFAULT_GENERATE_PREFS = {
   mode: 'single' as ViewMode,
   prompts: ['newest, safe, 1girl, masterpiece, best quality'],
   negPrompt: DEFAULT_NEG,
-  aspect: '1:1' as AspectName,
   width: 1024,
   height: 1024,
   steps: 25,
@@ -111,7 +109,7 @@ export default function GeneratePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const { mode, prompts, negPrompt, aspect, width, height, steps, cfgScale, count, seed, xDraft, yDraft, datasetPick } = prefs
+  const { mode, prompts, negPrompt, width, height, steps, cfgScale, count, seed, xDraft, yDraft, datasetPick } = prefs
   // LoRA 列表按 mode 完全独立：single 用 singleLoras，xy（含 compare 子视图）用
   // xyLoras。读写都按当前 mode 路由，切 mode 互不影响。
   const loras = mode === 'single' ? prefs.singleLoras : prefs.xyLoras
@@ -120,7 +118,6 @@ export default function GeneratePage() {
   const setMode = (mode: ViewMode) => setPrefs((p) => ({ ...p, mode }))
   const setPrompts = (prompts: string[]) => setPrefs((p) => ({ ...p, prompts }))
   const setNegPrompt = (negPrompt: string) => setPrefs((p) => ({ ...p, negPrompt }))
-  const setAspect = (aspect: AspectName) => setPrefs((p) => ({ ...p, aspect }))
   const setWidth = (width: number) => setPrefs((p) => ({ ...p, width }))
   const setHeight = (height: number) => setPrefs((p) => ({ ...p, height }))
   const setSteps = (steps: number) => setPrefs((p) => ({ ...p, steps }))
@@ -540,25 +537,14 @@ export default function GeneratePage() {
             <div className="card" style={{ padding: 18 }}>
               <h3 className="m-0 text-md font-semibold mb-3">{t('generate.samplingParams')}</h3>
               <div className="flex flex-col gap-3">
-                <div>
-                  <label className="caption block mb-1.5">{t('generate.aspect')}</label>
-                  <AspectChips
-                    aspect={aspect}
-                    onPick={(a, w, h) => {
-                      setAspect(a)
-                      if (w && h) { setWidth(w); setHeight(h) }
-                    }}
-                  />
-                </div>
                 <div className="flex gap-2 items-end">
-                  <NumField label={t('generate.width')} value={width} onChange={(v) => { setWidth(v); setAspect(aspectFromDimensions(v, height)) }} min={256} max={4096} step={64} />
-                  <NumField label={t('generate.height')} value={height} onChange={(v) => { setHeight(v); setAspect(aspectFromDimensions(width, v)) }} min={256} max={4096} step={64} />
+                  <NumField label={t('generate.width')} value={width} onChange={setWidth} min={256} max={4096} step={64} />
+                  <NumField label={t('generate.height')} value={height} onChange={setHeight} min={256} max={4096} step={64} />
                   <button
                     type="button"
                     onClick={() => {
                       const newW = height, newH = width
                       setWidth(newW); setHeight(newH)
-                      setAspect(aspectFromDimensions(newW, newH))
                     }}
                     title={t('generate.swapSizeTitle')}
                     className="font-mono inline-flex items-center gap-1.5 shrink-0"

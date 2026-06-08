@@ -10,7 +10,7 @@ export function getStoredLang(): string | null {
 }
 
 export function getStoredLangWithDefault(): string {
-  return getStoredLang() ?? 'zh'
+  return getStoredLang() ?? 'en'
 }
 
 export function setStoredLang(lang: string) {
@@ -22,7 +22,7 @@ void i18n
   .init({
     resources: { zh: { translation: zh }, en: { translation: en } },
     lng: getStoredLangWithDefault(),
-    fallbackLng: 'zh',
+    fallbackLng: 'en',
     interpolation: { escapeValue: false },
   })
 
