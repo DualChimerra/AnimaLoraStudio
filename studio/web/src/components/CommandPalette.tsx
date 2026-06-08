@@ -175,7 +175,6 @@ export default function CommandPalette({ open, onClose, anchorEl }: Props) {
       if (cvid) {
         const base = `/projects/${cpid}/v/${cvid}`
         items.push({ id: `curate:${cpid}`, label: t('nav.curate'),   sub: ctx.project.title, group, path: `${base}/curate` })
-        items.push({ id: `tag:${cpid}`,    label: t('nav.tag'),      sub: ctx.project.title, group, path: `${base}/tag` })
         items.push({ id: `edit:${cpid}`,   label: t('nav.tagEdit'),  sub: ctx.project.title, group, path: `${base}/edit` })
         items.push({ id: `reg:${cpid}`,    label: t('nav.reg'),      sub: ctx.project.title, group, path: `${base}/reg` })
         items.push({ id: `train:${cpid}`,  label: t('nav.train'),    sub: ctx.project.title, group, path: `${base}/train` })

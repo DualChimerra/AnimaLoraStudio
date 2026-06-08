@@ -159,7 +159,6 @@ const EMPTY: Secrets = {
   models: { root: null, selected_anima: '1.0', selected_upscaler: '4x-AnimeSharp', auto_sync_paths: true },
   queue: { allow_gpu_during_train: false },
   generate: { preview_every_n_steps: 3, attention_backend: 'auto' },
-  system: { update_channel: 'stable', show_dev_channel: false },
   proxy: {
     enabled: false,
     http_proxy: '',

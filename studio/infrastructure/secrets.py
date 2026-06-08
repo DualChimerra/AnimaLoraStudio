@@ -438,21 +438,6 @@ class GenerateConfig(BaseModel):
     attention_backend: str = "auto"
 
 
-class SystemConfig(BaseModel):
-    """系统级偏好（ADR 0002 / 0005）。
-
-    - `update_channel`：用户订阅哪条更新轨道。"stable"（默认）= 只看稳定版
-      更新提示；"dev" = 看 dev 通道（最近 commit 时间线、可切到 dev HEAD）。
-      这是**用户视图偏好**，与 git 工作树状态解耦 —— 切 toggle 不触发任何
-      git 操作；真正"切到 dev HEAD" / "更新到 vX.Y.Z" 是单独按钮。
-    - `show_dev_channel`：deprecated，由 `_migrate_legacy_schema` 一次性迁移成
-      `update_channel`（true → "dev"，false → "stable"），保留字段以便旧
-      secrets.json 读取时 pydantic 不报错；新代码不要再用。
-    """
-    update_channel: str = "stable"  # "stable" / "dev"
-    show_dev_channel: bool = False  # deprecated, 仅作迁移源
-
-
 class ProxyConfig(BaseModel):
     """全局 HTTP/HTTPS 代理配置。"""
     enabled: bool = False
@@ -479,7 +464,6 @@ class Secrets(BaseModel):
     models: ModelsConfig = Field(default_factory=ModelsConfig)
     queue: QueueConfig = Field(default_factory=QueueConfig)
     generate: GenerateConfig = Field(default_factory=GenerateConfig)
-    system: SystemConfig = Field(default_factory=SystemConfig)
     proxy: ProxyConfig = Field(default_factory=ProxyConfig)
 
 
@@ -581,12 +565,8 @@ def _migrate_legacy_schema(raw: dict[str, Any]) -> dict[str, Any]:
 
     幂等：新 schema（llm_tagger 含 current_preset / presets）直接返回。
     """
-    # 6. system 通道偏好一次性迁移（无论后面 llm_tagger path 怎么走都先做）
-    sys_raw = raw.get("system")
-    if isinstance(sys_raw, dict):
-        # 新字段已显式设过 → 不覆盖（幂等）
-        if "update_channel" not in sys_raw and sys_raw.get("show_dev_channel") is True:
-            sys_raw["update_channel"] = "dev"
+    # 旧 secrets.json 里残留的 `system` 字段（app 自更新已移除）直接丢弃。
+    raw.pop("system", None)
 
     llm_old = raw.get("llm_tagger")
     if not isinstance(llm_old, dict):

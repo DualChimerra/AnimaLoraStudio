@@ -4,7 +4,6 @@ import { useOutletContext } from 'react-router-dom'
 import {
   api,
   type DownloadFile,
-  type Job,
   type ProjectDetail,
   type UploadResult,
   type Version,
@@ -29,22 +28,12 @@ interface Ctx {
   reload: () => Promise<void>
 }
 
-const STATUS_COLOR: Record<Job['status'], string> = {
-  pending: 'badge badge-neutral',
-  running: 'badge badge-warn',
-  done: 'badge badge-ok',
-  failed: 'badge badge-err',
-  canceled: 'badge badge-neutral',
-}
-
-// 信息密度优先：每个 panel 紧凑成单/双 inline 行；已下载 grid 占主区域。
+// 信息密度优先：上传 panel + 已下载 grid 占主区域。
 export default function DownloadPage() {
   const { t } = useTranslation()
   const { project, reload } = useOutletContext<Ctx>()
   const { toast } = useToast()
   const { confirm } = useDialog()
-  const [job, setJob] = useState<Job | null>(null)
-  const [logs, setLogs] = useState<string[]>([])
   const [files, setFiles] = useState<DownloadFile[]>([])
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [anchor, setAnchor] = useState<string | null>(null)
@@ -61,52 +50,18 @@ export default function DownloadPage() {
     }
   }, [project.id])
 
-  const refreshStatus = useCallback(async () => {
-    try {
-      const r = await api.getDownloadStatus(project.id)
-      setJob(r.job)
-      setLogs(r.log_tail ? r.log_tail.split('\n') : [])
-    } catch {
-      /* ignore */
-    }
-  }, [project.id])
-
   useEffect(() => {
-    void refreshStatus()
     void refreshFiles()
-  }, [refreshStatus, refreshFiles])
+  }, [refreshFiles])
 
-  const jobIdRef = useRef<number | null>(null)
-  jobIdRef.current = job?.id ?? null
   useEventStream((evt) => {
-    const jid = jobIdRef.current
-    if (evt.type === 'job_log_appended' && jid && evt.job_id === jid) {
-      setLogs((prev) => [...prev, String(evt.text ?? '')])
-    } else if (evt.type === 'job_state_changed' && jid && evt.job_id === jid) {
-      void refreshStatus()
-      if (evt.status === 'done' || evt.status === 'failed') {
-        void refreshFiles()
-        void reload()
-      }
-    } else if (
+    if (
       evt.type === 'project_state_changed' &&
       evt.project_id === project.id
     ) {
       void refreshFiles()
     }
   })
-
-  const cancel = async () => {
-    if (!job) return
-    try {
-      await api.cancelJob(job.id)
-      toast(t('download.canceled'), 'success')
-    } catch (e) {
-      toast(String(e), 'error')
-    }
-  }
-
-  const isLive = job?.status === 'running' || job?.status === 'pending'
 
   return (
     <StepShell
@@ -134,22 +89,13 @@ export default function DownloadPage() {
             />
           </div>
 
-          {/* 状态条：仅在有 job / 上次上传结果时出现，details 折叠 */}
-          {(job || lastUpload) && (
+          {/* 状态条：仅在有上次上传结果时出现，details 折叠 */}
+          {lastUpload && (
             <div className="flex flex-col gap-1.5 shrink-0">
-              {job && (
-                <JobStrip
-                  job={job}
-                  logs={logs}
-                  onCancel={isLive ? cancel : undefined}
-                />
-              )}
-              {lastUpload && (
-                <UploadResultStrip
-                  result={lastUpload}
-                  onDismiss={() => setLastUpload(null)}
-                />
-              )}
+              <UploadResultStrip
+                result={lastUpload}
+                onDismiss={() => setLastUpload(null)}
+              />
             </div>
           )}
 
@@ -497,58 +443,6 @@ function UploadPanel({
         />
       )}
     </section>
-  )
-}
-
-// ---------------------------------------------------------------------------
-// 状态条 — 1 行 summary，details 折叠完整内容
-// ---------------------------------------------------------------------------
-
-function JobStrip({
-  job,
-  logs,
-  onCancel,
-}: {
-  job: Job
-  logs: string[]
-  onCancel?: () => void
-}) {
-  const { t } = useTranslation()
-  const elapsed =
-    job.started_at && (job.finished_at ?? Date.now() / 1000) - job.started_at
-  const isLive = job.status === 'running' || job.status === 'pending'
-  const lastLine = logs[logs.length - 1] ?? ''
-  return (
-    <details
-      open={isLive}
-      className="group rounded-md border border-subtle bg-surface overflow-hidden"
-    >
-      <summary className="cursor-pointer flex items-center gap-2 list-none px-2.5 py-1.5 text-sm select-none">
-        <span className="inline-block transition-transform group-open:rotate-90 text-fg-tertiary w-3">▸</span>
-        <span className={STATUS_COLOR[job.status]}>{job.status}</span>
-        <span className="mono text-fg-secondary">job #{job.id}</span>
-        {elapsed && elapsed > 0 && (
-          <span className="text-fg-tertiary">· {Math.round(elapsed)}s</span>
-        )}
-        <span className="mono truncate flex-1 min-w-0 text-fg-secondary text-xs">
-          {lastLine}
-        </span>
-        {isLive && onCancel && (
-          <button
-            onClick={(e) => {
-              e.preventDefault()
-              onCancel()
-            }}
-            className="btn btn-ghost btn-sm text-err"
-          >
-            {t('common.cancel')}
-          </button>
-        )}
-      </summary>
-      <pre className="px-3 py-2 text-xs font-mono text-fg-secondary bg-sunken max-h-[224px] overflow-auto whitespace-pre-wrap border-t border-subtle m-0">
-        {logs.length === 0 ? t('jobProgress.waitingLogs') : logs.slice(-1000).join('\n')}
-      </pre>
-    </details>
   )
 }
 

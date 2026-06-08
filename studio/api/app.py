@@ -33,9 +33,7 @@ from .routers import (
     root,
     samples,
     secrets as secrets_router,
-    system,
     tag_dictionary,
-    tagger,
     upscalers,
 )
 from .routers.projects import crud as projects_crud
@@ -67,12 +65,11 @@ app.include_router(browse.router)
 app.include_router(events_sse.router)
 # ADR-0009 PR-3 C1: 前端错误上报 (ErrorBoundary / window.onerror / unhandledrejection)
 app.include_router(client_errors.router)
-# PR-6 commit 1: 5 个小 router（root / samples / logs / data_exports / tagger）
+# PR-6 commit 1: 4 个小 router（root / samples / logs / data_exports）
 app.include_router(root.router)
 app.include_router(samples.router)
 app.include_router(logs.router)
 app.include_router(data_exports.router)
-app.include_router(tagger.router)
 # PR-6 commit 2: 4 个 admin router（jobs / secrets / models / upscalers）
 app.include_router(jobs.router)
 app.include_router(secrets_router.router)
@@ -81,8 +78,6 @@ app.include_router(upscalers.router)
 app.include_router(tag_dictionary.router)
 # PR-6 commit 3: installs router（10 routes: wd14/torch/flash-attn/xformers/llm-tagger admin）
 app.include_router(installs.router)
-# PR-6 commit 4: system router（11 routes: restart / update / rollback / preflight / etc.）
-app.include_router(system.router)
 # PR-6 commit 5: generate router（8 routes: 出图 + daemon 状态 + TAEFlux）
 app.include_router(generate.router)
 # PR-6 commit 6: queue 子包 3 文件（lifecycle 12 + io 3 + outputs 5 = 20 routes）
