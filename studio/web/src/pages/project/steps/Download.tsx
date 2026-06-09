@@ -66,6 +66,7 @@ export default function DownloadPage() {
   return (
     <StepShell
       idx={1}
+      eyebrow={`Project · ${project.title}`}
       title={t('steps.download.title')}
       subtitle={t('steps.download.subtitle')}
     >

@@ -310,6 +310,7 @@ export default function QueuePage() {
   return (
     <StepShell
       idx={-1}
+      eyebrow="Tasks"
       title={t('queue.title')}
       subtitle={t('queue.description')}
       actions={

@@ -339,6 +339,7 @@ export default function RegularizationPage() {
   return (
     <StepShell
       idx={5}
+      eyebrow={`Step 4 · ${project.title} / ${activeVersion?.label ?? '—'}`}
       title={t('steps.reg.title')}
       subtitle={t('steps.reg.subtitle')}
       actions={

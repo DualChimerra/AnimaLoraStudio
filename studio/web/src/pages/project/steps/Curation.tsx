@@ -474,6 +474,7 @@ export default function CurationPage() {
   return (
     <StepShell
       idx={2}
+      eyebrow={`Step 1 · ${project.title} / ${activeVersion?.label ?? '—'}`}
       title={t('steps.curate.title')}
       subtitle={t('steps.curate.subtitle')}
       actions={

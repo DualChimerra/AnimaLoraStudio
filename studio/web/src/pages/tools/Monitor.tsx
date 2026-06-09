@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { api, type HealthResponse, type Task } from '../../api/client'
 import MonitorDashboard from '../../components/MonitorDashboard'
+import PageHeader from '../../components/PageHeader'
 
 export default function MonitorPage() {
   const [health, setHealth] = useState<HealthResponse | null>(null)
@@ -39,6 +40,13 @@ export default function MonitorPage() {
 
   return (
     <div className="flex flex-col h-full min-h-0 overflow-hidden">
+      <PageHeader
+        title="Monitor"
+        eyebrow="Live training"
+        subtitle="Real-time loss / LR curves and sample images for a training task."
+        sticky
+      />
+      <div className="flex-1 min-h-0 flex flex-col p-6 overflow-hidden">
       {/* 顶部状态栏 */}
       <section className="rounded-md border border-subtle bg-surface text-xs flex items-center gap-3 shrink-0 flex-wrap"
         style={{ padding: '10px 16px', margin: '0 0 12px 0' }}>
@@ -95,6 +103,7 @@ export default function MonitorPage() {
             <span className="text-xs">Monitoring data appears automatically once training starts</span>
           </div>
         )}
+      </div>
       </div>
     </div>
   )

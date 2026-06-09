@@ -213,19 +213,18 @@ export default function QueueDetailPage() {
   return (
     <div className="flex flex-col h-full min-h-0 overflow-hidden">
       {/* Header */}
-      <header className="px-6 py-4 border-b border-subtle flex flex-col gap-2 shrink-0 bg-canvas">
-        <div className="flex items-center gap-2.5 flex-wrap">
+      <header className="px-6 py-4 border-b border-subtle flex flex-col gap-2.5 shrink-0 bg-canvas">
+        <div className="flex items-center gap-2.5">
           <Link to="/queue" className="btn btn-ghost btn-sm no-underline"
           >{t('queueDetail.backToQueue')}</Link>
-          <span className="text-fg-tertiary">/</span>
-          <h1 className="m-0 text-xl font-semibold font-mono">
-            #{taskId}
+          <span className="caption" style={{ color: 'var(--accent)' }}>Task #{taskId}</span>
+        </div>
+        <div className="flex items-center gap-2.5 flex-wrap">
+          <h1 className="m-0 text-2xl font-bold tracking-[-0.02em] leading-[1.1]">
+            {task ? task.name : `#${taskId}`}
           </h1>
           {task && (
-            <>
-              <span className="text-fg-secondary text-md">{task.name}</span>
-              <code className="text-xs text-fg-tertiary font-mono">{task.config_name}.yaml</code>
-            </>
+            <code className="text-xs text-fg-tertiary font-mono">{task.config_name}.yaml</code>
           )}
           {status && (
             <span className={STATUS_BADGE[status]}>

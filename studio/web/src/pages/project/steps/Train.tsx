@@ -459,6 +459,7 @@ export default function TrainPage() {
   return (
     <StepShell
       idx={6}
+      eyebrow={`Step 5 · ${project.title} / ${activeVersion?.label ?? '—'}`}
       title={t('steps.train.title')}
       subtitle={t('steps.train.subtitle')}
       actions={
