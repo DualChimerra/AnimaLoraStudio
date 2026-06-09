@@ -87,3 +87,6 @@ tmp/
 
 # 文档本地草稿（个人 TODO / 未定稿设计 / 临时笔记）
 docs/_local/
+
+# Local UI snapshots before redesign (not for commit)
+_ui_backup/

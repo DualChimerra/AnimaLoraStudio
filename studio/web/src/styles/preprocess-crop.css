@@ -43,7 +43,7 @@
   border-color: color-mix(in oklch, var(--accent) 70%, var(--fg-inverse));
 }
 .crop-rect:not(.is-selected):not(.is-draft) {
-  border-color: rgba(216, 84, 29, 0.75);
+  border-color: color-mix(in srgb, var(--accent) 75%, transparent);
   border-style: dashed;
 }
 .crop-rect.is-selected {
@@ -51,7 +51,7 @@
 }
 .crop-rect.is-draft {
   border-style: dashed;
-  background: rgba(216, 84, 29, 0.06);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
   pointer-events: none;
 }
 
