@@ -154,6 +154,7 @@ export default function PreprocessDuplicatesPage() {
   return (
     <StepShell
       idx={2}
+      eyebrow={`Step 2 · ${project.title} / ${activeVersion?.label ?? '—'}`}
       title={t('steps.preprocess.title')}
       subtitle={t('duplicates.subtitle')}
     >

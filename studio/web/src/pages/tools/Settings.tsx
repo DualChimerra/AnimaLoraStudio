@@ -293,6 +293,7 @@ export default function SettingsPage() {
     <div className="flex flex-col h-full min-h-0">
       <PageHeader
         title={t('settings.title')}
+        eyebrow="Preferences"
         sticky
         topRight={drawer.isOpen ? (
           <button

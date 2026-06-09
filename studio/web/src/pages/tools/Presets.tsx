@@ -9,6 +9,7 @@ import {
 } from '../../api/client'
 import ConfigSkeleton from '../../components/ConfigSkeleton'
 import { useDialog } from '../../components/Dialog'
+import PageHeader from '../../components/PageHeader'
 import PathPicker from '../../components/PathPicker'
 import SchemaForm, { visibleSchemaGroups } from '../../components/SchemaForm'
 import SchemaSectionIndex from '../../components/SchemaSectionIndex'
@@ -495,6 +496,12 @@ export default function PresetsPage() {
   // ── 渲染 ──
   return (
     <div className="fade-in flex flex-col h-full">
+
+      <PageHeader
+        title="Presets"
+        eyebrow="Training configs"
+        subtitle="Global preset pool. Fork configs to or from a version's private config."
+      />
 
       {/* ── 单行 header：picker + 状态 + 全部操作 ──
         Topbar 已经显示「预设」面包屑，这里不再重复 h1。把上一版的页面标题

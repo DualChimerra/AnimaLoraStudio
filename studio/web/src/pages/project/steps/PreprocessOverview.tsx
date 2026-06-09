@@ -232,6 +232,7 @@ export default function PreprocessOverviewPage() {
   return (
     <StepShell
       idx={2}
+      eyebrow={`Step 2 · ${project.title} / ${activeVersion?.label ?? '—'}`}
       title={t('steps.preprocess.title')}
       subtitle={t('preprocessOverview.subtitle')}
     >

@@ -82,9 +82,10 @@ function Identity({
     <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
       <ProjectGlyph slug={project.slug} />
       <div style={{ flex: 1, minWidth: 0 }}>
+        <div className="caption" style={{ marginBottom: 7, color: 'var(--accent)' }}>Project</div>
         <h1 style={{
-          margin: 0, fontSize: 'var(--t-2xl)', fontWeight: 600,
-          letterSpacing: '-0.025em', lineHeight: 1.1,
+          margin: 0, fontSize: 'var(--t-3xl)', fontWeight: 700,
+          letterSpacing: '-0.02em', lineHeight: 1.1,
           display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap',
         }}>
           <span>{project.title}</span>

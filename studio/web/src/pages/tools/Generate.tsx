@@ -463,6 +463,7 @@ export default function GeneratePage() {
     <div className="fade-in flex flex-col" style={{ height: '100%', overflow: 'hidden' }}>
       <PageHeader
         title={t('generate.title')}
+        eyebrow="Generate"
         subtitle={t('generate.subtitle')}
         actions={<DaemonControls onToggleLog={() => setLogOpen((v) => !v)} />}
       />
