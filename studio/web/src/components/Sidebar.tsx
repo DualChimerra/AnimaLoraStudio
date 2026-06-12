@@ -260,6 +260,7 @@ function ProjectStepperNav({ pid, activeVid, currentStep, version, collapsed }: 
   const { t } = useTranslation()
   const navigate = useNavigate()
   const { toast } = useToast()
+  const ctx = useProjectCtx()
 
   // 项目级 ① 跟"概览"同款：圆盘里放 icon、无序号、无完成绿色态。
   // version 级 phase 重编号 1-6（每个 version 自己一段流水线，ADR 0010 加
@@ -291,17 +292,22 @@ function ProjectStepperNav({ pid, activeVid, currentStep, version, collapsed }: 
     if (!activeVid) return
     const nextIdx = cursorIdx + 1
     if (nextIdx >= PHASE_ORDER.length) return
-    const nextPhase = PHASE_ORDER[nextIdx]
     const isSkippable = PHASE_SKIPPABLE.includes(cursorPhase)
     try {
       const res = isSkippable
         ? await api.skipVersionPhase(Number(pid), Number(activeVid))
         : await api.advanceVersionPhase(Number(pid), Number(activeVid))
+      // SSE 不可达时（如 Colab 代理）version_state_changed 不会推到前端，
+      // cursor 会永远停在旧 phase——主动 reload 兜底，成功失败都要同步。
+      await ctx?.reload()
       if (!res.ok) {
         toast(res.reason || t('sidebar.advanceFailed'), 'error')
         return
       }
-      navigate(`/projects/${pid}/v/${activeVid}/${PHASE_TO_STEP_KEY[nextPhase]}`)
+      // 用后端返回的 new_phase 导航（而不是本地 cursorIdx+1 推算），防止
+      // 本地 phase 已过期时跳错页。
+      const landed = res.new_phase ?? PHASE_ORDER[nextIdx]
+      navigate(`/projects/${pid}/v/${activeVid}/${PHASE_TO_STEP_KEY[landed]}`)
     } catch (e) {
       toast(String(e), 'error')
     }
