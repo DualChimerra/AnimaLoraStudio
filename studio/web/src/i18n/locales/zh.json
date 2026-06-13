@@ -6,13 +6,13 @@
     "monitor": "监控",
     "settings": "设置",
     "generate": "测试",
-    "download": "数据集",
-    "curate": "训练集筛选",
+    "download": "下载",
+    "curate": "筛选",
     "tag": "打标",
-    "tagEdit": "标签编辑",
-    "reg": "正则集（可选）",
+    "tagEdit": "标签编辑器",
+    "reg": "正则集",
     "train": "训练",
-    "preprocess": "预处理（可选）",
+    "preprocess": "预处理",
     "overview": "概览"
   },
   "common": {
@@ -1303,7 +1303,9 @@
     "noExportableXyData": "没有可导出的 XY 数据",
     "allCellsLoadFailed": "所有 cell 图都加载失败（可能原图已释放）",
     "canvas2dUnavailable": "canvas 2d 不可用",
-    "canvasToBlobNull": "canvas.toBlob 返回 null"
+    "canvasToBlobNull": "canvas.toBlob 返回 null",
+    "historyLabel": "历史",
+    "previewLabel": "预览"
   },
   "overview": {
     "versionsCaption": "版本",
@@ -1495,7 +1497,7 @@
     "exportBundleAtLeastOne": "至少选择一项导出内容"
   },
   "tagEdit": {
-    "title": "标签编辑",
+    "title": "标签编辑器",
     "subtitle": "批量编辑标签 · 暂存本地 · 保存后写盘",
     "taggedBadge": "{{tagged}}/{{total}} 已打标",
     "downloadZip": "下载训练集",
@@ -1724,12 +1726,30 @@
     "toastNoCrops": "没有可提交的裁剪框（先在画布上画几个框）"
   },
   "steps": {
-    "download": { "title": "数据集", "subtitle": "Booru 抓取 + 本地上传" },
-    "curate": { "title": "训练集筛选", "subtitle": "数据集 → 训练集" },
-    "preprocess": { "title": "预处理工具", "subtitle": "放大 / 裁剪 / 涂抹 — 放大工具" },
-    "tag": { "title": "自动打标", "subtitle": "WD14 / CLTagger 本地推理，或远程 LLM 视觉打标" },
-    "reg": { "title": "正则集（可选）", "subtitle": "Booru 拉图或 base 模型自生成中性 prior；可镜像 train 结构或平铺单桶 1_data/" },
-    "train": { "title": "训练", "subtitle": "选预设 → 编辑 config → 入队训练" }
+    "download": {
+      "title": "下载",
+      "subtitle": "Booru 抓取 + 本地上传"
+    },
+    "curate": {
+      "title": "筛选",
+      "subtitle": "数据集 → 训练集"
+    },
+    "preprocess": {
+      "title": "预处理",
+      "subtitle": "放大 / 裁剪 / 涂抹 — 放大工具"
+    },
+    "tag": {
+      "title": "自动打标",
+      "subtitle": "WD14 / CLTagger 本地推理，或远程 LLM 视觉打标"
+    },
+    "reg": {
+      "title": "正则化集",
+      "subtitle": "Booru 拉图或 base 模型自生成中性 prior；可镜像 train 结构或平铺单桶 1_data/"
+    },
+    "train": {
+      "title": "训练",
+      "subtitle": "选预设 → 编辑 config → 入队训练"
+    }
   },
   "curate": {
     "downloadTime": "加入时间",
@@ -1965,7 +1985,17 @@
     "tomlCollapsed": "展开查看 / 复制",
     "copied": "已复制到剪贴板",
     "copyFailed": "复制失败",
-    "saveBeforeDownload": "请先保存预设，再触发下载（服务端直发磁盘上的原 yaml）"
+    "saveBeforeDownload": "请先保存预设，再触发下载（服务端直发磁盘上的原 yaml）",
+    "colName": "名称",
+    "colOptimizer": "优化器",
+    "colRank": "Rank",
+    "colRes": "分辨率",
+    "colUpdated": "更新",
+    "empty": "暂无预设",
+    "editConfig": "编辑配置",
+    "selectHint": "选择一个预设查看摘要。",
+    "editPrefix": "编辑",
+    "newPresetBtn": "新建预设"
   },
   "train": {
     "loadConfigFailed": "加载训练配置失败: {{error}}",
@@ -2060,7 +2090,6 @@
     "statusCellLatest": "最近生成",
     "statusCellSkipped": "已跳过",
     "nImagesShort": "张",
-    "tabGenerate": "生成",
     "grpAiGen": "出图",
     "grpTagCommon": "常用",
     "grpExpand": "展开",

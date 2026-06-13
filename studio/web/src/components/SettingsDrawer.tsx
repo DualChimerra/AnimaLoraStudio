@@ -16,14 +16,10 @@ import { useSettingsDrawer } from '../lib/SettingsDrawer'
 
 const SettingsPageLazy = lazy(() => import('../pages/tools/Settings'))
 
-// 宽度：70vw，小屏给 1024px 兜底（避免笔记本 viewport 太小时表单挤）。
-//   1366 viewport（小笔记本）：70vw=956 → 撑到 1024
-//   1707 viewport（缩放后 2k 150%）：70vw=1195
-//   1920 viewport（1k FHD）：70vw=1344
-//   2320 viewport（缩放后 2k 110-125%）：70vw=1624
-//   2560 viewport（原生 2k）：70vw=1792
-//   3840 viewport（4k）：70vw=2688
-const DRAWER_WIDTH_CLASS = 'w-[max(1024px,70vw)]'
+// 宽度：对齐 Claude Design 原型的紧凑右侧抽屉（原型 520px）。这里给密集的真实
+// 设置内容留余量 → 600px，小屏 94vw 兜底。比旧版 1024px 窄很多，single-column，
+// 不再带 PAGE INDEX（原型抽屉没有），更贴近原型 chrome。
+const DRAWER_WIDTH_CLASS = 'w-[min(600px,94vw)]'
 const ANIM_MS = 220
 
 export default function SettingsDrawer() {

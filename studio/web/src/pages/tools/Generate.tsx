@@ -464,7 +464,7 @@ export default function GeneratePage() {
       <PageHeader
         title={t('generate.title')}
         eyebrow="Generate"
-        subtitle={t('generate.subtitle')}
+        tabs={<ViewModeTabs mode={mode} onModeChange={setMode} />}
         actions={<DaemonControls onToggleLog={() => setLogOpen((v) => !v)} />}
       />
 
@@ -633,23 +633,21 @@ export default function GeneratePage() {
             </div>
           </div>
 
-          {/* 中：结果独立 scroll，card flex-1 占满列高 */}
-          <div className="flex-1 min-w-0 flex flex-col overflow-y-auto self-stretch">
-            <div className="card flex-1 flex flex-col" style={{ padding: 18, minHeight: 0 }}>
-              <div className="flex items-center justify-between gap-2 mb-4 flex-wrap">
-                <div className="flex items-center gap-2">
-                  <span className="text-md font-semibold">{t('generate.results')}</span>
-                  {currentTask && (
-                    <>
-                      <span className="caption">#{currentTask.id}</span>
-                      <StatusBadge status={currentTask.status} />
-                    </>
-                  )}
-                  {currentTask?.error_msg && (
-                    <span className="text-xs text-err ml-1">{currentTask.error_msg}</span>
-                  )}
-                </div>
-                <ViewModeTabs mode={mode} onModeChange={setMode} />
+          {/* 中：PREVIEW 卡片（占满高、内部 scroll）+ 下方 HISTORY 横排卡片（原型布局） */}
+          <div className="flex-1 min-w-0 flex flex-col gap-4 self-stretch min-h-0">
+            <div className="flex-1 min-h-0 overflow-y-auto">
+            <div className="card flex flex-col" style={{ padding: 18, minHeight: '100%' }}>
+              <div className="flex items-center gap-2 mb-4 flex-wrap">
+                <span className="caption">{t('generate.previewLabel')}</span>
+                {currentTask && (
+                  <>
+                    <span className="caption">#{currentTask.id}</span>
+                    <StatusBadge status={currentTask.status} />
+                  </>
+                )}
+                {currentTask?.error_msg && (
+                  <span className="text-xs text-err ml-1">{currentTask.error_msg}</span>
+                )}
               </div>
 
               <GenerateProgressBar busy={busy} progress={progress} />
@@ -792,17 +790,19 @@ export default function GeneratePage() {
                 <SampleGallery samples={samples} taskId={currentTask.id} />
               )}
             </div>
-          </div>
+            </div>
 
-          {/* 右：图片历史栏（commit 16，按当前 mode 分桶） */}
-          <PreviewHistoryRail
-            entries={history.entries}
-            mode={mode}
-            onSelect={handleHistorySelect}
-            onRemove={(id) => { void history.remove(id) }}
-            onClear={() => { void history.clearByMode(mode) }}
-            onPruneStale={history.pruneStale}
-          />
+            {/* 下：图片历史（原型 HISTORY 卡片，横排，按当前 mode 分桶） */}
+            <PreviewHistoryRail
+              entries={history.entries}
+              mode={mode}
+              orientation="horizontal"
+              onSelect={handleHistorySelect}
+              onRemove={(id) => { void history.remove(id) }}
+              onClear={() => { void history.clearByMode(mode) }}
+              onPruneStale={history.pruneStale}
+            />
+          </div>
       </div>
 
       {/* daemon log 抽屉（fixed 定位 + translateY，隐藏时完全不可见，不占 layout） */}
