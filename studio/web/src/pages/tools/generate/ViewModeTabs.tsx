@@ -14,18 +14,23 @@ export default function ViewModeTabs({
   onModeChange: (m: ViewMode) => void
 }) {
   const { t } = useTranslation()
+  // Segmented control（redesign 原型 Segmented）：sunken 轨道 + 白色 active pill。
   const tab = (m: ViewMode, label: string) => (
     <button
       onClick={() => onModeChange(m)}
-      className={`btn btn-sm text-xs ${
-        mode === m ? 'btn-primary' : 'btn-ghost text-fg-secondary'
+      role="tab"
+      aria-selected={mode === m}
+      className={`border-none px-3 py-[5px] text-xs rounded-[calc(var(--r-md)-2px)] transition-all duration-100 cursor-pointer ${
+        mode === m
+          ? 'bg-surface text-fg-primary font-semibold shadow-sm'
+          : 'bg-transparent text-fg-secondary font-medium hover:text-fg-primary'
       }`}
     >
       {label}
     </button>
   )
   return (
-    <div className="flex items-center gap-1.5" role="tablist">
+    <div className="inline-flex items-center gap-0.5 bg-sunken rounded-md p-[3px]" role="tablist">
       {tab('single', t('generate.singleMode'))}
       {tab('xy', t('generate.xyMode'))}
     </div>

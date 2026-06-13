@@ -247,7 +247,7 @@ function BundleImportDialog({
       className="fixed inset-0 z-40 flex items-center justify-center bg-black/50"
       onMouseDown={(e) => { if (e.target === e.currentTarget) onCancel() }}
     >
-      <div className="bg-elevated border border-dim rounded-lg w-[90%] max-w-[560px] p-6 flex flex-col gap-4 shadow-xl">
+      <div className="bg-elevated border border-subtle rounded-[var(--r-card)] w-[90%] max-w-[560px] p-6 flex flex-col gap-4 shadow-xl">
         <div>
           <h2 className="m-0 text-lg font-semibold text-fg-primary">
             {t('projects.importBundleTitle')}
@@ -304,20 +304,16 @@ function ProjectCard({
   onDelete: (e: React.MouseEvent) => void
 }) {
   const { t } = useTranslation()
-  const [hovered, setHovered] = useState(false)
 
   return (
     <button
       onClick={onClick}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      className={`p-[18px] text-left rounded-lg cursor-pointer flex flex-col gap-3.5 relative w-full ${hovered ? 'border-dim shadow-sm bg-surface' : 'border border-subtle bg-surface'}`}
-      style={{ transition: 'border-color 0.15s, box-shadow 0.15s' }}
+      className="card card-hover p-5 text-left cursor-pointer flex flex-col gap-3.5 relative w-full"
     >
       {/* ADR-0007 §11.8-E: 右上角 = active version status；去 stage badge / 时间 / 产物 */}
       <div className="flex justify-between items-start gap-2">
         <div className="flex-1 min-w-0">
-          <div className="text-md font-semibold overflow-hidden text-ellipsis whitespace-nowrap" style={{ letterSpacing: '-0.01em' }}>
+          <div className="text-lg font-bold overflow-hidden text-ellipsis whitespace-nowrap" style={{ fontFamily: 'var(--font-display)', letterSpacing: '-0.01em' }}>
             {p.title}
           </div>
           <div className="mono text-xs text-fg-tertiary mt-0.5">
@@ -341,13 +337,16 @@ function ProjectCard({
           <span className="text-fg-tertiary italic text-xs">{t('projects.noActiveVersion')}</span>
         )}
         <span className="flex-1" />
-        <button
+        <span
+          role="button"
+          tabIndex={0}
           onClick={onDelete}
-          className="bg-transparent border-none px-1.5 py-0.5 rounded-sm text-fg-tertiary text-xs cursor-pointer"
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') onDelete(e as unknown as React.MouseEvent) }}
+          className="px-1.5 py-0.5 rounded-sm text-fg-tertiary text-xs cursor-pointer hover:text-err"
           title={t('projects.deleteProjectTitle')}
         >
           ×
-        </button>
+        </span>
       </div>
     </button>
   )

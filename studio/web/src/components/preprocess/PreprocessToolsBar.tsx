@@ -40,8 +40,8 @@ export default function PreprocessToolsBar({ current, projectId, versionId }: Pr
   const { t } = useTranslation()
   const base = `/projects/${projectId}/v/${versionId}/preprocess`
   return (
-    <nav className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-md border border-subtle bg-surface shrink-0">
-      <span className="text-fg-tertiary font-medium uppercase tracking-wider text-[10px] mr-1">
+    <nav className="inline-flex items-center gap-0.5 text-xs bg-sunken rounded-md p-[3px] self-start shrink-0">
+      <span className="text-fg-tertiary font-medium uppercase tracking-wider text-[10px] mx-2">
         {t('preprocess.toolsLabel')}
       </span>
       {TOOLS.map((tool) => {
@@ -51,7 +51,7 @@ export default function PreprocessToolsBar({ current, projectId, versionId }: Pr
           return (
             <span
               key={tool.id}
-              className="px-2.5 py-1 rounded text-fg-disabled bg-overlay/40 cursor-not-allowed font-medium"
+              className="px-2.5 py-1 rounded-[calc(var(--r-md)-2px)] text-fg-disabled cursor-not-allowed font-medium"
               title={t(`preprocess.tools.${tool.i18nKey}Title`, { defaultValue: '' })}
             >{label}</span>
           )
@@ -59,10 +59,11 @@ export default function PreprocessToolsBar({ current, projectId, versionId }: Pr
         // overview is the default tool (no ?tool= query); everyone else needs a tool param
         const href = tool.id === 'overview' ? base : `${base}?tool=${tool.id}`
         if (isActive) {
+          // Segmented active：白底 pill + 阴影（redesign 原型 Segmented）
           return (
             <span
               key={tool.id}
-              className="px-2.5 py-1 rounded bg-accent text-accent-fg font-medium"
+              className="px-2.5 py-1 rounded-[calc(var(--r-md)-2px)] bg-surface text-fg-primary font-semibold shadow-sm"
               aria-current="page"
             >{label}</span>
           )
@@ -71,7 +72,7 @@ export default function PreprocessToolsBar({ current, projectId, versionId }: Pr
           <Link
             key={tool.id}
             to={href}
-            className="px-2.5 py-1 rounded text-fg-secondary hover:bg-accent-soft hover:text-accent transition-colors font-medium"
+            className="px-2.5 py-1 rounded-[calc(var(--r-md)-2px)] text-fg-secondary hover:text-fg-primary transition-colors font-medium"
           >{label}</Link>
         )
       })}

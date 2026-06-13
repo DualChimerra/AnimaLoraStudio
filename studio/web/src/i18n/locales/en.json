@@ -79,7 +79,7 @@
     "search": "Search (⌘K)",
     "searchAriaLabel": "Search",
     "newVersion": "New version {{tag}} available",
-    "trainingCapsule": "Training · {{label}}{{suffix}}",
+    "trainingLabel": "Training",
     "pendingCount": "{{n}} queued",
     "taskId": "Task #{{id}}",
     "runningETA": "~{{time}}",
@@ -118,6 +118,7 @@
     "queueSub": "View all tasks",
     "presetsSub": "Training config",
     "monitorSub": "Training monitor panel",
+    "generateSub": "Generate / XY matrix",
     "settingsSub": "Global settings",
     "presetItem": "Training preset",
     "projectItem": "Project #{{id}}"
@@ -145,13 +146,13 @@
     "collapseLabel": "Collapse"
   },
   "projectStepper": {
-    "download": "① Download",
-    "curate": "② Curate",
-    "preprocess": "③ Preprocess (optional)",
-    "tag": "④ Tag",
-    "tagEdit": "⑤ Tag Edit",
-    "reg": "⑥ Reg set (optional)",
-    "train": "⑦ Train",
+    "download": "Download",
+    "curate": "Curate",
+    "preprocess": "Preprocess (optional)",
+    "tag": "Tag",
+    "tagEdit": "Tag Edit",
+    "reg": "Reg set (optional)",
+    "train": "Train",
     "selectVersion": "Select / create a version first"
   },
   "stageBadge": {
@@ -1305,6 +1306,23 @@
     "canvasToBlobNull": "canvas.toBlob returned null"
   },
   "overview": {
+    "versionsCaption": "Versions",
+    "datasetCaption": "Dataset",
+    "recentRunsCaption": "Recent runs",
+    "noRuns": "No runs yet.",
+    "actions": {
+      "exportBundle": "Export bundle"
+    },
+    "versionRow": {
+      "openTrain": "Open train",
+      "activate": "Activate"
+    },
+    "dataset": {
+      "pool": "Downloaded pool",
+      "train": "Train set",
+      "reg": "Reg set",
+      "tagged": "Tagged"
+    },
     "pipelineProgress": "Pipeline progress",
     "stages": "Stages",
     "versions": "Versions",
@@ -1356,11 +1374,11 @@
       "aspectDist": "Aspect ratio distribution",
       "regSet": "Regularization set",
       "regCount": "{{n}} images",
-      "emptyCurate": "Pick training images in ③ Curate first",
-      "emptyTag": "Generate captions in ④ Tag first",
-      "emptyResolution": "See details in ② Preprocess → Upscale",
-      "emptyAspect": "See bucket stats in ② Preprocess → Crop",
-      "emptyReg": "Generate reg set or explicitly skip in ⑥ Reg",
+      "emptyCurate": "Pick training images in Curate first",
+      "emptyTag": "Generate captions in Tag first",
+      "emptyResolution": "See details in Preprocess → Upscale",
+      "emptyAspect": "See bucket stats in Preprocess → Crop",
+      "emptyReg": "Generate reg set or explicitly skip in Reg",
       "goCurate": "Curate",
       "goEdit": "Edit",
       "goUpscale": "Upscale",
@@ -1369,7 +1387,7 @@
       "imagesSuffix": "images",
       "tagSuffix": "tags",
       "reorganize": "Reorganize",
-      "regEmptyHint": "Not generated · skip phase in ⑥",
+      "regEmptyHint": "Not generated · the Reg set phase can be skipped",
       "allFolders": "All"
     },
     "identity": {
@@ -1407,7 +1425,7 @@
       "downloadLora": "Download",
       "continueLabel": "Continue",
       "preparingSub": "Dataset preparation · training can start once finished",
-      "smallerBatchHint": "Opened new version · adjust batch_size in ⑦ Train then retrain",
+      "smallerBatchHint": "Opened new version · adjust batch_size in Train then retrain",
       "noArtifact": "No artifact file yet, cannot proceed"
     },
     "header": {
@@ -2012,7 +2030,7 @@
     "loadFailed": "Failed to load reg status: {{error}}",
     "noTrainForAi": "No train images yet, please complete Step 1 (download) or Step 2 (curate) first",
     "aiEnqueued": "Prior generation task #{{id}} queued",
-    "noTrainForBuild": "No train images yet, go to ① Curate / ② Download first",
+    "noTrainForBuild": "No train images yet, go to Curate / Download first",
     "enqueuedIncremental": "Queued top-up #{{id}}",
     "enqueued": "Queued #{{id}}",
     "confirmDelete": "Delete the current reg set? This is irreversible (meta + all images will be removed).",

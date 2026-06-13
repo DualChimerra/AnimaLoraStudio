@@ -15,15 +15,14 @@ import { useTranslation } from 'react-i18next'
 import { useNavigate, useOutletContext } from 'react-router-dom'
 import {
   api,
-  PHASE_SKIPPABLE,
   type CurationView,
   type ProjectDetail,
   type Task,
   type TaskOutputs,
   type Version,
   type VersionPhase,
-  type VersionStatus,
 } from '../../api/client'
+import PageHeader from '../../components/PageHeader'
 import VersionStatusBadge from '../../components/VersionStatusBadge'
 import BarHistogram from '../../components/BarHistogram'
 import { TranslatedTag } from '../../components/tagDisplay/TranslatedTag'
@@ -45,172 +44,173 @@ interface Ctx {
   creatingVersionBusy: boolean
 }
 
-// ── ProjectGlyph (slug-deterministic gradient block) ─────────────────────
+// ── helpers ──────────────────────────────────────────────────────────────
 
-function ProjectGlyph({ slug, size = 52 }: { slug: string; size?: number }) {
-  const h = [...slug].reduce((a, c) => a + c.charCodeAt(0), 0) % 360
-  return (
-    <div
-      style={{
-        width: size, height: size, flex: 'none',
-        borderRadius: 'var(--r-lg)',
-        background: `linear-gradient(135deg, oklch(0.58 0.16 ${h}), oklch(0.42 0.10 ${(h + 50) % 360}))`,
-        display: 'grid', placeItems: 'center',
-        fontFamily: 'var(--font-mono)',
-        fontSize: size * 0.36, fontWeight: 700, letterSpacing: '-0.04em',
-        color: 'rgba(255,255,255,0.95)',
-        boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.15), inset 0 -1px 0 rgba(0,0,0,0.20), 0 1px 2px rgba(0,0,0,0.3)',
-      }}
-    >{slug.slice(0, 2).toUpperCase()}</div>
-  )
+function fmtAgo(ts: number | null | undefined): string {
+  if (!ts) return '—'
+  const sec = Math.max(0, Date.now() / 1000 - ts)
+  if (sec < 60) return 'just now'
+  if (sec < 3600) return `${Math.floor(sec / 60)}m ago`
+  if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`
+  return `${Math.floor(sec / 86400)}d ago`
 }
 
-// ── Identity strip (replaces old big title + slug + 3-stat metadata) ─────
+// ── PipelineStrip（redesign 原型：圆形序号 + 连接线 + 标签在下） ──────────
 
-function Identity({
-  project, version, totalVersions,
-}: {
-  project: ProjectDetail
-  version: Version | null
-  totalVersions: number
-}) {
+function PipelineStrip({ project, version }: { project: ProjectDetail; version: Version | null }) {
   const { t } = useTranslation()
-  const created = project.created_at
-    ? new Date(project.created_at * 1000).toLocaleDateString()
-    : '—'
+  const navigate = useNavigate()
+  const isPreparing = version?.status === 'preparing'
+  const ci = version ? PHASE_ORDER_TIMELINE.findIndex((p) => p.id === version.phase) : -1
+  const steps: Array<{ key: string; label: string; n: string | null; phaseId: VersionPhase | null }> = [
+    { key: 'download', label: t('nav.download'), n: null, phaseId: null },
+    ...PHASE_ORDER_TIMELINE.map((p) => ({
+      key: PHASE_TO_STEP_LOCAL[p.id], label: t(p.key), n: p.n, phaseId: p.id as VersionPhase | null,
+    })),
+  ]
+  const continueTarget = isPreparing && version
+    ? PHASE_ORDER_TIMELINE.find((p) => p.id === version.phase) ?? null
+    : null
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-      <ProjectGlyph slug={project.slug} />
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div className="caption" style={{ marginBottom: 7, color: 'var(--accent)' }}>Project</div>
-        <h1 style={{
-          margin: 0, fontSize: 'var(--t-3xl)', fontWeight: 700,
-          letterSpacing: '-0.02em', lineHeight: 1.1,
-          display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap',
-        }}>
-          <span>{project.title}</span>
-          {version && (
-            <>
-              <span style={{ color: 'var(--fg-tertiary)', fontWeight: 300, fontSize: 'var(--t-xl)' }}>/</span>
-              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--t-xl)', color: 'var(--accent)' }}>{version.label}</span>
-              <VersionStatusBadge status={version.status} />
-            </>
-          )}
-        </h1>
-        <div style={{
-          marginTop: 6, display: 'flex', alignItems: 'center', gap: 10,
-          fontFamily: 'var(--font-mono)', fontSize: 'var(--t-xs)', color: 'var(--fg-tertiary)',
-          flexWrap: 'wrap',
-        }}>
-          <span><span style={{ color: 'var(--fg-secondary)' }}>{project.download_image_count ?? 0}</span> {t('overview.identity.datasetSuffix')}</span>
-          <span>·</span>
-          <span><span style={{ color: 'var(--fg-secondary)' }}>{totalVersions}</span> {t('overview.identity.versionSuffix')}</span>
-          <span>·</span>
-          <span>{t('overview.identity.createdLabel')} {created}</span>
-        </div>
+    <div className="card" style={{ padding: '18px 22px' }}>
+      <div className="caption" style={{ marginBottom: 14 }}>
+        Pipeline{version ? ` · ${version.label}` : ''}
       </div>
+      <div style={{ display: 'flex', alignItems: 'flex-start' }}>
+        {steps.map((s, idx) => {
+          const isProject = s.phaseId === null
+          const pi = s.phaseId ? PHASE_ORDER_TIMELINE.findIndex((p) => p.id === s.phaseId) : -1
+          const done = !isProject && isPreparing && pi < ci
+          const current = !isProject && isPreparing && pi === ci
+          const allowed = isProject
+            ? true
+            : version != null && canGoVersionPhase(version, s.phaseId!)
+          const to = isProject
+            ? `/projects/${project.id}/download`
+            : version ? `/projects/${project.id}/v/${version.id}/${s.key}` : null
+          return (
+            <div key={s.key} style={{ display: 'contents' }}>
+              {idx > 0 && (
+                <div style={{
+                  flex: 1, height: 2, marginTop: 15, borderRadius: 2,
+                  background: done || current ? 'var(--accent)' : 'var(--border-default)',
+                  opacity: done ? 1 : current ? 0.8 : 0.5,
+                }} />
+              )}
+              <button
+                onClick={() => { if (allowed && to) navigate(to) }}
+                disabled={!allowed || !to}
+                style={{
+                  display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 7,
+                  background: 'none', border: 'none',
+                  cursor: allowed && to ? 'pointer' : 'default',
+                  opacity: allowed ? 1 : 0.4, flex: 'none', padding: 0,
+                }}
+              >
+                <span style={{
+                  width: 32, height: 32, borderRadius: 100, display: 'grid', placeItems: 'center',
+                  fontSize: 12, fontWeight: 700, fontFamily: 'var(--font-mono)',
+                  background: done ? 'var(--ok-soft)' : current ? 'var(--accent)' : 'var(--bg-overlay)',
+                  color: done ? 'var(--ok)' : current ? 'var(--accent-fg)' : 'var(--fg-tertiary)',
+                  boxShadow: current ? '0 0 0 4px var(--accent-soft)' : 'none',
+                }}>{done ? '✓' : (s.n ?? '·')}</span>
+                <span style={{
+                  fontSize: 'var(--t-xs)',
+                  color: current ? 'var(--fg-primary)' : 'var(--fg-tertiary)',
+                  fontWeight: current ? 600 : 500, whiteSpace: 'nowrap',
+                }}>{s.label}</span>
+              </button>
+            </div>
+          )
+        })}
+      </div>
+      {isPreparing && version && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 24, flexWrap: 'wrap',
+          marginTop: 16, paddingTop: 14, borderTop: '1px solid var(--border-subtle)',
+        }}>
+          <div>
+            <div className="caption" style={{ marginBottom: 3 }}>{t('overview.banner.metaCurrentPhase')}</div>
+            <div className="mono" style={{ fontSize: 'var(--t-sm)', fontWeight: 600 }}>
+              {t(continueTarget?.key ?? 'nav.curate')}
+            </div>
+          </div>
+          {version.stats && (
+            <div>
+              <div className="caption" style={{ marginBottom: 3 }}>{t('overview.banner.metaTagged')}</div>
+              <div className="mono" style={{ fontSize: 'var(--t-sm)', fontWeight: 600 }}>
+                {version.stats.tagged_image_count} / {version.stats.train_image_count}
+              </div>
+            </div>
+          )}
+          <span style={{ flex: 1 }} />
+          {continueTarget && (
+            <button
+              onClick={() => navigate(`/projects/${project.id}/v/${version.id}/${PHASE_TO_STEP_LOCAL[continueTarget.id]}`)}
+              className="btn btn-primary btn-sm"
+            >{t('overview.banner.continueLabel')} {t(continueTarget.key)} →</button>
+          )}
+        </div>
+      )}
     </div>
   )
 }
 
-// ── VersionRail (horizontal pill row) ────────────────────────────────────
+// ── VersionRowCard（redesign 原型：版本列表行卡） ─────────────────────────
 
-function StatusDotMini({ status }: { status: VersionStatus }) {
-  const cmap: Record<VersionStatus, string> = {
-    preparing: 'var(--warn)',
-    training:  'var(--accent)',
-    completed: 'var(--ok)',
-    failed:    'var(--err)',
-    canceled:  'var(--fg-disabled)',
-  }
-  const running = status === 'training'
-  return (
-    <span
-      style={{
-        width: 7, height: 7, borderRadius: '50%',
-        background: cmap[status] ?? 'var(--fg-disabled)',
-        animation: running ? 'pulse 1.6s infinite' : 'none',
-        flexShrink: 0,
-      }}
-    />
-  )
-}
-
-const STATUS_LABEL: Record<VersionStatus, string> = {
-  preparing: 'versionStatus.preparing',
-  training:  'versionStatus.training',
-  completed: 'versionStatus.completed',
-  failed:    'versionStatus.failed',
-  canceled:  'versionStatus.canceled',
-}
-
-function VersionRail({
-  versions, currentVid, onSelect, onCreate, onExport, exporting, exportEnabled,
+function VersionRowCard({
+  project, v, selected, onView,
 }: {
-  versions: Version[]
-  currentVid: number | null
-  onSelect: (vid: number) => void
-  onCreate: () => void
-  onExport: () => void
-  exporting: boolean
-  exportEnabled: boolean
+  project: ProjectDetail
+  v: Version
+  selected: boolean
+  onView: (vid: number) => void
 }) {
   const { t } = useTranslation()
+  const navigate = useNavigate()
+  const ctx = useProjectCtx()
+  const isActive = v.id === project.active_version_id
+  const meta: Array<[string, string]> = [
+    ['train', v.stats ? `${v.stats.train_image_count} imgs` : '—'],
+    ['reg', v.stats ? `${v.stats.reg_image_count} imgs` : '—'],
+    ['phase', v.status === 'preparing' ? t(PHASE_ORDER_TIMELINE.find((p) => p.id === v.phase)?.key ?? 'nav.curate') : t(`versionStatus.${v.status}`)],
+    ['created', fmtAgo(v.created_at)],
+  ]
   return (
-    <div style={{
-      display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap',
-      paddingTop: 14, paddingBottom: 2,
-      borderTop: '1px solid var(--border-subtle)',
-    }}>
-      <span style={{
-        fontFamily: 'var(--font-mono)', fontSize: 'var(--t-2xs)',
-        color: 'var(--fg-tertiary)', textTransform: 'uppercase', letterSpacing: '0.08em',
-        marginRight: 4,
-      }}>{t('overview.rail.label')}</span>
-      {versions.map((v) => {
-        const isCurrent = v.id === currentVid
-        return (
+    <div
+      className="card"
+      onClick={() => onView(v.id)}
+      style={{
+        padding: 18, cursor: 'pointer',
+        borderColor: selected ? 'var(--accent-veil)' : 'var(--border-subtle)',
+        boxShadow: selected ? '0 0 0 1px var(--accent-veil)' : 'none',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12, flexWrap: 'wrap' }}>
+        <span className="mono" style={{ fontSize: 'var(--t-md)', fontWeight: 700 }}>{v.label}</span>
+        <VersionStatusBadge status={v.status} />
+        {isActive && <span className="badge badge-accent">active</span>}
+        <span style={{ flex: 1 }} />
+        <button
+          className="btn btn-secondary btn-sm"
+          onClick={(e) => { e.stopPropagation(); navigate(`/projects/${project.id}/v/${v.id}/train`) }}
+        >{t('overview.versionRow.openTrain')}</button>
+        {!isActive && (
           <button
-            key={v.id}
-            onClick={() => onSelect(v.id)}
-            style={{
-              display: 'inline-flex', alignItems: 'center', gap: 7,
-              padding: '5px 10px 5px 8px',
-              background: isCurrent ? 'var(--bg-surface)' : 'transparent',
-              border: '1px solid ' + (isCurrent ? 'var(--accent)' : 'var(--border-subtle)'),
-              borderRadius: 'var(--r-md)',
-              cursor: 'pointer',
-              color: 'var(--fg-primary)',
-              boxShadow: isCurrent ? '0 0 0 3px var(--accent-soft)' : 'none',
-            }}
-          >
-            <StatusDotMini status={v.status} />
-            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--t-sm)', fontWeight: 600 }}>{v.label}</span>
-            <span style={{ fontSize: 'var(--t-xs)', color: 'var(--fg-tertiary)' }}>{t(STATUS_LABEL[v.status])}</span>
-          </button>
-        )
-      })}
-      <button
-        onClick={onCreate}
-        style={{
-          display: 'inline-flex', alignItems: 'center', gap: 4,
-          padding: '5px 10px',
-          background: 'transparent',
-          border: '1px dashed var(--border-default)',
-          borderRadius: 'var(--r-md)',
-          cursor: 'pointer',
-          color: 'var(--fg-tertiary)',
-          fontSize: 'var(--t-sm)',
-        }}
-      >+ {t('overview.versionSelector.newVersion')}</button>
-      <span style={{ flex: 1 }} />
-      <button
-        onClick={onExport}
-        disabled={!exportEnabled || exporting}
-        className={`btn btn-secondary btn-sm ${!exportEnabled ? 'opacity-40' : ''}`}
-      >
-        {exporting ? t('sidebar.exporting') : t('sidebar.export')}
-      </button>
+            className="btn btn-ghost btn-sm"
+            onClick={(e) => { e.stopPropagation(); ctx?.onSelectVersion(v.id); onView(v.id) }}
+          >{t('overview.versionRow.activate')}</button>
+        )}
+      </div>
+      {v.note && <p style={{ margin: '0 0 12px', fontSize: 'var(--t-sm)', color: 'var(--fg-secondary)' }}>{v.note}</p>}
+      <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }}>
+        {meta.map(([k, val]) => (
+          <div key={k}>
+            <div className="caption" style={{ marginBottom: 3 }}>{k}</div>
+            <div className="mono" style={{ fontSize: 'var(--t-sm)', fontWeight: 600 }}>{val}</div>
+          </div>
+        ))}
+      </div>
     </div>
   )
 }
@@ -251,10 +251,10 @@ function BannerShell({
   children: ReactNode
 }) {
   const tintMap = {
-    err:    { bg: 'rgba(232, 118, 92, 0.06)', border: 'rgba(232, 118, 92, 0.30)' },
-    warn:   { bg: 'rgba(224, 162, 58, 0.05)', border: 'rgba(224, 162, 58, 0.25)' },
-    accent: { bg: 'rgba(237, 107, 58, 0.06)', border: 'rgba(237, 107, 58, 0.35)' },
-    ok:     { bg: 'rgba(95, 199, 140, 0.05)', border: 'rgba(95, 199, 140, 0.25)' },
+    err:    { bg: 'var(--err-soft)',    border: 'color-mix(in srgb, var(--err) 30%, transparent)' },
+    warn:   { bg: 'var(--warn-soft)',   border: 'color-mix(in srgb, var(--warn) 25%, transparent)' },
+    accent: { bg: 'var(--accent-soft)', border: 'var(--accent-veil)' },
+    ok:     { bg: 'var(--ok-soft)',     border: 'color-mix(in srgb, var(--ok) 25%, transparent)' },
   }
   const tCfg = tintMap[tint]
   return (
@@ -314,72 +314,12 @@ function BannerProgress({
 }
 
 const PHASE_ORDER_TIMELINE: { id: VersionPhase; n: string; key: string }[] = [
-  { id: 'curating',      n: '①', key: 'nav.curate' },
-  { id: 'preprocessing', n: '②', key: 'nav.preprocess' },
-  { id: 'editing',       n: '③', key: 'nav.tagEdit' },
-  { id: 'regularizing',  n: '④', key: 'nav.reg' },
-  { id: 'ready',         n: '⑤', key: 'nav.train' },
+  { id: 'curating',      n: '1', key: 'nav.curate' },
+  { id: 'preprocessing', n: '2', key: 'nav.preprocess' },
+  { id: 'editing',       n: '3', key: 'nav.tagEdit' },
+  { id: 'regularizing',  n: '4', key: 'nav.reg' },
+  { id: 'ready',         n: '5', key: 'nav.train' },
 ]
-
-function PhaseTimeline({
-  current, onPhaseClick,
-}: {
-  current: VersionPhase
-  /** 点 phase box → 跳到对应 phase 页面 */
-  onPhaseClick?: (phase: VersionPhase) => void
-}) {
-  const { t } = useTranslation()
-  const ci = PHASE_ORDER_TIMELINE.findIndex((p) => p.id === current)
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 0, padding: '6px 0', flexWrap: 'wrap' }}>
-      {PHASE_ORDER_TIMELINE.map((p, i) => {
-        const done = i < ci
-        const here = i === ci
-        const skip = PHASE_SKIPPABLE.includes(p.id)
-        // ADR-0007 §11.5-A：strict —— cursor 之后 (i > ci) 全部不许跳。
-        // cursor+1 推进必须经 banner "继续 X →" 按钮（会调 advance API 校验完成条件）。
-        const disabled = i > ci
-        const clickable = !disabled && !!onPhaseClick
-        return (
-          <span key={p.id} style={{ display: 'inline-flex', alignItems: 'center' }}>
-            <button
-              type="button"
-              onClick={() => { if (!disabled) onPhaseClick?.(p.id) }}
-              disabled={disabled}
-              title={t(p.key)}
-              style={{
-                display: 'flex', alignItems: 'center', gap: 6,
-                padding: '4px 10px',
-                borderRadius: 'var(--r-md)',
-                background: 'transparent',
-                border: '1px solid transparent',
-                cursor: disabled ? 'not-allowed' : clickable ? 'pointer' : 'default',
-                opacity: disabled ? 0.4 : 1,
-                font: 'inherit',
-              }}
-            >
-              <span style={{
-                fontFamily: 'var(--font-mono)', fontSize: 'var(--t-sm)', fontWeight: 600,
-                color: done ? 'var(--ok)' : here ? 'var(--accent)' : 'var(--fg-disabled)',
-              }}>{p.n}</span>
-              <span className="phase-timeline-label" style={{
-                fontSize: 'var(--t-xs)',
-                color: done ? 'var(--fg-secondary)' : here ? 'var(--fg-primary)' : 'var(--fg-tertiary)',
-                fontWeight: here ? 600 : 400,
-              }}>{t(p.key)}{skip ? <span style={{ color: 'var(--fg-tertiary)', fontWeight: 400 }}> · {t('overview.banner.skippableHint')}</span> : ''}</span>
-            </button>
-            {i < PHASE_ORDER_TIMELINE.length - 1 && (
-              <span style={{
-                display: 'inline-block', width: 14, height: 1,
-                background: i < ci ? 'var(--ok)' : 'var(--border-subtle)',
-              }}/>
-            )}
-          </span>
-        )
-      })}
-    </div>
-  )
-}
 
 // ── StatusBanner ─────────────────────────────────────────────────────────
 
@@ -412,7 +352,6 @@ function StatusBanner({
 
   const goLog = () => taskId && navigate(`/queue/${taskId}#log`)
   const goMonitor = () => taskId && navigate(`/queue/${taskId}#monitor`)
-  const goPhase = (step: string) => navigate(`/projects/${projectId}/v/${version.id}/${step}`)
 
   const fmtTime = (ts: number | null | undefined) =>
     ts ? new Date(ts * 1000).toLocaleString('zh-CN', { hour12: false, dateStyle: 'short', timeStyle: 'short' }) : '—'
@@ -551,53 +490,9 @@ function StatusBanner({
     )
   }
 
-  // preparing
-  const phase = version.phase
-  // banner 按钮始终反映 current phase，让用户去当前阶段页面做事。
-  // cursor advance 走 Sidebar 的 "cursor+1" 行入口（见 Sidebar.handleAdvanceToNext），
-  // banner 不再自己调 advance/skip — 之前的 next-phase 文案会让用户误以为
-  // 当前阶段已完成（如 curating 0/0 时显示「继续 ② 打标」）。
-  const continueTarget = PHASE_ORDER_TIMELINE.find((p) => p.id === phase) ?? null
-
-  const handleContinue = () => {
-    const step = continueTarget ? PHASE_TO_STEP_LOCAL[continueTarget.id] : null
-    if (step) goPhase(step)
-  }
-
-  return (
-    <BannerShell
-      tint="warn" iconChar="◐" iconColor="var(--warn)"
-      title={`${version.label} · ${t('versionStatus.preparing')}`}
-      sub={t('overview.banner.preparingSub')}
-    >
-      <PhaseTimeline
-        current={phase}
-        onPhaseClick={(p) => {
-          const step = PHASE_TO_STEP_LOCAL[p]
-          if (step) goPhase(step)
-        }}
-      />
-      <div style={{ ...bannerMetaRow, alignItems: 'center' }}>
-        <BannerMeta
-          k={t('overview.banner.metaCurrentPhase')}
-          v={t(PHASE_ORDER_TIMELINE.find((p) => p.id === phase)?.key ?? 'nav.curate')}
-        />
-        {version.stats && (
-          <BannerMeta
-            k={t('overview.banner.metaTagged')}
-            v={`${version.stats.tagged_image_count} / ${version.stats.train_image_count}`}
-          />
-        )}
-        <span style={{ flex: 1 }} />
-        {continueTarget && (
-          <button
-            onClick={() => void handleContinue()}
-            className="btn btn-primary btn-sm"
-          >{t('overview.banner.continueLabel')} {continueTarget.n} {t(continueTarget.key)} →</button>
-        )}
-      </div>
-    </BannerShell>
-  )
+  // preparing — 状态叙事由 PipelineStrip（圆形步骤条 + Continue CTA）承担，
+  // banner 只负责 task 态（training / failed / completed / canceled）。
+  return null
 }
 
 /** phase enum → URL step key（StatusBanner 内用，独立于 sidebar 的同名 map）。 */
@@ -740,7 +635,7 @@ function TrainSetCard({ project, version }: { project: ProjectDetail; version: V
     : ''
 
   const actionDisabled = !canGoVersionPhase(version, 'curating')
-  const phaseLine = `① ${t('nav.download')} → ② ${t('nav.preprocess')} → ③ ${t('nav.curate')}`
+  const phaseLine = `${t('nav.download')} → ${t('nav.preprocess')} → ${t('nav.curate')}`
 
   return (
     <div style={{
@@ -817,7 +712,7 @@ function TrainSetCard({ project, version }: { project: ProjectDetail; version: V
               opacity: actionDisabled ? 0.4 : 1,
               fontWeight: 500,
             }}
-          >③ {t('nav.curate')} · {t('overview.detail.reorganize')} →</button>
+          >{t('nav.curate')} · {t('overview.detail.reorganize')} →</button>
         </div>
       )}
 
@@ -895,11 +790,11 @@ function TagDistCard({ project, version }: { project: ProjectDetail; version: Ve
       count={uniqueTotal}
       countSub={t('overview.detail.tagSuffix')}
       action={version ? {
-        label: `⑤ ${t('nav.tagEdit')}`,
+        label: `${t('nav.tagEdit')}`,
         onClick: () => navigate(`/projects/${project.id}/v/${version.id}/edit`),
         disabled: !canGoVersionPhase(version, 'editing'),
       } : undefined}
-      phase={`④ ${t('nav.tag')} → ⑤ ${t('nav.tagEdit')}`}
+      phase={`${t('nav.tag')} → ${t('nav.tagEdit')}`}
     >
       {tags.length === 0 ? (
         <p style={{ margin: 0, fontSize: 'var(--t-xs)', color: 'var(--fg-tertiary)', fontStyle: 'italic' }}>
@@ -987,8 +882,8 @@ function RegTileCard({
         title={t('overview.detail.regSet')}
         count={regCount}
         countSub={t('overview.detail.imagesSuffix')}
-        action={{ label: `⑥ ${t('nav.reg')}`, onClick: onGoReg, disabled }}
-        phase={`⑥ ${t('nav.reg')}`}
+        action={{ label: `${t('nav.reg')}`, onClick: onGoReg, disabled }}
+        phase={`${t('nav.reg')}`}
       >
         <p style={{ margin: 0, fontSize: 'var(--t-xs)', color: 'var(--fg-tertiary)' }}>
           {t('overview.detail.regCount', { n: regCount })}
@@ -999,8 +894,8 @@ function RegTileCard({
   return (
     <HeroCard
       title={t('overview.detail.regSet')}
-      action={{ label: `⑥ ${t('nav.reg')}`, onClick: onGoReg, disabled }}
-      phase={`⑥ ${t('nav.reg')} · ${t('overview.banner.skippableHint')}`}
+      action={{ label: `${t('nav.reg')}`, onClick: onGoReg, disabled }}
+      phase={`${t('nav.reg')} · ${t('overview.banner.skippableHint')}`}
     >
       <div style={{
         flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
@@ -1087,15 +982,15 @@ function DetailGrid({ project, version }: { project: ProjectDetail; version: Ver
           title={t('overview.detail.resolutionDist')}
           bins={pixelBins}
           emptyHint={t('overview.detail.emptyResolution')}
-          action={version ? { label: `② ${t('nav.preprocess')}`, onClick: () => navigate(`/projects/${project.id}/v/${version.id}/preprocess?tool=upscale`) } : undefined}
-          phase={`② ${t('nav.preprocess')}`}
+          action={version ? { label: `${t('nav.preprocess')}`, onClick: () => navigate(`/projects/${project.id}/v/${version.id}/preprocess?tool=upscale`) } : undefined}
+          phase={`${t('nav.preprocess')}`}
         />
         <HistTileCard
           title={t('overview.detail.aspectDist')}
           bins={arBins}
           emptyHint={t('overview.detail.emptyAspect')}
-          action={version ? { label: `② ${t('nav.preprocess')}`, onClick: () => navigate(`/projects/${project.id}/v/${version.id}/preprocess?tool=crop`) } : undefined}
-          phase={`② ${t('nav.preprocess')}`}
+          action={version ? { label: `${t('nav.preprocess')}`, onClick: () => navigate(`/projects/${project.id}/v/${version.id}/preprocess?tool=crop`) } : undefined}
+          phase={`${t('nav.preprocess')}`}
         />
         <RegTileCard
           regCount={regCount}
@@ -1222,94 +1117,168 @@ export default function ProjectOverview() {
   const selectedVersion: Version | null =
     project.versions.find((v) => v.id === selectedVid) ?? null
 
-  // 拉 selected version 的最新 task — banner 状态叙事 + CTA 数据源
-  const [latestTask, setLatestTask] = useState<Task | null>(null)
+  // 项目全部 task（最近优先）— 右栏 Recent runs + banner / Output 数据源
+  const [projTasks, setProjTasks] = useState<Task[]>([])
   useEffect(() => {
-    if (!selectedVid) { setLatestTask(null); return }
     let cancelled = false
     void api.listQueue()
       .then((items) => {
         if (cancelled) return
         const list = items
-          .filter((tk) => tk.project_id === project.id && tk.version_id === selectedVid)
+          .filter((tk) => tk.project_id === project.id)
           .sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))
-        setLatestTask(list[0] ?? null)
+        setProjTasks(list)
       })
-      .catch(() => { if (!cancelled) setLatestTask(null) })
+      .catch(() => { if (!cancelled) setProjTasks([]) })
     return () => { cancelled = true }
-  }, [project.id, selectedVid])
+  }, [project.id])
+
+  const latestTask = useMemo(
+    () => projTasks.find((tk) => tk.version_id === selectedVid) ?? null,
+    [projTasks, selectedVid],
+  )
 
   const [activeTab, setActiveTab] = useState<OverviewTab>('details')
+  const navigate = useNavigate()
 
   const tabBtnCls = (tab: OverviewTab) => [
-    'px-4 py-2 text-sm border-none bg-transparent cursor-pointer border-b-2 transition-colors',
+    'py-2 px-[18px] text-sm border-0 bg-transparent -mb-px cursor-pointer transition-colors border-b-2',
     activeTab === tab
-      ? 'text-fg-primary font-semibold border-accent'
-      : 'text-fg-secondary border-transparent hover:text-fg-primary',
+      ? 'font-semibold text-accent border-accent'
+      : 'font-normal text-fg-tertiary hover:text-fg-primary border-transparent',
   ].join(' ')
 
   return (
     <div className="fade-in flex flex-col h-full min-h-0">
-      {/* ── 顶部三段：Identity / VersionRail / StatusBanner ──── */}
-      <div
-        className="shrink-0 border-b border-subtle"
-        style={{ padding: '14px 24px 10px', display: 'flex', flexDirection: 'column', gap: 8, background: 'var(--bg-canvas)' }}
-      >
-        <Identity
-          project={project}
-          version={selectedVersion}
-          totalVersions={project.versions.length}
-        />
-        <VersionRail
-          versions={project.versions}
-          currentVid={selectedVid}
-          onSelect={(vid) => { setSelectedVid(vid); ctx?.onSelectVersion(vid) }}
-          onCreate={() => ctx && ctx.onCreateVersion()}
-          onExport={() => ctx && ctx.onExportTrain()}
-          exporting={ctx?.exporting ?? false}
-          exportEnabled={!!selectedVersion}
-        />
-        {selectedVersion && (
-          <StatusBanner
-            projectId={project.id}
-            version={selectedVersion}
-            latestTask={latestTask}
-            onOpenOutput={() => setActiveTab('output')}
-          />
-        )}
-      </div>
+      <PageHeader
+        eyebrow="Project"
+        accentEyebrow
+        title={project.title}
+        subtitle={project.note ?? undefined}
+        actions={
+          <>
+            <button
+              className="btn btn-secondary btn-sm"
+              onClick={() => ctx?.onExportTrain()}
+              disabled={!selectedVersion || (ctx?.exporting ?? false)}
+            >
+              {ctx?.exporting ? t('sidebar.exporting') : t('overview.actions.exportBundle')}
+            </button>
+            <button className="btn btn-primary btn-sm" onClick={() => ctx?.onCreateVersion()}>
+              + {t('overview.versionSelector.newVersion')}
+            </button>
+          </>
+        }
+      />
 
-      {/* ── Tabs ──── */}
-      <div className="border-b border-subtle px-6 shrink-0">
-        <div className="flex gap-1">
-          <button className={tabBtnCls('details')} onClick={() => setActiveTab('details')}>
-            {t('overview.tabDetails')}
-          </button>
-          <button className={tabBtnCls('tasks')} onClick={() => setActiveTab('tasks')}>
-            {t('overview.tabTasks')}
-          </button>
-          <button className={tabBtnCls('output')} onClick={() => setActiveTab('output')}>
-            {t('overview.tabOutput')}
-          </button>
+      <div className="flex-1 min-h-0 overflow-y-auto px-7 pt-5 pb-7">
+        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 320px', gap: 20, alignItems: 'start' }}>
+          {/* ── 左列：pipeline → (task banner) → versions → details ──── */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 20, minWidth: 0 }}>
+            <PipelineStrip project={project} version={selectedVersion} />
+
+            {selectedVersion && (
+              <StatusBanner
+                projectId={project.id}
+                version={selectedVersion}
+                latestTask={latestTask}
+                onOpenOutput={() => setActiveTab('output')}
+              />
+            )}
+
+            <div>
+              <div className="caption" style={{ marginBottom: 10 }}>
+                {t('overview.versionsCaption')} · {project.versions.length}
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                {project.versions.map((v) => (
+                  <VersionRowCard
+                    key={v.id}
+                    project={project}
+                    v={v}
+                    selected={v.id === selectedVid}
+                    onView={(vid) => setSelectedVid(vid)}
+                  />
+                ))}
+              </div>
+            </div>
+
+            <div>
+              <div className="flex gap-0.5 border-b border-subtle mb-4">
+                <button className={tabBtnCls('details')} onClick={() => setActiveTab('details')}>
+                  {t('overview.tabDetails')}
+                </button>
+                <button className={tabBtnCls('tasks')} onClick={() => setActiveTab('tasks')}>
+                  {t('overview.tabTasks')}
+                </button>
+                <button className={tabBtnCls('output')} onClick={() => setActiveTab('output')}>
+                  {t('overview.tabOutput')}
+                </button>
+              </div>
+              {activeTab === 'details' && (
+                <div style={{ height: 'clamp(520px, 64vh, 760px)' }}>
+                  <DetailGrid project={project} version={selectedVersion} />
+                </div>
+              )}
+              {activeTab === 'tasks' && (
+                <VersionTasksPanel projectId={project.id} versionId={selectedVid} />
+              )}
+              {activeTab === 'output' && (
+                <VersionOutputPanel version={selectedVersion} latestTask={latestTask} />
+              )}
+            </div>
+          </div>
+
+          {/* ── 右栏：dataset 统计 + recent runs ──── */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 20, position: 'sticky', top: 0 }}>
+            <div className="card" style={{ padding: 20 }}>
+              <div className="caption" style={{ marginBottom: 12 }}>{t('overview.datasetCaption')}</div>
+              {([
+                [t('overview.dataset.pool'), project.download_image_count ?? 0],
+                [t('overview.dataset.train'), selectedVersion?.stats?.train_image_count ?? 0],
+                [t('overview.dataset.reg'), selectedVersion?.stats?.reg_image_count ?? 0],
+                [t('overview.dataset.tagged'), selectedVersion?.stats?.tagged_image_count ?? 0],
+              ] as Array<[string, number]>).map(([k, v], i, arr) => (
+                <div
+                  key={k}
+                  style={{
+                    display: 'flex', justifyContent: 'space-between', padding: '9px 0',
+                    borderBottom: i < arr.length - 1 ? '1px solid var(--border-subtle)' : 'none',
+                  }}
+                >
+                  <span style={{ fontSize: 'var(--t-sm)', color: 'var(--fg-secondary)' }}>{k}</span>
+                  <span className="mono" style={{ fontSize: 'var(--t-sm)', fontWeight: 600 }}>{v}</span>
+                </div>
+              ))}
+            </div>
+
+            <div className="card" style={{ padding: 20 }}>
+              <div className="caption" style={{ marginBottom: 12 }}>{t('overview.recentRunsCaption')}</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {projTasks.length === 0 && (
+                  <span style={{ fontSize: 'var(--t-sm)', color: 'var(--fg-tertiary)' }}>{t('overview.noRuns')}</span>
+                )}
+                {projTasks.slice(0, 6).map((tk) => (
+                  <button
+                    key={tk.id}
+                    onClick={() => navigate(`/queue/${tk.id}`)}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 10, background: 'none',
+                      border: 'none', padding: '4px 0', cursor: 'pointer', textAlign: 'left',
+                    }}
+                  >
+                    <span className="mono" style={{ fontSize: 'var(--t-xs)', color: 'var(--fg-tertiary)', width: 34, flex: 'none' }}>#{tk.id}</span>
+                    <span style={{ flex: 1, fontSize: 'var(--t-sm)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {tk.config_name || tk.name}
+                    </span>
+                    <span className={`badge badge-${TASK_STATUS_BADGE[tk.status] ?? 'neutral'}`}>{tk.status}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
         </div>
       </div>
-
-      {/* ── Tab body ──── */}
-      {activeTab === 'details' && (
-        <div className="px-6 pt-3 pb-6 flex-1 min-h-0 overflow-y-auto">
-          <DetailGrid project={project} version={selectedVersion} />
-        </div>
-      )}
-      {activeTab === 'tasks' && (
-        <div className="flex-1 min-h-0 overflow-y-auto">
-          <VersionTasksPanel projectId={project.id} versionId={selectedVid} />
-        </div>
-      )}
-      {activeTab === 'output' && (
-        <div className="flex-1 min-h-0 overflow-y-auto">
-          <VersionOutputPanel version={selectedVersion} latestTask={latestTask} />
-        </div>
-      )}
     </div>
   )
 }

@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState } from 'react'
+import { Fragment, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { api, PHASE_ORDER, PHASE_SKIPPABLE, type Version, type VersionPhase, type VersionStatus } from '../api/client'
@@ -62,33 +62,6 @@ const STATUS_DOT: Record<VersionStatus, string> = {
   canceled:  'dot dot-neutral',
 }
 
-// ── logo ───────────────────────────────────────────────────────────────────
-function Logo({ collapsed }: { collapsed: boolean }) {
-  const [version, setVersion] = useState<string | null>(null)
-  useEffect(() => {
-    let alive = true
-    api.health().then((h) => { if (alive) setVersion(h.version) }).catch(() => {})
-    return () => { alive = false }
-  }, [])
-  return (
-    <div className="flex items-center gap-2.5">
-      <svg width="26" height="26" viewBox="0 0 26 26" aria-hidden>
-        <rect x="2" y="2" width="22" height="22" rx="5" fill="var(--accent)" />
-        <path d="M8 18 L13 7 L18 18" stroke="var(--accent-fg)" strokeWidth="2" fill="none" strokeLinejoin="round" strokeLinecap="round" />
-        <line x1="10.5" y1="14" x2="15.5" y2="14" stroke="var(--accent-fg)" strokeWidth="2" strokeLinecap="round" />
-      </svg>
-      {!collapsed && (
-        <div className="flex flex-col leading-[1.1]">
-          <span className="font-semibold text-md tracking-[-0.01em]">Anima</span>
-          <span className="text-xs text-fg-tertiary font-mono">
-            lora studio{version ? ` · ${version}` : ''}
-          </span>
-        </div>
-      )}
-    </div>
-  )
-}
-
 // ── nav item ───────────────────────────────────────────────────────────────
 function navItemClass(active: boolean, collapsed: boolean, prominent: boolean): string {
   return [
@@ -114,9 +87,6 @@ function NavItem({ to, label, icon, active, collapsed, prominent = false }: {
       title={collapsed ? label : undefined}
       className={navItemClass(active, collapsed, prominent)}
     >
-      {active && !collapsed && (
-        <span className="absolute left-0 top-2 bottom-2 w-[3px] bg-accent rounded-[2px]" />
-      )}
       {icon}
       {!collapsed && <span className="flex-1">{label}</span>}
     </Link>
@@ -135,9 +105,6 @@ function NavButton({ onClick, label, icon, active, collapsed, prominent = false 
       title={collapsed ? label : undefined}
       className={navItemClass(active, collapsed, prominent) + ' text-left'}
     >
-      {active && !collapsed && (
-        <span className="absolute left-0 top-2 bottom-2 w-[3px] bg-accent rounded-[2px]" />
-      )}
       {icon}
       {!collapsed && <span className="flex-1">{label}</span>}
     </button>
@@ -483,14 +450,7 @@ export default function Sidebar() {
       className="shrink-0 bg-sunken border-r border-subtle flex flex-col overflow-hidden h-full transition-[width] duration-[160ms] ease-in-out"
       style={{ width: collapsed ? 'var(--sidebar-collapsed-w)' : 'var(--sidebar-w)' }}
     >
-      <div
-        className={`flex items-center border-b border-subtle shrink-0 px-3.5 ${collapsed ? 'justify-center' : ''}`}
-        style={{ height: 'var(--topbar-h)' }}
-      >
-        <Logo collapsed={collapsed} />
-      </div>
-
-      <nav className={`flex-1 flex flex-col gap-0.5 overflow-hidden ${collapsed ? 'px-2 py-2.5' : 'px-2 py-3.5'}`}>
+      <nav className={`flex-1 flex flex-col gap-0.5 overflow-y-auto overflow-x-hidden ${collapsed ? 'px-2 py-3.5' : 'px-2 pt-[18px] pb-3.5'}`}>
         <NavItem to="/" label={t('nav.projects')} icon={I.folder} active={!inProject && location.pathname === '/'} collapsed={collapsed} prominent />
 
         {/* 当前项目下的全部内容（概览 + ①② + VersionPanel + ③-⑦）夹在 项目 / 队列 之间。

@@ -755,26 +755,26 @@ export default function PresetsPage() {
                 <span className="inline-block w-1.5 h-1.5 rounded-full bg-fg-tertiary shrink-0" />
                 <span className="caption uppercase tracking-[0.06em] text-xs">{t('presets.trainingParams')}</span>
                 <span className="flex-1" />
-                <div className="inline-flex rounded-md border border-subtle overflow-hidden text-xs">
+                <div className="inline-flex items-center gap-0.5 bg-sunken rounded-md p-[3px] text-xs">
                   <button
                     type="button"
                     onClick={() => advancedMode && toggleAdvancedMode()}
-                    className={`px-3 py-1 transition-colors ${!advancedMode ? 'bg-accent text-white' : 'bg-surface text-fg-secondary hover:bg-subtle'}`}
+                    className={`border-none px-3 py-1 rounded-[calc(var(--r-md)-2px)] transition-all duration-100 cursor-pointer ${!advancedMode ? 'bg-surface text-fg-primary font-semibold shadow-sm' : 'bg-transparent text-fg-secondary font-medium hover:text-fg-primary'}`}
                   >
                     {t('train.simpleMode')}
                   </button>
                   <button
                     type="button"
                     onClick={() => !advancedMode && toggleAdvancedMode()}
-                    className={`px-3 py-1 transition-colors ${advancedMode ? 'bg-accent text-white' : 'bg-surface text-fg-secondary hover:bg-subtle'}`}
+                    className={`border-none px-3 py-1 rounded-[calc(var(--r-md)-2px)] transition-all duration-100 cursor-pointer ${advancedMode ? 'bg-surface text-fg-primary font-semibold shadow-sm' : 'bg-transparent text-fg-secondary font-medium hover:text-fg-primary'}`}
                   >
                     {t('train.advancedMode')}
                   </button>
                 </div>
               </div>
               {(droppedFields.length > 0 || defaultedFields.length > 0) && (
-                <div className="mb-3 rounded-md border border-amber-400/50 bg-amber-950/60 px-3.5 py-2.5 text-xs text-amber-100 space-y-1">
-                  <span className="font-semibold text-amber-300">{t('presets.compatNoticeTitle')}</span>
+                <div className="mb-3 rounded-md border border-warn bg-warn-soft px-3.5 py-2.5 text-xs text-warn space-y-1">
+                  <span className="font-semibold">{t('presets.compatNoticeTitle')}</span>
                   {droppedFields.length > 0 && (
                     <div>{t('presets.droppedFieldsBody')}<code className="ml-1 text-[11px] opacity-80">{droppedFields.join(', ')}</code></div>
                   )}
@@ -897,7 +897,7 @@ function PresetExportDialog({
       className="fixed inset-0 z-40 flex items-center justify-center bg-black/50"
       onMouseDown={(e) => { if (e.target === e.currentTarget) onCancel() }}
     >
-      <div className="bg-elevated border border-dim rounded-lg w-[90%] max-w-[420px] p-6 flex flex-col gap-4 shadow-xl">
+      <div className="bg-elevated border border-subtle rounded-[var(--r-card)] w-[90%] max-w-[420px] p-6 flex flex-col gap-4 shadow-xl">
         <div>
           <h2 className="m-0 text-lg font-semibold text-fg-primary">{t('presets.exportPresetTitle')}</h2>
           <p className="mt-1 mb-0 text-sm text-fg-secondary">{t('presets.exportPresetHint')}</p>
@@ -973,7 +973,7 @@ function ImportConflictDialog({
     >
       <form
         onSubmit={submitSaveAs}
-        className="bg-elevated border border-dim rounded-lg w-[90%] max-w-[480px] p-6 flex flex-col gap-4 shadow-xl"
+        className="bg-elevated border border-subtle rounded-[var(--r-card)] w-[90%] max-w-[480px] p-6 flex flex-col gap-4 shadow-xl"
       >
         <h2 className="m-0 text-lg font-semibold text-fg-primary">
           {t('presets.importConflictTitle', { name: suggestedName })}

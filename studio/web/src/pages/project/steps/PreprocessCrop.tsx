@@ -367,10 +367,10 @@ export default function PreprocessCropPage() {
                       key={k}
                       onClick={() => setFilter(k)}
                       className={
-                        'px-2 py-0.5 rounded-full text-xs font-medium transition-colors ' +
+                        'px-2 py-0.5 rounded-full text-xs transition-colors ' +
                         (filter === k
-                          ? 'bg-accent text-white'
-                          : 'bg-overlay text-fg-secondary hover:bg-accent-soft')
+                          ? 'bg-accent-soft text-accent font-semibold'
+                          : 'bg-overlay text-fg-secondary font-medium hover:text-fg-primary')
                       }
                     >
                       {t(`preprocessCrop.filter.${k}`)} {counts[k]}

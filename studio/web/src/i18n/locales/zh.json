@@ -79,7 +79,7 @@
     "search": "搜索 (⌘K)",
     "searchAriaLabel": "搜索",
     "newVersion": "新版本 {{tag}} 可用",
-    "trainingCapsule": "训练中 · {{label}}{{suffix}}",
+    "trainingLabel": "训练中",
     "pendingCount": "{{n}} 排队中",
     "taskId": "任务 #{{id}}",
     "runningETA": "~{{time}}",
@@ -118,6 +118,7 @@
     "queueSub": "查看所有任务",
     "presetsSub": "训练配置",
     "monitorSub": "训练监控面板",
+    "generateSub": "生成 / XY 矩阵",
     "settingsSub": "全局设置",
     "presetItem": "训练预设",
     "projectItem": "项目 #{{id}}"
@@ -145,13 +146,13 @@
     "collapseLabel": "收起"
   },
   "projectStepper": {
-    "download": "① 下载",
-    "curate": "② 筛选",
-    "preprocess": "③ 预处理（可选）",
-    "tag": "④ 打标",
-    "tagEdit": "⑤ 标签编辑",
-    "reg": "⑥ 正则集（可选）",
-    "train": "⑦ 训练",
+    "download": "下载",
+    "curate": "筛选",
+    "preprocess": "预处理（可选）",
+    "tag": "打标",
+    "tagEdit": "标签编辑",
+    "reg": "正则集（可选）",
+    "train": "训练",
     "selectVersion": "先选择 / 创建一个版本"
   },
   "stageBadge": {
@@ -1305,6 +1306,23 @@
     "canvasToBlobNull": "canvas.toBlob 返回 null"
   },
   "overview": {
+    "versionsCaption": "版本",
+    "datasetCaption": "数据集",
+    "recentRunsCaption": "最近运行",
+    "noRuns": "还没有任务运行。",
+    "actions": {
+      "exportBundle": "导出训练包"
+    },
+    "versionRow": {
+      "openTrain": "打开训练",
+      "activate": "设为当前"
+    },
+    "dataset": {
+      "pool": "已下载池",
+      "train": "训练集",
+      "reg": "正则集",
+      "tagged": "已打标"
+    },
     "pipelineProgress": "流水线进度",
     "stages": "阶段",
     "versions": "版本",
@@ -1356,11 +1374,11 @@
       "aspectDist": "长宽比分布",
       "regSet": "正则集",
       "regCount": "{{n}} 张",
-      "emptyCurate": "请先在 ③ 筛选中选择训练图",
-      "emptyTag": "请先在 ④ 打标中生成 caption",
-      "emptyResolution": "在 ② 预处理 → 放大页查看详细分布",
-      "emptyAspect": "在 ② 预处理 → 裁剪页查看分桶统计",
-      "emptyReg": "在 ⑥ 正则集生成或显式跳过",
+      "emptyCurate": "请先在 筛选中选择训练图",
+      "emptyTag": "请先在 打标中生成 caption",
+      "emptyResolution": "在 预处理 → 放大页查看详细分布",
+      "emptyAspect": "在 预处理 → 裁剪页查看分桶统计",
+      "emptyReg": "在 正则集生成或显式跳过",
       "goCurate": "去筛选",
       "goEdit": "去编辑",
       "goUpscale": "去放大",
@@ -1369,7 +1387,7 @@
       "imagesSuffix": "张",
       "tagSuffix": "标签",
       "reorganize": "重组",
-      "regEmptyHint": "未生成 · 可在 ⑥ 跳过该 phase",
+      "regEmptyHint": "未生成 · 可在 跳过该 phase",
       "allFolders": "全部"
     },
     "identity": {
@@ -1407,7 +1425,7 @@
       "downloadLora": "下载",
       "continueLabel": "继续",
       "preparingSub": "数据集准备阶段 · 完成后即可开始训练",
-      "smallerBatchHint": "已开新版本 · 进入 ⑦ 训练 调小 batch_size 后重训",
+      "smallerBatchHint": "已开新版本 · 进入 训练 调小 batch_size 后重训",
       "noArtifact": "尚无产物文件，无法操作"
     },
     "header": {
@@ -2012,7 +2030,7 @@
     "loadFailed": "加载 reg 状态失败: {{error}}",
     "noTrainForAi": "train 还没有图片，请先完成 Step 1（下载）或 Step 2（筛选）",
     "aiEnqueued": "先验生成任务 #{{id}} 已入队",
-    "noTrainForBuild": "train 还没有图片，先去 ① 整理 / ② 下载",
+    "noTrainForBuild": "train 还没有图片，先去 整理 / 下载",
     "enqueuedIncremental": "已入队补足 #{{id}}",
     "enqueued": "已入队 #{{id}}",
     "confirmDelete": "删除当前 reg 集？这是不可恢复的（meta + 所有图片都会清掉）。",

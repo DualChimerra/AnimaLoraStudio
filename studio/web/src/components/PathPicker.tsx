@@ -52,7 +52,7 @@ export default function PathPicker({
       onClick={onClose}
     >
       <div
-        className="bg-elevated border border-dim rounded-lg shadow-xl w-[640px] max-h-[80vh] flex flex-col overflow-hidden"
+        className="bg-elevated border border-subtle rounded-[var(--r-card)] shadow-xl w-[640px] max-h-[80vh] flex flex-col overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
         <header className="px-4 py-3 border-b border-subtle flex items-center gap-2 shrink-0">

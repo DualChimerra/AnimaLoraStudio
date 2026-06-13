@@ -48,7 +48,7 @@ export default function MonitorPage() {
       />
       <div className="flex-1 min-h-0 flex flex-col p-6 overflow-hidden">
       {/* 顶部状态栏 */}
-      <section className="rounded-md border border-subtle bg-surface text-xs flex items-center gap-3 shrink-0 flex-wrap"
+      <section className="card text-xs flex items-center gap-3 shrink-0 flex-wrap"
         style={{ padding: '10px 16px', margin: '0 0 12px 0' }}>
         {/* 健康指示 */}
         <span className={`inline-block w-2 h-2 rounded-full ${ok ? 'bg-ok' : 'bg-err'}`}

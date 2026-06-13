@@ -265,7 +265,7 @@ export function NewVersionDialog({
       <form
         onClick={(e) => e.stopPropagation()}
         onSubmit={submit}
-        className="bg-elevated border border-dim rounded-lg w-[90%] max-w-[440px] p-6 flex flex-col gap-4 shadow-xl"
+        className="bg-elevated border border-subtle rounded-[var(--r-card)] w-[90%] max-w-[440px] p-6 flex flex-col gap-4 shadow-xl"
       >
         <h2 className="m-0 text-lg font-semibold">{t('layout.newVersionTitle')}</h2>
         <label className="flex flex-col gap-1">

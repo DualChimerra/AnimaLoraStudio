@@ -37,15 +37,17 @@ describe('SystemStats', () => {
     expect(container.firstChild).toBeNull()
   })
 
-  it('shows CPU / MEM / GPU / VRAM pills with values after mount fetch', async () => {
+  it('shows CPU / MEM / GPU meters + VRAM text after mount fetch', async () => {
     vi.spyOn(api, 'systemStats').mockResolvedValue(makeStats())
     render(<SystemStats />)
     await waitFor(() => expect(screen.getByText('CPU')).toBeInTheDocument())
-    expect(screen.getByText('13%')).toBeInTheDocument()
+    // CPU/GPU/MEM are mini-bar meters showing % (redesign 原型 SystemStats)
+    expect(screen.getByText('13%')).toBeInTheDocument()  // cpu 12.5 → 13
     expect(screen.getByText('MEM')).toBeInTheDocument()
-    expect(screen.getByText('8.0/32G')).toBeInTheDocument()
+    expect(screen.getByText('25%')).toBeInTheDocument()  // ram 8/32 → 25
     expect(screen.getByText('GPU')).toBeInTheDocument()
-    expect(screen.getByText('50%')).toBeInTheDocument()
+    expect(screen.getByText('50%')).toBeInTheDocument()  // gpu util 50
+    // VRAM stays a used/total text readout
     expect(screen.getByText('VRAM')).toBeInTheDocument()
     expect(screen.getByText('4.0/24G')).toBeInTheDocument()
   })
@@ -66,11 +68,17 @@ describe('SystemStats', () => {
     expect(screen.queryByText('VRAM')).toBeNull()
   })
 
-  it('shows high-tone class when util exceeds 90%', async () => {
+  it('paints the meter bar with the err color when util exceeds 90%', async () => {
     vi.spyOn(api, 'systemStats').mockResolvedValue(makeStats({ cpu_pct: 95 }))
     render(<SystemStats />)
     const el = await screen.findByText('95%')
-    expect(el.className).toContain('text-err')
+    // 色调现在落在 mini-bar 的填充色上（>90% → err），不再染数字文本。
+    // jsdom 不解析 var() 进 style.background，所以查 style 属性字符串。
+    const meter = el.parentElement as HTMLElement
+    const fill = [...meter.querySelectorAll('div')].find(
+      (d) => (d.getAttribute('style') ?? '').includes('background'),
+    )
+    expect(fill?.getAttribute('style')).toContain('var(--err)')
   })
 
   it('only fetches once on mount (SSE 化后无轮询)', async () => {
