@@ -450,8 +450,8 @@ export default function Sidebar() {
       className="shrink-0 bg-sunken border-r border-subtle flex flex-col overflow-hidden h-full transition-[width] duration-[160ms] ease-in-out"
       style={{ width: collapsed ? 'var(--sidebar-collapsed-w)' : 'var(--sidebar-w)' }}
     >
-      <nav className={`flex-1 flex flex-col gap-0.5 overflow-y-auto overflow-x-hidden ${collapsed ? 'px-2 py-3.5' : 'px-2 pt-[18px] pb-3.5'}`}>
-        <NavItem to="/" label={t('nav.projects')} icon={I.folder} active={!inProject && location.pathname === '/'} collapsed={collapsed} prominent />
+      <nav className={`flex-1 flex flex-col gap-0.5 overflow-y-auto overflow-x-hidden ${collapsed ? 'px-2 py-2' : 'px-2 pt-2 pb-3.5'}`}>
+        <NavItem to="/" label={t('nav.projects')} icon={I.folder} active={!inProject && location.pathname === '/'} collapsed={collapsed} />
 
         {/* 当前项目下的全部内容（概览 + ①② + VersionPanel + ③-⑦）夹在 项目 / 队列 之间。
             sub-nav 性质，缩进表达从属（折叠态不缩进）。
@@ -462,8 +462,8 @@ export default function Sidebar() {
           </div>
         )}
 
-        <NavItem to="/queue" label={t('nav.queue')} icon={I.queue} active={isMain('/queue')} collapsed={collapsed} prominent />
-        <NavItem to="/tools/generate" label={t('nav.generate')} icon={I.image} active={isMain('/tools/generate')} collapsed={collapsed} prominent />
+        <NavItem to="/queue" label={t('nav.queue')} icon={I.queue} active={isMain('/queue')} collapsed={collapsed} />
+        <NavItem to="/tools/generate" label={t('nav.generate')} icon={I.image} active={isMain('/tools/generate')} collapsed={collapsed} />
       </nav>
 
       <div className={`border-t border-subtle flex flex-col gap-0.5 shrink-0 ${collapsed ? 'px-1.5 py-2' : 'p-2.5'}`}>

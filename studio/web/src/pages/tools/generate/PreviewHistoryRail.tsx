@@ -19,10 +19,13 @@ interface Props {
   onClear?: () => void
   /** 清理失效（server cache 已没的 entry） */
   onPruneStale?: () => Promise<number>
+  /** 'vertical'（默认）= 旧的右侧竖排栏；'horizontal' = 原型那种「PREVIEW 下方
+   *  HISTORY 横排卡片」。 */
+  orientation?: 'vertical' | 'horizontal'
 }
 
 export default function PreviewHistoryRail({
-  entries, mode, onSelect, onRemove, onClear, onPruneStale,
+  entries, mode, onSelect, onRemove, onClear, onPruneStale, orientation = 'vertical',
 }: Props) {
   const { t } = useTranslation()
   const list = entries.filter((e) => e.mode === mode)
@@ -40,6 +43,53 @@ export default function PreviewHistoryRail({
     } finally {
       setPruning(false)
     }
+  }
+
+  if (orientation === 'horizontal') {
+    // 原型布局：PREVIEW 卡片下方一张 HISTORY 卡片，缩略图横向排开。
+    return (
+      <div className="card shrink-0" style={{ padding: 12 }}>
+        <div className="flex items-center gap-2 mb-2.5">
+          <span className="caption">{t('generate.historyLabel')}</span>
+          <span className="flex-1" />
+          {list.length > 0 && onPruneStale && (
+            <button
+              className="btn btn-ghost text-2xs"
+              style={{ padding: '1px 6px' }}
+              onClick={() => void handlePrune()}
+              disabled={pruning}
+              title={t('generate.pruneStaleTitle')}
+            >
+              {pruning ? t('generate.checkingShort') : pruneResult ?? t('generate.pruneStale')}
+            </button>
+          )}
+          {list.length > 0 && onClear && (
+            <button
+              className="btn btn-ghost text-2xs"
+              style={{ padding: '1px 6px' }}
+              onClick={onClear}
+              title={t('generate.clearCurrentHistoryTitle', { mode })}
+            >
+              {t('common.delete')}
+            </button>
+          )}
+        </div>
+        {list.length === 0 ? (
+          <div className="text-fg-tertiary text-xs py-2">{t('generate.noHistory')}</div>
+        ) : (
+          <div className="flex flex-row gap-2 overflow-x-auto pb-1">
+            {list.map((entry) => (
+              <HistoryItem
+                key={entry.id}
+                entry={entry}
+                onSelect={() => onSelect(entry)}
+                onRemove={onRemove ? () => onRemove(entry.id) : undefined}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+    )
   }
 
   return (

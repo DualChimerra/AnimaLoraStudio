@@ -6,13 +6,13 @@
     "monitor": "Monitor",
     "settings": "Settings",
     "generate": "Generate",
-    "download": "Dataset",
-    "curate": "Train Set Curation",
+    "download": "Download",
+    "curate": "Curate",
     "tag": "Tag",
-    "tagEdit": "Tag Edit",
-    "reg": "Reg set (optional)",
+    "tagEdit": "Tag editor",
+    "reg": "Reg set",
     "train": "Train",
-    "preprocess": "Preprocess (optional)",
+    "preprocess": "Preprocess",
     "overview": "Overview"
   },
   "common": {
@@ -1303,7 +1303,9 @@
     "noExportableXyData": "No exportable XY data",
     "allCellsLoadFailed": "All cell images failed to load (the originals may have been released)",
     "canvas2dUnavailable": "canvas 2d is unavailable",
-    "canvasToBlobNull": "canvas.toBlob returned null"
+    "canvasToBlobNull": "canvas.toBlob returned null",
+    "historyLabel": "History",
+    "previewLabel": "Preview"
   },
   "overview": {
     "versionsCaption": "Versions",
@@ -1495,7 +1497,7 @@
     "exportBundleAtLeastOne": "Select at least one item to export"
   },
   "tagEdit": {
-    "title": "Tag edit",
+    "title": "Tag editor",
     "subtitle": "Batch edit tags · stage locally · write on save",
     "taggedBadge": "{{tagged}}/{{total}} tagged",
     "downloadZip": "Download dataset",
@@ -1724,12 +1726,30 @@
     "toastNoCrops": "No crops to submit (draw at least one rect)"
   },
   "steps": {
-    "download": { "title": "Dataset", "subtitle": "Booru scraping + local upload" },
-    "curate": { "title": "Train Set Curation", "subtitle": "Dataset → Train set" },
-    "preprocess": { "title": "Preprocess Tools", "subtitle": "Upscale / crop / inpaint — Upscale tool" },
-    "tag": { "title": "Auto tagging", "subtitle": "WD14 / CLTagger local inference, or remote LLM vision tagging" },
-    "reg": { "title": "Reg set (optional)", "subtitle": "Booru pull or base-model neutral prior; mirror train structure or flat single bucket 1_data/" },
-    "train": { "title": "Train", "subtitle": "Pick preset → Edit config → Queue training" }
+    "download": {
+      "title": "Download",
+      "subtitle": "Booru scraping + local upload"
+    },
+    "curate": {
+      "title": "Curate",
+      "subtitle": "Dataset → Train set"
+    },
+    "preprocess": {
+      "title": "Preprocess",
+      "subtitle": "Upscale / crop / inpaint — Upscale tool"
+    },
+    "tag": {
+      "title": "Auto tagging",
+      "subtitle": "WD14 / CLTagger local inference, or remote LLM vision tagging"
+    },
+    "reg": {
+      "title": "Regularization set",
+      "subtitle": "Booru pull or base-model neutral prior; mirror train structure or flat single bucket 1_data/"
+    },
+    "train": {
+      "title": "Train",
+      "subtitle": "Pick preset → Edit config → Queue training"
+    }
   },
   "curate": {
     "downloadTime": "Added time",
@@ -1965,7 +1985,17 @@
     "tomlCollapsed": "Expand to view / copy",
     "copied": "Copied to clipboard",
     "copyFailed": "Copy failed",
-    "saveBeforeDownload": "Save the preset first; download streams the on-disk yaml from the server."
+    "saveBeforeDownload": "Save the preset first; download streams the on-disk yaml from the server.",
+    "colName": "Name",
+    "colOptimizer": "Optimizer",
+    "colRank": "Rank",
+    "colRes": "Res",
+    "colUpdated": "Updated",
+    "empty": "No presets yet",
+    "editConfig": "Edit config",
+    "selectHint": "Select a preset to see its summary.",
+    "editPrefix": "Edit",
+    "newPresetBtn": "New preset"
   },
   "train": {
     "loadConfigFailed": "Failed to load training config: {{error}}",
@@ -2060,7 +2090,6 @@
     "statusCellLatest": "LATEST",
     "statusCellSkipped": "skipped",
     "nImagesShort": "imgs",
-    "tabGenerate": "Generate",
     "grpAiGen": "Generation",
     "grpTagCommon": "Common",
     "grpExpand": "Expand",

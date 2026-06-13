@@ -11,8 +11,7 @@ import ConfigSkeleton from '../../components/ConfigSkeleton'
 import { useDialog } from '../../components/Dialog'
 import PageHeader from '../../components/PageHeader'
 import PathPicker from '../../components/PathPicker'
-import SchemaForm, { visibleSchemaGroups } from '../../components/SchemaForm'
-import SchemaSectionIndex from '../../components/SchemaSectionIndex'
+import SchemaForm from '../../components/SchemaForm'
 import { useToast } from '../../components/Toast'
 import { useSettingsDrawer } from '../../lib/SettingsDrawer'
 import { useAdvancedMode } from '../../lib/useAdvancedMode'
@@ -47,6 +46,32 @@ function generateToml(config: ConfigData): string {
   return keys.map((k) => `${k} = ${toTomlValue(config[k])}`).join('\n')
 }
 
+// 相对时间（与 Overview 同款，prototype Presets 表格 / 详情用）。
+function fmtAgo(ts: number): string {
+  const sec = Math.max(0, Date.now() / 1000 - ts)
+  if (sec < 60) return 'just now'
+  if (sec < 3600) return `${Math.floor(sec / 60)}m ago`
+  if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`
+  return `${Math.floor(sec / 86400)}d ago`
+}
+
+// 表格列 / 详情卡用：从一份 config 派生 optimizer / rank / resolution。
+function cfgOptimizer(c?: ConfigData): string {
+  return (c?.optimizer_type as string | undefined) ?? '—'
+}
+function cfgRank(c?: ConfigData): string {
+  const v = c?.lora_rank
+  return v === undefined || v === null ? '—' : String(v)
+}
+function cfgAlpha(c?: ConfigData): string {
+  const v = c?.lora_alpha
+  return v === undefined || v === null ? '—' : String(v)
+}
+function cfgRes(c?: ConfigData): string {
+  const v = c?.resolution
+  return v === undefined || v === null ? '—' : String(v)
+}
+
 // 预设名校验 / 描述存储 / schema 默认值 抽到 lib/preset-helpers.ts，
 // 跟 Train 页面「新建预设」内联表单共享，避免两份维护。
 
@@ -77,6 +102,9 @@ export default function PresetsPage() {
   const [autoSyncPaths, setAutoSyncPaths] = useState<boolean>(true)
   // 4 个模型字段当前 Settings 算出的绝对路径（reset 按钮 + 新建预设默认值）
   const [modelPathDefaults, setModelPathDefaults] = useState<Record<string, string>>({})
+  // prototype 表格列（Optimizer/Rank/Res）需要每个 preset 的 config —— 列表 API
+  // 只回 name/path/updated，这里按需拉全部 config 填表格（preset 数量很少）。
+  const [configCache, setConfigCache] = useState<Record<string, ConfigData>>({})
 
   // 已保存快照，用于 dirty 判定
   const savedJsonRef = useRef<string | null>(null)
@@ -94,8 +122,6 @@ export default function PresetsPage() {
   const isNew = selected === null
 
   // ── 上传冲突 dialog 状态 + 命令式 resolver ──
-  // handleImportFile await 一个 Promise 直到用户在 dialog 里选了"覆盖/另存为/取消"。
-  // resolver 是个 ref 函数,dialog 的 3 个按钮各调一次 → resolve Promise + 清状态。
   const [conflict, setConflict] = useState<ConflictState | null>(null)
   const conflictResolveRef = useRef<((c: ConflictChoice) => void) | null>(null)
   const askConflict = (state: ConflictState): Promise<ConflictChoice> =>
@@ -111,14 +137,12 @@ export default function PresetsPage() {
   }
 
   // ── UI 状态 ──
-  const [pickerOpen, setPickerOpen] = useState(false)
-  const [pickerSearch, setPickerSearch] = useState('')
+  // editorOpen：prototype 把整套 schema 编辑收进「Edit config / New preset」模态。
+  const [editorOpen, setEditorOpen] = useState(false)
   const [tomlOpen, setTomlOpen] = useState(false)
   const [exportDialogOpen, setExportDialogOpen] = useState(false)
   const [showImportPathPicker, setShowImportPathPicker] = useState(false)
   const [advancedMode, toggleAdvancedMode] = useAdvancedMode()
-  const pickerAnchorRef = useRef<HTMLButtonElement | null>(null)
-  const pickerPopRef = useRef<HTMLDivElement | null>(null)
   const newNameInputRef = useRef<HTMLInputElement | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
 
@@ -136,20 +160,21 @@ export default function PresetsPage() {
   }, [t, toast])
 
   const refreshList = () => {
-    api.listPresets().then(setPresets).catch(() => setPresets([]))
+    api.listPresets().then((list) => {
+      setPresets(list)
+      // 拉每个 preset 的 config 填表格列（best-effort，失败列显示 —）。
+      list.forEach((p) => {
+        api.getPreset(p.name)
+          .then((c) => setConfigCache((m) => ({ ...m, [p.name]: c })))
+          .catch(() => {})
+      })
+    }).catch(() => setPresets([]))
   }
 
   // ── 选 preset 切换 ──
-  // 新建模式（selected=null）：用 schema 默认值预填表单,用户输名字 + 编辑后点保存。
-  // 导入 / 复制副本 现在都走"一键落盘 + 自动选中"路径,不再走"切到新建模式预填表单"
-  // 的中间态,所以这里不再有 draftSeed 分支。
-  // modelPathDefaults 在此处只读初值快照、不进 deps：异步晚到的情况由下面那个
-  // 带「用户没改过」guard 的 useEffect 覆盖，避免重入这里把用户编辑清掉。
   useEffect(() => {
     if (!selected) {
       if (schema) {
-        // 用 modelPathDefaults 覆盖 schema 里 4 字段的相对默认值，保证新建预设
-        // 表单里看到的是当前 Settings 算出的绝对路径，跟 fork 后实际落盘一致。
         const defaults = { ...defaultsFromSchema(schema), ...modelPathDefaults }
         setConfig(defaults)
         savedJsonRef.current = JSON.stringify(defaults)
@@ -185,15 +210,13 @@ export default function PresetsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected, schema, descriptions, t, toast])
 
-  // modelPathDefaults 异步拉取，可能晚于主 init useEffect 到达。新建模式下
-  // 用户没改过时（current JSON === saved JSON）就地覆盖 4 字段为绝对路径，
-  // 避免 UI 一开始显示相对默认、稍后才换成绝对的视觉跳变。
+  // modelPathDefaults 异步晚到时，新建模式下用户没改过就地覆盖 4 字段为绝对路径。
   useEffect(() => {
     if (selected !== null) return
     if (!schema || !config) return
     if (Object.keys(modelPathDefaults).length === 0) return
     const currentJson = JSON.stringify(config)
-    if (currentJson !== savedJsonRef.current) return  // 用户改过了，不要覆盖
+    if (currentJson !== savedJsonRef.current) return
     let needsUpdate = false
     for (const f of MODEL_PATH_FIELDS) {
       if (modelPathDefaults[f] && config[f] !== modelPathDefaults[f]) {
@@ -217,9 +240,16 @@ export default function PresetsPage() {
       setSelected(presets[0].name)
     } else if (presets.length === 0 && schema) {
       autoSelectedRef.current = true
-      // 列表为空 → 落到新建模式（schema 默认已经预填）
     }
   }, [presets, selected, schema])
+
+  // 编辑器开着时 Esc 关闭（dirty 时仍可关 —— 改动留在内存，跟切 preset 一致）。
+  useEffect(() => {
+    if (!editorOpen) return
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setEditorOpen(false) }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [editorOpen])
 
   // ── 派生 ──
   const dirty = useMemo(() => {
@@ -228,13 +258,7 @@ export default function PresetsPage() {
   }, [config])
   const hasAnyChange = dirty || descDirty
 
-  const filteredPresets = useMemo(
-    () => presets.filter((p) => !pickerSearch || p.name.toLowerCase().includes(pickerSearch.toLowerCase())),
-    [presets, pickerSearch],
-  )
-
-  // auto_sync_paths ON：预设里 4 模型字段灰显（fork 反正会覆盖，编了无意义）。
-  // OFF：可编辑，旁边挂「↺ 重置为全局默认」按钮把字段值刷成当前 Settings 算的绝对路径。
+  // auto_sync_paths ON：预设里 4 模型字段灰显。OFF：可编辑 + 重置按钮。
   const disabledFields = autoSyncPaths ? MODEL_PATH_FIELDS : []
   const disabledHints = useMemo(() => {
     const h: Record<string, React.ReactNode> = {}
@@ -285,34 +309,6 @@ export default function PresetsPage() {
     return out
   }, [autoSyncPaths, modelPathDefaults, config, t, MODEL_PATH_FIELDS])
 
-  // 右侧 SchemaSectionIndex 的 IntersectionObserver root + 跳转目标。
-  // 这里的 root 是整个内容滚动区，跟 Settings 页一致。
-  const scrollContainerRef = useRef<HTMLDivElement | null>(null)
-  const visibleGroups = useMemo(
-    () => (schema ? visibleSchemaGroups(schema, advancedMode) : []),
-    [schema, advancedMode],
-  )
-
-  // ── popover 关闭：点外面关 ──
-  useEffect(() => {
-    if (!pickerOpen) return
-    const onDocClick = (e: MouseEvent) => {
-      const t = e.target as Node
-      if (
-        pickerPopRef.current?.contains(t) ||
-        pickerAnchorRef.current?.contains(t)
-      ) return
-      setPickerOpen(false)
-    }
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setPickerOpen(false) }
-    document.addEventListener('mousedown', onDocClick)
-    document.addEventListener('keydown', onKey)
-    return () => {
-      document.removeEventListener('mousedown', onDocClick)
-      document.removeEventListener('keydown', onKey)
-    }
-  }, [pickerOpen])
-
   // ── 操作 ──
   const handleSave = async () => {
     const name = isNew ? newName.trim() : selected
@@ -337,6 +333,7 @@ export default function PresetsPage() {
         setDescriptions(rest); savePresetDescriptions(rest)
       }
       savedJsonRef.current = JSON.stringify(config)
+      setConfigCache((m) => ({ ...m, [name]: config }))
       setDescDirty(false)
       if (isNew) {
         setSelected(name)
@@ -346,14 +343,13 @@ export default function PresetsPage() {
       } else {
         toast(t('presets.saved'), 'success')
       }
+      setEditorOpen(false)
       refreshList()
     } catch (e) { toast(String(e), 'error') }
     finally { setBusy(false) }
   }
 
-  // "复制副本":Save-As 语义 —— 把当前内存里的 config(含未保存编辑)写到新名字下,
-  // refresh + 自动选中。原 preset 的 on-disk 内容不动;原 preset 的内存里"未保存编辑"
-  // 仍属未保存状态(用户切回原 preset 时按现有 dirty 检查处理)。
+  // "复制副本":Save-As 语义 —— 把当前 config 写到新名字下,refresh + 自动选中。
   const handleDuplicate = async () => {
     if (!config || busy) return
     const baseName = selected ?? 'preset'
@@ -363,10 +359,8 @@ export default function PresetsPage() {
       candidate = `${baseName}-copy-${i++}`
     }
     setBusy(true)
-    setPickerOpen(false)
     try {
       await api.savePreset(candidate, config)
-      // 同步描述(描述字段当前是本地存的,不走后端)
       if (descDraft) {
         const next = { ...descriptions, [candidate]: descDraft }
         setDescriptions(next); savePresetDescriptions(next)
@@ -378,18 +372,21 @@ export default function PresetsPage() {
     finally { setBusy(false) }
   }
 
+  // 「+ New preset」：进新建模式 + 打开编辑器（schema 默认值由 selected→null effect 预填）。
   const handleNew = () => {
     setSelected(null)
-    setPickerOpen(false)
+    setEditorOpen(true)
   }
 
   const handleDelete = async () => {
     if (!selected) return
     if (!(await confirm(t('presets.confirmDelete', { name: selected }), { tone: 'danger', okText: t('common.delete') }))) return
     setBusy(true)
-    api.deletePreset(selected).then(() => {
-      const { [selected]: _, ...rest } = descriptions
+    const target = selected
+    api.deletePreset(target).then(() => {
+      const { [target]: _, ...rest } = descriptions
       setDescriptions(rest); savePresetDescriptions(rest)
+      setConfigCache((m) => { const { [target]: _drop, ...keep } = m; return keep })
       setSelected(null)
       refreshList()
       toast(t('presets.deleted'), 'success')
@@ -404,7 +401,6 @@ export default function PresetsPage() {
       toast(t('presets.saveBeforeDownload'), 'info')
       return
     }
-    // server FileResponse 直发磁盘上的原 yaml，已设 Content-Disposition。
     const a = document.createElement('a')
     a.href = api.presetDownloadUrl(selected)
     a.download = `${selected}.yaml`
@@ -426,11 +422,7 @@ export default function PresetsPage() {
     }
   }
 
-  // 「导入」：上传 → 后端 yaml + pydantic 校验 + 直接落盘 + 返回 name。
-  // 不冲突 → refresh + setSelected(name),一步到位出现在 picker 并选中。
-  // 冲突(409)→ 弹 ImportConflictDialog 让用户选覆盖 / 另存为 / 取消;选定后
-  // PUT /api/presets/{name} 落盘,refresh + setSelected。
-  // 解析 / schema 校验失败 → toast。
+  // 「导入」：上传 / server path → 后端校验落盘 → refresh + 选中；409 冲突弹三选一。
   const handleImportedPreset = (name: string) => {
     refreshList()
     setSelected(name)
@@ -493,287 +485,222 @@ export default function PresetsPage() {
     || (isNew && !newName.trim())
     || (!isNew && !hasAnyChange)
 
+  const selectedConfig = selected ? configCache[selected] : undefined
+
   // ── 渲染 ──
   return (
-    <div className="fade-in flex flex-col h-full">
+    <div className="fade-in">
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".json,.yaml,.yml"
+        style={{ display: 'none' }}
+        onChange={(e) => {
+          const f = e.target.files?.[0]
+          if (f) void handleImportFile(f)
+          if (fileInputRef.current) fileInputRef.current.value = ''
+        }}
+      />
 
       <PageHeader
         title="Presets"
         eyebrow="Training configs"
         subtitle="Global preset pool. Fork configs to or from a version's private config."
-      />
-
-      {/* ── 单行 header：picker + 状态 + 全部操作 ──
-        Topbar 已经显示「预设」面包屑，这里不再重复 h1。把上一版的页面标题
-        和底部操作栏并成一行，picker 当做"当前编辑上下文"的标识，状态 +
-        所有动作（导入 / 复制 / 导出 / 删除 / 保存）右侧排齐。 */}
-      <div className="py-3 px-6 border-b border-subtle bg-canvas shrink-0 flex items-center gap-3.5 relative">
-        <button
-          ref={pickerAnchorRef}
-          onClick={() => { setPickerOpen((v) => !v); setPickerSearch('') }}
-          disabled={busy}
-          className={[
-            'flex items-center gap-3 min-w-[300px] pl-3.5 pr-3 py-2.5',
-            'rounded-md border transition-[border-color,background] duration-100',
-            pickerOpen
-              ? 'border-accent bg-accent-soft'
-              : 'border-dim bg-surface shadow-sm hover:border-bold',
-            busy ? 'cursor-default' : 'cursor-pointer',
-          ].join(' ')}
-          title={t('presets.switchTitle')}
-        >
-          <span className="text-[10px] uppercase tracking-[0.08em] text-fg-tertiary font-semibold">
-            {t('presets.label')}
-          </span>
-          <span className="font-mono text-md font-semibold text-fg-primary flex-1 text-left truncate">
-            {selected ?? (newName.trim() || t('presets.creating'))}
-          </span>
-          <span className="text-fg-tertiary text-md">▾</span>
-        </button>
-
-        {/* 状态指示 */}
-        <div className="flex items-center gap-2 min-w-0">
-          <span className={[
-            'inline-block w-2 h-2 rounded-full shrink-0',
-            hasAnyChange ? 'bg-warn' : isNew ? 'bg-accent' : 'bg-ok',
-          ].join(' ')} />
-          <span className="text-sm text-fg-secondary whitespace-nowrap">
-            {isNew ? t('presets.creating') : hasAnyChange ? t('presets.unsaved') : t('presets.savedStatus')}
-          </span>
-        </div>
-
-        <span style={{ flex: 1 }} />
-
-        {/* 全局动作 */}
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept=".json,.yaml,.yml"
-          style={{ display: 'none' }}
-          onChange={(e) => {
-            const f = e.target.files?.[0]
-            if (f) void handleImportFile(f)
-            if (fileInputRef.current) fileInputRef.current.value = ''
-          }}
-        />
-        <button onClick={onImportClick} disabled={busy} className="btn btn-ghost btn-sm">
-          {t('presets.importUpload')}
-        </button>
-        <button onClick={() => setShowImportPathPicker(true)} disabled={busy} className="btn btn-ghost btn-sm">
-          {t('presets.importPath')}
-        </button>
-
-        {/* 编辑模式下的预设级动作 */}
-        {!isNew && (
+        actions={
           <>
-            <span style={{ width: 1, height: 22, background: 'var(--border-subtle)' }} />
-            <button onClick={handleDuplicate} disabled={busy || !config} className="btn btn-ghost btn-sm">
-              {t('presets.duplicate')}
+            <button onClick={onImportClick} disabled={busy} className="btn btn-secondary btn-sm">
+              {t('presets.importUpload')}
             </button>
-            <button onClick={() => setExportDialogOpen(true)} disabled={busy || !config} className="btn btn-ghost btn-sm">
-              {t('presets.exportYaml')}
+            <button onClick={() => setShowImportPathPicker(true)} disabled={busy} className="btn btn-secondary btn-sm">
+              {t('presets.importPath')}
             </button>
-            <button onClick={handleDelete} disabled={busy} className="btn btn-ghost btn-sm" style={{ color: 'var(--err)' }}>
-              {t('common.delete')}
+            <button onClick={handleNew} disabled={busy} className="btn btn-primary btn-sm">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round"><path d="M12 5v14M5 12h14" /></svg>
+              <span>{t('presets.newPresetBtn')}</span>
             </button>
           </>
-        )}
+        }
+      />
 
-        {/* 主操作 */}
-        <button
-          onClick={handleSave}
-          disabled={saveDisabled}
-          className="btn btn-primary btn-sm inline-flex items-center justify-center"
-          style={{ minWidth: 0, paddingLeft: 12, paddingRight: 12 }}
-        >
-          {t('common.save')}
-        </button>
+      <div className="px-7 pb-7" style={{ paddingTop: 0 }}>
+        <div className="grid items-start gap-5" style={{ gridTemplateColumns: 'minmax(0, 1fr) 360px' }}>
 
-        {/* popover */}
-        {pickerOpen && (
-          <div
-            ref={pickerPopRef}
-            role="dialog"
-            aria-label={t('presets.switchPreset')}
-            style={{
-              position: 'absolute', top: 'calc(100% - 1px)', left: 24,
-              width: 480, maxHeight: 480, overflow: 'hidden',
-              borderRadius: 'var(--r-md)', border: '1px solid var(--border-subtle)',
-              background: 'var(--bg-surface)', boxShadow: 'var(--sh-lg)',
-              display: 'flex', flexDirection: 'column',
-              zIndex: 50,
-            }}
-          >
-              {/* search */}
-              <div style={{
-                padding: 10, borderBottom: '1px solid var(--border-subtle)',
-                display: 'flex', alignItems: 'center', gap: 8,
-              }}>
-                <span style={{ position: 'relative', flex: 1, display: 'inline-flex', alignItems: 'center' }}>
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                    strokeWidth="2" strokeLinecap="round"
-                    style={{ position: 'absolute', left: 8, color: 'var(--fg-tertiary)', pointerEvents: 'none' }}>
-                    <circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/>
-                  </svg>
-                  <input
-                    autoFocus
-                    className="input"
-                    placeholder={t('presets.filterPlaceholder')}
-                    value={pickerSearch}
-                    onChange={(e) => setPickerSearch(e.target.value)}
-                    style={{ width: '100%', paddingLeft: 28, fontSize: 'var(--t-sm)' }}
-                  />
-                </span>
-                <button
-                  onClick={refreshList}
-                  className="btn btn-ghost btn-sm"
-                  style={{ fontSize: 'var(--t-xs)' }}
-                  title={t('presets.refreshList')}
-                >{t('common.refresh')}</button>
-              </div>
-
-              {/* grid */}
-              <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 10 }}>
-                <div className="grid grid-cols-2 gap-2">
-                  {/* + 新建（永远第一格） */}
-                  <button
-                    onClick={handleNew}
-                    style={{
-                      borderRadius: 'var(--r-sm)',
-                      border: '1px dashed var(--border-default)',
-                      background: 'transparent',
-                      padding: '10px 12px',
-                      textAlign: 'left',
-                      cursor: 'pointer',
-                      color: 'var(--accent)',
-                      fontWeight: 600, fontSize: 'var(--t-sm)',
-                    }}
-                    onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.borderColor = 'var(--accent)'; (e.currentTarget as HTMLElement).style.background = 'var(--accent-soft)' }}
-                    onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.borderColor = 'var(--border-default)'; (e.currentTarget as HTMLElement).style.background = 'transparent' }}
-                  >
-                    {t('presets.newPreset')}
-                  </button>
-                  {filteredPresets.map((p) => {
-                    const active = p.name === selected
-                    return (
-                      <button
-                        key={p.name}
-                        onClick={() => { setSelected(p.name); setPickerOpen(false) }}
-                        style={{
-                          borderRadius: 'var(--r-sm)',
-                          border: active ? '1px solid var(--accent)' : '1px solid var(--border-subtle)',
-                          background: active ? 'var(--accent-soft)' : 'var(--bg-sunken)',
-                          padding: '8px 10px',
-                          textAlign: 'left',
-                          cursor: 'pointer',
-                        }}
-                        onMouseEnter={(e) => { if (!active) (e.currentTarget as HTMLElement).style.borderColor = 'var(--border-strong)' }}
-                        onMouseLeave={(e) => { if (!active) (e.currentTarget as HTMLElement).style.borderColor = 'var(--border-subtle)' }}
-                      >
-                        <div style={{
-                          fontSize: 'var(--t-sm)', fontFamily: 'var(--font-mono)',
-                          color: active ? 'var(--accent)' : 'var(--fg-primary)',
-                          fontWeight: 600,
-                          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                        }}>{p.name}</div>
-                        <div style={{
-                          fontSize: 'var(--t-xs)', color: 'var(--fg-tertiary)',
-                          marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                        }}>
-                          {descriptions[p.name] || '—'}
-                        </div>
-                      </button>
-                    )
-                  })}
-                </div>
-                {presets.length > 0 && filteredPresets.length === 0 && (
-                  <div style={{
-                    color: 'var(--fg-tertiary)', fontSize: 'var(--t-sm)',
-                    textAlign: 'center', padding: '16px 0',
-                  }}>
-                    {t('presets.noMatch', { search: pickerSearch })}
-                  </div>
-                )}
-              </div>
+          {/* ── 列表表格 ── */}
+          <div className="card overflow-hidden">
+            <div
+              className="caption"
+              style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1.4fr) minmax(0,1fr) 0.8fr 0.8fr minmax(0,1fr)', gap: 12, padding: '12px 20px', borderBottom: '1px solid var(--border-subtle)' }}
+            >
+              <span>{t('presets.colName')}</span>
+              <span>{t('presets.colOptimizer')}</span>
+              <span>{t('presets.colRank')}</span>
+              <span>{t('presets.colRes')}</span>
+              <span>{t('presets.colUpdated')}</span>
             </div>
-          )}
+
+            {presets.length === 0 ? (
+              <div style={{ padding: 40, textAlign: 'center', color: 'var(--fg-tertiary)', fontSize: 'var(--t-sm)' }}>
+                {t('presets.empty')}
+              </div>
+            ) : (
+              presets.map((p, i) => {
+                const active = p.name === selected
+                const c = configCache[p.name]
+                return (
+                  <button
+                    key={p.name}
+                    onClick={() => setSelected(p.name)}
+                    style={{
+                      display: 'grid',
+                      gridTemplateColumns: 'minmax(0,1.4fr) minmax(0,1fr) 0.8fr 0.8fr minmax(0,1fr)',
+                      gap: 12,
+                      padding: '15px 20px',
+                      width: '100%',
+                      textAlign: 'left',
+                      alignItems: 'center',
+                      border: 'none',
+                      borderBottom: i < presets.length - 1 ? '1px solid var(--border-subtle)' : 'none',
+                      background: active ? 'var(--accent-soft)' : 'transparent',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    <span className="mono" style={{ fontWeight: 600, fontSize: 'var(--t-sm)', color: active ? 'var(--accent)' : 'var(--fg-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.name}</span>
+                    <span className="mono" style={{ fontSize: 'var(--t-xs)', color: 'var(--fg-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{cfgOptimizer(c)}</span>
+                    <span className="mono" style={{ fontSize: 'var(--t-sm)' }}>{cfgRank(c)}</span>
+                    <span className="mono" style={{ fontSize: 'var(--t-sm)' }}>{cfgRes(c)}</span>
+                    <span style={{ fontSize: 'var(--t-xs)', color: 'var(--fg-tertiary)' }}>{fmtAgo(p.updated_at)}</span>
+                  </button>
+                )
+              })
+            )}
+          </div>
+
+          {/* ── 详情卡 ── */}
+          <div className="card" style={{ padding: 22, position: 'sticky', top: 0 }}>
+            {selected && config ? (
+              <>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
+                  <span className="mono" style={{ fontSize: 'var(--t-md)', fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{selected}</span>
+                </div>
+                {descriptions[selected] && (
+                  <p style={{ margin: '0 0 14px', fontSize: 'var(--t-sm)', color: 'var(--fg-secondary)' }}>{descriptions[selected]}</p>
+                )}
+                <div style={{ display: 'flex', flexDirection: 'column', marginTop: descriptions[selected] ? 0 : 12 }}>
+                  {([
+                    ['scope', 'global'],
+                    ['optimizer', cfgOptimizer(selectedConfig ?? config)],
+                    ['rank / alpha', `${cfgRank(selectedConfig ?? config)} / ${cfgAlpha(selectedConfig ?? config)}`],
+                    ['resolution', cfgRes(selectedConfig ?? config)],
+                    ['updated', fmtAgo(presets.find((p) => p.name === selected)?.updated_at ?? Date.now() / 1000)],
+                  ] as [string, string][]).map(([k, v], idx, arr) => (
+                    <div key={k} style={{ display: 'flex', justifyContent: 'space-between', padding: '10px 0', borderBottom: idx < arr.length - 1 ? '1px solid var(--border-subtle)' : 'none' }}>
+                      <span style={{ fontSize: 'var(--t-sm)', color: 'var(--fg-secondary)' }}>{k}</span>
+                      <span className="mono" style={{ fontSize: 'var(--t-sm)', fontWeight: 600 }}>{v}</span>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 18 }}>
+                  <button className="btn btn-secondary btn-sm" onClick={() => setEditorOpen(true)} disabled={busy || !config}>
+                    {t('presets.editConfig')}
+                  </button>
+                  <button className="btn btn-secondary btn-sm" onClick={handleDuplicate} disabled={busy || !config}>
+                    {t('presets.duplicate')}
+                  </button>
+                  <button className="btn btn-secondary btn-sm" onClick={() => setExportDialogOpen(true)} disabled={busy || !config}>
+                    {t('presets.exportYaml')}
+                  </button>
+                  <button className="btn btn-ghost btn-sm" onClick={handleDelete} disabled={busy} style={{ color: 'var(--err)' }}>
+                    {t('common.delete')}
+                  </button>
+                </div>
+              </>
+            ) : (
+              <div style={{ padding: '24px 4px', textAlign: 'center', color: 'var(--fg-tertiary)', fontSize: 'var(--t-sm)' }}>
+                {t('presets.selectHint')}
+              </div>
+            )}
+          </div>
+        </div>
       </div>
 
-      {/* ── content（scroll） ── */}
-      <div ref={scrollContainerRef} className="flex-1 min-h-0 overflow-auto p-4">
+      {/* ── 编辑器模态（New / Edit config） ── */}
+      {editorOpen && (
         <div
-          className="grid gap-10"
-          style={{ gridTemplateColumns: '3fr 1fr' }}
+          role="dialog"
+          aria-modal="true"
+          className="fixed inset-0 z-50 flex items-start justify-center"
+          style={{ background: 'rgba(23,24,26,0.42)', backdropFilter: 'blur(2px)', paddingTop: '6vh', paddingBottom: '6vh' }}
+          onMouseDown={(e) => { if (e.target === e.currentTarget) setEditorOpen(false) }}
         >
-        <div className="flex flex-col gap-3 min-w-0">
+          <div
+            className="card"
+            style={{ width: '92%', maxWidth: 760, maxHeight: '88vh', display: 'flex', flexDirection: 'column', boxShadow: 'var(--sh-xl)', overflow: 'hidden' }}
+          >
+            {/* header */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '18px 24px 16px', borderBottom: '1px solid var(--border-subtle)' }}>
+              <h2 style={{ margin: 0, fontSize: 'var(--t-xl)', fontWeight: 700 }}>
+                {isNew ? t('presets.newPresetBtn') : <>{t('presets.editPrefix')} · <span className="mono">{selected}</span></>}
+              </h2>
+              <span style={{ flex: 1 }} />
+              <span className="inline-flex items-center gap-0.5 bg-sunken rounded-md p-[3px] text-xs">
+                <button
+                  type="button"
+                  onClick={() => advancedMode && toggleAdvancedMode()}
+                  className={`border-none px-3 py-1 rounded-[calc(var(--r-md)-2px)] transition-all duration-100 cursor-pointer ${!advancedMode ? 'bg-surface text-fg-primary font-semibold shadow-sm' : 'bg-transparent text-fg-secondary font-medium hover:text-fg-primary'}`}
+                >
+                  {t('train.simpleMode')}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => !advancedMode && toggleAdvancedMode()}
+                  className={`border-none px-3 py-1 rounded-[calc(var(--r-md)-2px)] transition-all duration-100 cursor-pointer ${advancedMode ? 'bg-surface text-fg-primary font-semibold shadow-sm' : 'bg-transparent text-fg-secondary font-medium hover:text-fg-primary'}`}
+                >
+                  {t('train.advancedMode')}
+                </button>
+              </span>
+              <button onClick={() => setEditorOpen(false)} className="btn btn-ghost btn-sm" aria-label={t('common.cancel')}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M6 6l12 12M18 6 6 18" /></svg>
+              </button>
+            </div>
 
-          {/* 名称 / 描述 */}
-          <section className="rounded-md border border-subtle bg-surface px-3.5 py-2.5">
-            <div className="flex gap-2.5">
-              {isNew ? (
-                <label className="flex-1 flex flex-col gap-1">
-                  <span className="text-sm font-medium text-fg-secondary">{t('presets.presetName')}</span>
+            {/* scroll body */}
+            <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '18px 24px 22px', display: 'flex', flexDirection: 'column', gap: 16 }}>
+              {/* name / description */}
+              <div style={{ display: 'flex', gap: 12 }}>
+                {isNew ? (
+                  <label className="flex flex-col gap-1.5" style={{ flex: 1 }}>
+                    <span className="text-sm font-medium text-fg-secondary">{t('presets.presetName')}</span>
+                    <input
+                      ref={newNameInputRef}
+                      autoFocus
+                      className="input input-mono font-mono"
+                      placeholder="my-training-preset"
+                      value={newName}
+                      onChange={(e) => { setNewName(e.target.value); setNewNameError('') }}
+                      disabled={busy}
+                    />
+                    {newNameError && <span className="text-xs text-err">{newNameError}</span>}
+                  </label>
+                ) : (
+                  <label className="flex flex-col gap-1.5" style={{ flex: 1 }}>
+                    <span className="text-sm font-medium text-fg-secondary">{t('presets.nameReadonly')}</span>
+                    <div className="py-2 px-3 rounded-md border border-subtle bg-sunken font-mono text-sm text-fg-primary">{selected}</div>
+                  </label>
+                )}
+                <label className="flex flex-col gap-1.5" style={{ flex: 1.5 }}>
+                  <span className="text-sm font-medium text-fg-secondary">{t('presets.description')}</span>
                   <input
-                    ref={newNameInputRef}
-                    className="input input-mono font-mono"
-                    placeholder="my-training-preset"
-                    value={newName}
-                    onChange={(e) => { setNewName(e.target.value); setNewNameError('') }}
+                    className="input"
+                    placeholder={t('presets.descPlaceholder')}
+                    value={descDraft}
+                    onChange={(e) => { setDescDraft(e.target.value); setDescDirty(true) }}
                     disabled={busy}
                   />
-                  {newNameError && (
-                    <span className="text-xs text-err">{newNameError}</span>
-                  )}
                 </label>
-              ) : (
-                <label className="flex-1 flex flex-col gap-1">
-                  <span className="text-sm font-medium text-fg-secondary">{t('presets.nameReadonly')}</span>
-                  <div className="py-1.5 px-3 rounded-md border border-subtle bg-sunken font-mono text-sm text-fg-primary">{selected}</div>
-                </label>
-              )}
-              <label className="flex-[1.5] flex flex-col gap-1">
-                <span className="text-sm font-medium text-fg-secondary">{t('presets.description')}</span>
-                <input
-                  className="input"
-                  placeholder={t('presets.descPlaceholder')}
-                  value={descDraft}
-                  onChange={(e) => { setDescDraft(e.target.value); setDescDirty(true) }}
-                  disabled={busy}
-                />
-              </label>
-            </div>
-          </section>
-
-          {/* schema 表单 */}
-          {!schema || !config ? (
-            <div className="h-[200px] rounded-md border border-subtle bg-surface p-3.5">
-              <ConfigSkeleton variant="flat" label={t('presets.loadingConfig')} />
-            </div>
-          ) : (
-            <section className="rounded-md border border-subtle bg-surface px-3.5 py-2.5">
-              <div className="flex items-center gap-2 mb-2.5">
-                <span className="inline-block w-1.5 h-1.5 rounded-full bg-fg-tertiary shrink-0" />
-                <span className="caption uppercase tracking-[0.06em] text-xs">{t('presets.trainingParams')}</span>
-                <span className="flex-1" />
-                <div className="inline-flex items-center gap-0.5 bg-sunken rounded-md p-[3px] text-xs">
-                  <button
-                    type="button"
-                    onClick={() => advancedMode && toggleAdvancedMode()}
-                    className={`border-none px-3 py-1 rounded-[calc(var(--r-md)-2px)] transition-all duration-100 cursor-pointer ${!advancedMode ? 'bg-surface text-fg-primary font-semibold shadow-sm' : 'bg-transparent text-fg-secondary font-medium hover:text-fg-primary'}`}
-                  >
-                    {t('train.simpleMode')}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => !advancedMode && toggleAdvancedMode()}
-                    className={`border-none px-3 py-1 rounded-[calc(var(--r-md)-2px)] transition-all duration-100 cursor-pointer ${advancedMode ? 'bg-surface text-fg-primary font-semibold shadow-sm' : 'bg-transparent text-fg-secondary font-medium hover:text-fg-primary'}`}
-                  >
-                    {t('train.advancedMode')}
-                  </button>
-                </div>
               </div>
+
               {(droppedFields.length > 0 || defaultedFields.length > 0) && (
-                <div className="mb-3 rounded-md border border-warn bg-warn-soft px-3.5 py-2.5 text-xs text-warn space-y-1">
+                <div className="rounded-md border border-warn bg-warn-soft px-3.5 py-2.5 text-xs text-warn space-y-1">
                   <span className="font-semibold">{t('presets.compatNoticeTitle')}</span>
                   {droppedFields.length > 0 && (
                     <div>{t('presets.droppedFieldsBody')}<code className="ml-1 text-[11px] opacity-80">{droppedFields.join(', ')}</code></div>
@@ -783,69 +710,65 @@ export default function PresetsPage() {
                   )}
                 </div>
               )}
-              <SchemaForm
-                schema={schema}
-                values={config}
-                onChange={setConfig}
-                disabledFields={disabledFields}
-                disabledHints={disabledHints}
-                autoHints={autoHints}
-                fieldSuffixes={fieldSuffixes}
-                advancedMode={advancedMode}
-              />
-            </section>
-          )}
 
-          {/* TOML 预览（默认折叠） */}
-          {config && Object.keys(config).length > 0 && (
-            <section className={`rounded-md border border-subtle bg-surface ${tomlOpen ? 'px-3.5 py-2.5' : 'px-3.5 py-1.5'}`}>
-              <button
-                type="button"
-                onClick={() => setTomlOpen((v) => !v)}
-                className="w-full flex items-center gap-2 bg-transparent border-none p-0 cursor-pointer text-left"
-              >
-                <span className="inline-block w-1.5 h-1.5 rounded-full bg-info shrink-0" />
-                <span className="caption uppercase tracking-[0.06em] text-xs">{t('presets.tomlPreview')}</span>
-                <span className="text-[10px] text-fg-tertiary">
-                  {tomlOpen ? t('presets.tomlReadable') : t('presets.tomlCollapsed')}
-                </span>
-                <span className="flex-1" />
-                {tomlOpen && (
-                  <button
-                    className="btn btn-ghost btn-sm text-xs"
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      const toml = generateToml(config)
-                      navigator.clipboard.writeText(toml)
-                        .then(() => toast(t('presets.copied'), 'success'))
-                        .catch(() => toast(t('presets.copyFailed'), 'error'))
-                    }}
-                  >{t('common.copy')}</button>
-                )}
-                <span className="text-fg-tertiary">{tomlOpen ? '▾' : '▸'}</span>
-              </button>
-              {tomlOpen && (
-                <pre className="m-0 mt-2.5 p-3 bg-sunken rounded-sm font-mono text-xs text-fg-secondary leading-[1.7] whitespace-pre-wrap break-words max-h-80 overflow-auto">
-                  {generateToml(config)}
-                </pre>
+              {!schema || !config ? (
+                <div className="h-[200px]"><ConfigSkeleton variant="flat" label={t('presets.loadingConfig')} /></div>
+              ) : (
+                <SchemaForm
+                  schema={schema}
+                  values={config}
+                  onChange={setConfig}
+                  disabledFields={disabledFields}
+                  disabledHints={disabledHints}
+                  autoHints={autoHints}
+                  fieldSuffixes={fieldSuffixes}
+                  advancedMode={advancedMode}
+                />
               )}
-            </section>
-          )}
-        </div>
 
-        {/* 右侧锚点导航：跟 Settings 页一个套路，sticky 跟随滚动 */}
-        <aside className="hidden lg:block">
-          <div className="sticky top-0">
-            {schema && config && visibleGroups.length > 0 && (
-              <SchemaSectionIndex
-                groups={visibleGroups}
-                scrollContainer={scrollContainerRef}
-              />
-            )}
+              {/* TOML preview（折叠） */}
+              {config && Object.keys(config).length > 0 && (
+                <section className={`rounded-md border border-subtle bg-surface ${tomlOpen ? 'px-3.5 py-2.5' : 'px-3.5 py-1.5'}`}>
+                  <button
+                    type="button"
+                    onClick={() => setTomlOpen((v) => !v)}
+                    className="w-full flex items-center gap-2 bg-transparent border-none p-0 cursor-pointer text-left"
+                  >
+                    <span className="inline-block w-1.5 h-1.5 rounded-full bg-info shrink-0" />
+                    <span className="caption uppercase tracking-[0.06em] text-xs">{t('presets.tomlPreview')}</span>
+                    <span className="flex-1" />
+                    {tomlOpen && (
+                      <button
+                        className="btn btn-ghost btn-sm text-xs"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          navigator.clipboard.writeText(generateToml(config))
+                            .then(() => toast(t('presets.copied'), 'success'))
+                            .catch(() => toast(t('presets.copyFailed'), 'error'))
+                        }}
+                      >{t('common.copy')}</button>
+                    )}
+                    <span className="text-fg-tertiary">{tomlOpen ? '▾' : '▸'}</span>
+                  </button>
+                  {tomlOpen && (
+                    <pre className="m-0 mt-2.5 p-3 bg-sunken rounded-sm font-mono text-xs text-fg-secondary leading-[1.7] whitespace-pre-wrap break-words max-h-80 overflow-auto">
+                      {generateToml(config)}
+                    </pre>
+                  )}
+                </section>
+              )}
+            </div>
+
+            {/* footer */}
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, padding: '14px 24px', borderTop: '1px solid var(--border-subtle)' }}>
+              <button className="btn btn-secondary" onClick={() => setEditorOpen(false)}>{t('common.cancel')}</button>
+              <button className="btn btn-primary" onClick={handleSave} disabled={saveDisabled}>
+                {isNew ? t('common.create') : t('common.save')}
+              </button>
+            </div>
           </div>
-        </aside>
         </div>
-      </div>
+      )}
 
       {exportDialogOpen && (
         <PresetExportDialog
@@ -894,7 +817,7 @@ function PresetExportDialog({
     <div
       role="dialog"
       aria-modal="true"
-      className="fixed inset-0 z-40 flex items-center justify-center bg-black/50"
+      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50"
       onMouseDown={(e) => { if (e.target === e.currentTarget) onCancel() }}
     >
       <div className="bg-elevated border border-subtle rounded-[var(--r-card)] w-[90%] max-w-[420px] p-6 flex flex-col gap-4 shadow-xl">
@@ -918,13 +841,7 @@ function PresetExportDialog({
   )
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// ImportConflictDialog —— 上传 preset 名字撞库时弹三选一
-//
-// 沿用 NewVersionDialog (Layout.tsx) 的内联声明式风格 —— Dialog.tsx 的 confirm/
-// prompt/alert 三件套不够装 "3 个动作 + 一个 input" 这种形态。命令式 await 走
-// 父组件的 askConflict / resolveConflict resolver pattern,call site 仍是
-// `const choice = await askConflict(...)`。
+// ImportConflictDialog —— 上传 preset 名字撞库时弹三选一（覆盖 / 另存为 / 取消）。
 function ImportConflictDialog({
   suggestedName,
   existingNames,
@@ -936,7 +853,6 @@ function ImportConflictDialog({
 }) {
   const { t } = useTranslation()
   const [newName, setNewName] = useState(() => {
-    // 默认 `{suggested}-2`,如果还撞继续 -3 / -4…
     let i = 2
     let cand = `${suggestedName}-${i}`
     while (existingNames.includes(cand)) cand = `${suggestedName}-${++i}`
@@ -968,7 +884,7 @@ function ImportConflictDialog({
     <div
       role="dialog"
       aria-modal="true"
-      className="fixed inset-0 z-40 flex items-center justify-center bg-black/50"
+      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50"
       onMouseDown={(e) => { if (e.target === e.currentTarget) onDecide({ kind: 'cancel' }) }}
     >
       <form
@@ -992,11 +908,7 @@ function ImportConflictDialog({
           {error && <span className="text-xs text-err">{error}</span>}
         </label>
         <div className="flex gap-2 justify-end mt-1">
-          <button
-            type="button"
-            onClick={() => onDecide({ kind: 'cancel' })}
-            className="btn btn-secondary"
-          >
+          <button type="button" onClick={() => onDecide({ kind: 'cancel' })} className="btn btn-secondary">
             {t('common.cancel')}
           </button>
           <button
@@ -1015,4 +927,3 @@ function ImportConflictDialog({
     </div>
   )
 }
-

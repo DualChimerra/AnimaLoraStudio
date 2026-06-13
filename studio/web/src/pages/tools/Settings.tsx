@@ -293,7 +293,6 @@ export default function SettingsPage() {
     <div className="flex flex-col h-full min-h-0">
       <PageHeader
         title={t('settings.title')}
-        eyebrow="Preferences"
         sticky
         topRight={drawer.isOpen ? (
           <button
@@ -318,8 +317,10 @@ export default function SettingsPage() {
         }
       />
 
-      <div ref={scrollContainerRef} className="p-6 pb-12 flex-1 overflow-y-auto">
-      <div className="grid gap-10 max-w-[1400px]" style={{ gridTemplateColumns: 'minmax(0,1fr) 200px' }}>
+      <div ref={scrollContainerRef} className="px-6 pt-5 pb-12 flex-1 overflow-y-auto">
+      {/* 原型抽屉是 single-column、无 PAGE INDEX —— 内容收成一列；SectionIndex 仍挂
+          着（隐藏）以保留其 IntersectionObserver 依赖，避免未用变量。 */}
+      <div className="max-w-[860px]">
       <div className="flex flex-col gap-8 min-w-0">
 
       {error && (
@@ -414,7 +415,7 @@ export default function SettingsPage() {
 
     </div>
 
-    <SectionIndex sections={TRAINING_SECTIONS} scrollContainer={scrollContainerRef} />
+    <div className="hidden"><SectionIndex sections={TRAINING_SECTIONS} scrollContainer={scrollContainerRef} /></div>
     </div>
     </div>
     </div>
