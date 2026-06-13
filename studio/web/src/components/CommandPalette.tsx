@@ -1,15 +1,18 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useNavigate } from 'react-router-dom'
 import { api, type CaptionEntry, type PresetSummary, type ProjectSummary } from '../api/client'
 import { useProjectCtx } from '../context/ProjectContext'
 import { useSettingsDrawer } from '../lib/SettingsDrawer'
 
+type IconKey = 'folder' | 'queue' | 'preset' | 'monitor' | 'cog' | 'image' | 'step' | 'tag'
+
 interface Item {
   id: string
   label: string
   sub?: string
   group: string
+  icon: IconKey
   /** 路由跳转。跟 action 二选一。 */
   path?: string
   /** 自定义动作（如打开抽屉）。优先于 path。 */
@@ -17,32 +20,35 @@ interface Item {
 }
 
 const SEARCH_ICON = (
-  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
     <circle cx="11" cy="11" r="7" /><path d="m21 21-4.3-4.3" />
   </svg>
 )
 
-const ENTER_ICON = (
-  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <polyline points="9 10 4 15 9 20" /><path d="M20 4v7a4 4 0 0 1-4 4H4" />
+const CHEVRON_ICON = (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M9 6l6 6-6 6" />
   </svg>
 )
 
-const TAG_ICON = (
-  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M12 2H2v10l9.29 9.29a1 1 0 0 0 1.41 0l7.3-7.3a1 1 0 0 0 0-1.41L12 2z" />
-    <path d="M7 7h.01" />
-  </svg>
-)
+/** 每个结果左侧的小图标（prototype CommandPalette：icon + label + sub + chevron）。 */
+const ITEM_ICONS: Record<IconKey, React.ReactNode> = {
+  folder:  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>,
+  queue:   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><path d="M4 6h16M4 12h10M4 18h16"/><circle cx="18" cy="12" r="2" fill="currentColor"/></svg>,
+  preset:  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><line x1="6" y1="4" x2="6" y2="20"/><line x1="12" y1="4" x2="12" y2="20"/><line x1="18" y1="4" x2="18" y2="20"/><circle cx="6" cy="9" r="2" fill="var(--bg-surface)"/><circle cx="12" cy="15" r="2" fill="var(--bg-surface)"/><circle cx="18" cy="7" r="2" fill="var(--bg-surface)"/></svg>,
+  monitor: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><path d="M3 17l4-6 4 3 5-9 5 7"/></svg>,
+  cog:     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>,
+  image:   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="1.6" fill="currentColor"/><path d="m21 15-5-5L5 21"/></svg>,
+  step:    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9 12h6"/></svg>,
+  tag:     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2H2v10l9.29 9.29a1 1 0 0 0 1.41 0l7.3-7.3a1 1 0 0 0 0-1.41L12 2z"/><path d="M7 7h.01"/></svg>,
+}
 
 interface Props {
   open: boolean
   onClose: () => void
-  /** 锚点元素，面板将定位在其下方右对齐 */
-  anchorEl?: HTMLElement | null
 }
 
-export default function CommandPalette({ open, onClose, anchorEl }: Props) {
+export default function CommandPalette({ open, onClose }: Props) {
   const { t } = useTranslation()
   const navigate = useNavigate()
   const ctx = useProjectCtx()
@@ -61,25 +67,6 @@ export default function CommandPalette({ open, onClose, anchorEl }: Props) {
   const [captions, setCaptions] = useState<CaptionEntry[]>([])
   const [captionsCacheKey, setCaptionsCacheKey] = useState<string | null>(null)
   const [captionsLoading, setCaptionsLoading] = useState(false)
-
-  const [panelStyle, setPanelStyle] = useState<React.CSSProperties>({
-    position: 'fixed', top: 56, right: 20, width: 520,
-  })
-
-  useLayoutEffect(() => {
-    if (!open) return
-    if (anchorEl) {
-      const r = anchorEl.getBoundingClientRect()
-      setPanelStyle({
-        position: 'fixed',
-        top: r.bottom + 4,
-        right: window.innerWidth - r.right,
-        width: Math.max(520, r.width + 200),
-      })
-    } else {
-      setPanelStyle({ position: 'fixed', top: 56, right: 20, width: 520 })
-    }
-  }, [open, anchorEl])
 
   useEffect(() => {
     if (open) {
@@ -140,11 +127,12 @@ export default function CommandPalette({ open, onClose, anchorEl }: Props) {
   const allItems = useMemo<Item[]>(() => {
     const items: Item[] = []
 
-    items.push({ id: 'home',     label: t('commandPalette.home'),     sub: t('commandPalette.homeSub'),     group: t('commandPalette.pages'), path: '/' })
-    items.push({ id: 'queue',    label: t('nav.queue'),               sub: t('commandPalette.queueSub'),    group: t('commandPalette.pages'), path: '/queue' })
-    items.push({ id: 'presets',  label: t('nav.presets'),             sub: t('commandPalette.presetsSub'), group: t('commandPalette.pages'), path: '/tools/presets' })
-    items.push({ id: 'monitor',  label: t('nav.monitor'),             sub: t('commandPalette.monitorSub'), group: t('commandPalette.pages'), path: '/tools/monitor' })
-    items.push({ id: 'settings', label: t('nav.settings'),            sub: t('commandPalette.settingsSub'), group: t('commandPalette.pages'), action: () => settingsDrawer.open() })
+    items.push({ id: 'home',     label: t('commandPalette.home'),     sub: t('commandPalette.homeSub'),     group: t('commandPalette.pages'), icon: 'folder',  path: '/' })
+    items.push({ id: 'queue',    label: t('nav.queue'),               sub: t('commandPalette.queueSub'),    group: t('commandPalette.pages'), icon: 'queue',   path: '/queue' })
+    items.push({ id: 'generate', label: t('nav.generate'),            sub: t('commandPalette.generateSub'), group: t('commandPalette.pages'), icon: 'image',   path: '/tools/generate' })
+    items.push({ id: 'presets',  label: t('nav.presets'),             sub: t('commandPalette.presetsSub'), group: t('commandPalette.pages'), icon: 'preset',  path: '/tools/presets' })
+    items.push({ id: 'monitor',  label: t('nav.monitor'),             sub: t('commandPalette.monitorSub'), group: t('commandPalette.pages'), icon: 'monitor', path: '/tools/monitor' })
+    items.push({ id: 'settings', label: t('nav.settings'),            sub: t('commandPalette.settingsSub'), group: t('commandPalette.pages'), icon: 'cog',     action: () => settingsDrawer.open() })
 
     for (const p of presets) {
       items.push({
@@ -152,6 +140,7 @@ export default function CommandPalette({ open, onClose, anchorEl }: Props) {
         label: p.name,
         sub: t('commandPalette.presetItem'),
         group: t('commandPalette.presets'),
+        icon: 'preset',
         path: '/tools/presets',
       })
     }
@@ -162,6 +151,7 @@ export default function CommandPalette({ open, onClose, anchorEl }: Props) {
         label: p.title || `#${p.id}`,
         sub: p.slug ? `/${p.slug}` : t('commandPalette.projectItem', { id: p.id }),
         group: t('commandPalette.projects'),
+        icon: 'folder',
         path: `/projects/${p.id}`,
       })
     }
@@ -170,14 +160,14 @@ export default function CommandPalette({ open, onClose, anchorEl }: Props) {
       const cpid = ctx.project.id
       const cvid = ctx.activeVersion?.id
       const group = t('commandPalette.currentProject')
-      items.push({ id: `overview:${cpid}`, label: t('nav.overview'), sub: ctx.project.title, group, path: `/projects/${cpid}` })
-      items.push({ id: `download:${cpid}`, label: t('nav.download'), sub: ctx.project.title, group, path: `/projects/${cpid}/download` })
+      items.push({ id: `overview:${cpid}`, label: t('nav.overview'), sub: ctx.project.title, group, icon: 'folder', path: `/projects/${cpid}` })
+      items.push({ id: `download:${cpid}`, label: t('nav.download'), sub: ctx.project.title, group, icon: 'step', path: `/projects/${cpid}/download` })
       if (cvid) {
         const base = `/projects/${cpid}/v/${cvid}`
-        items.push({ id: `curate:${cpid}`, label: t('nav.curate'),   sub: ctx.project.title, group, path: `${base}/curate` })
-        items.push({ id: `edit:${cpid}`,   label: t('nav.tagEdit'),  sub: ctx.project.title, group, path: `${base}/edit` })
-        items.push({ id: `reg:${cpid}`,    label: t('nav.reg'),      sub: ctx.project.title, group, path: `${base}/reg` })
-        items.push({ id: `train:${cpid}`,  label: t('nav.train'),    sub: ctx.project.title, group, path: `${base}/train` })
+        items.push({ id: `curate:${cpid}`, label: t('nav.curate'),   sub: ctx.project.title, group, icon: 'step', path: `${base}/curate` })
+        items.push({ id: `edit:${cpid}`,   label: t('nav.tagEdit'),  sub: ctx.project.title, group, icon: 'step', path: `${base}/edit` })
+        items.push({ id: `reg:${cpid}`,    label: t('nav.reg'),      sub: ctx.project.title, group, icon: 'step', path: `${base}/reg` })
+        items.push({ id: `train:${cpid}`,  label: t('nav.train'),    sub: ctx.project.title, group, icon: 'step', path: `${base}/train` })
       }
     }
 
@@ -213,11 +203,12 @@ export default function CommandPalette({ open, onClose, anchorEl }: Props) {
     return Array.from(tagCounts.entries())
       .sort((a, b) => b[1] - a[1])
       .slice(0, 12)
-      .map(([tag, count]) => ({
+      .map(([tag, count]): Item => ({
         id: `tag:${tag}`,
         label: tag,
         sub: t('commandPalette.imageCount', { n: count }),
         group: t('commandPalette.tags'),
+        icon: 'tag',
         path: `/projects/${cpid}/v/${cvid}/edit`,
       }))
   }, [captions, queryEnoughForTags, query, ctx, t])
@@ -273,24 +264,22 @@ export default function CommandPalette({ open, onClose, anchorEl }: Props) {
   if (!open) return null
 
   return (
-    <>
-      <div className="fixed inset-0 z-40" onClick={onClose} />
-
+    <div
+      className="fixed inset-0 z-[80] flex justify-center px-4"
+      style={{ paddingTop: '12vh', background: 'rgba(23,24,26,0.42)', backdropFilter: 'blur(2px)' }}
+      onMouseDown={(e) => { if (e.target === e.currentTarget) onClose() }}
+    >
       <div
-        className="z-50 rounded-lg border border-subtle bg-overlay shadow-xl flex flex-col overflow-hidden"
-        style={{
-          ...panelStyle,
-          maxHeight: 'min(60vh, 520px)',
-          maxWidth: 'calc(100vw - 40px)',
-        }}
-        onClick={(e) => e.stopPropagation()}
+        className="card w-full max-w-[560px] h-fit overflow-hidden flex flex-col"
+        style={{ boxShadow: 'var(--sh-xl)', maxHeight: 'min(70vh, 560px)' }}
+        onMouseDown={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center gap-2.5 px-4 py-3 border-b border-subtle">
+        <div className="flex items-center gap-2.5 px-[18px] py-3.5 border-b border-subtle">
           <span className="text-fg-tertiary">{SEARCH_ICON}</span>
           <input
             ref={inputRef}
             type="text"
-            className="flex-1 bg-transparent border-none outline-none text-sm text-fg-primary placeholder:text-fg-tertiary"
+            className="flex-1 bg-transparent border-none outline-none text-md text-fg-primary placeholder:text-fg-disabled"
             placeholder={t('commandPalette.placeholder')}
             value={query}
             onChange={(e) => { setQuery(e.target.value); setActiveIdx(0) }}
@@ -302,14 +291,13 @@ export default function CommandPalette({ open, onClose, anchorEl }: Props) {
           <kbd className="kbd">esc</kbd>
         </div>
 
-        <div ref={listRef} className="flex-1 overflow-y-auto p-1.5">
+        <div ref={listRef} className="flex-1 overflow-y-auto p-2">
           {filtered.length === 0 ? (
-            <div className="text-sm text-fg-tertiary text-center py-8">{t('commandPalette.noResults')}</div>
+            <div className="text-sm text-fg-tertiary text-center py-6">{t('commandPalette.noResults')}</div>
           ) : (
             [...grouped.entries()].map(([group, items]) => (
               <div key={group} className="mb-1">
-                <div className="flex items-center gap-1.5 px-3 py-1.5">
-                  {group === t('commandPalette.tags') && <span className="text-fg-tertiary">{TAG_ICON}</span>}
+                <div className="px-3 py-1.5">
                   <span className="text-2xs text-fg-tertiary font-semibold uppercase tracking-wider">
                     {group}
                   </span>
@@ -322,21 +310,23 @@ export default function CommandPalette({ open, onClose, anchorEl }: Props) {
                       key={item.id}
                       data-palette-idx={idx}
                       onClick={() => select(item)}
-                      className={`w-full flex items-center gap-3 px-3 py-2 rounded-sm text-left border-none cursor-pointer transition-colors ${
-                        isActive ? 'bg-accent-soft text-accent' : 'bg-transparent text-fg-primary hover:bg-surface'
+                      onMouseEnter={() => setActiveIdx(idx)}
+                      className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-md text-left border-none cursor-pointer transition-colors ${
+                        isActive ? 'bg-overlay' : 'bg-transparent hover:bg-overlay'
                       }`}
                     >
-                      <span className="text-sm flex-1 overflow-hidden text-ellipsis whitespace-nowrap">
-                        {item.label}
-                      </span>
-                      {item.sub && (
-                        <span className={`text-xs overflow-hidden text-ellipsis whitespace-nowrap max-w-[160px] ${
-                          isActive ? 'text-accent/70' : 'text-fg-tertiary'
-                        }`}>
-                          {item.sub}
+                      <span className="text-fg-tertiary shrink-0 grid place-items-center w-4">{ITEM_ICONS[item.icon]}</span>
+                      <span className="flex-1 min-w-0 flex items-baseline gap-2">
+                        <span className="text-sm font-semibold text-fg-primary overflow-hidden text-ellipsis whitespace-nowrap shrink-0 max-w-[55%]">
+                          {item.label}
                         </span>
-                      )}
-                      {isActive && <span className="text-fg-tertiary shrink-0">{ENTER_ICON}</span>}
+                        {item.sub && (
+                          <span className="text-xs text-fg-tertiary overflow-hidden text-ellipsis whitespace-nowrap">
+                            {item.sub}
+                          </span>
+                        )}
+                      </span>
+                      <span className="text-fg-tertiary shrink-0">{CHEVRON_ICON}</span>
                     </button>
                   )
                 })}
@@ -345,7 +335,7 @@ export default function CommandPalette({ open, onClose, anchorEl }: Props) {
           )}
         </div>
 
-        <div className="flex items-center gap-4 px-4 py-2 border-t border-subtle text-2xs text-fg-tertiary">
+        <div className="flex items-center gap-4 px-[18px] py-2 border-t border-subtle text-2xs text-fg-tertiary">
           <span className="flex items-center gap-1"><kbd className="kbd">↑↓</kbd> {t('commandPalette.navigate')}</span>
           <span className="flex items-center gap-1"><kbd className="kbd">enter</kbd> {t('commandPalette.select')}</span>
           <span className="flex items-center gap-1"><kbd className="kbd">esc</kbd> {t('commandPalette.close')}</span>
@@ -354,6 +344,6 @@ export default function CommandPalette({ open, onClose, anchorEl }: Props) {
           )}
         </div>
       </div>
-    </>
+    </div>
   )
 }

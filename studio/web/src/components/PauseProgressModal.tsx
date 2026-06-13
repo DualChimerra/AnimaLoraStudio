@@ -133,7 +133,7 @@ export function PauseProgressModal({ taskId, taskName, onClose }: PauseProgressM
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-md"
       data-testid="pause-progress-modal"
     >
-      <div className="w-[90%] max-w-[520px] flex flex-col gap-6 p-7 bg-elevated border border-dim rounded-lg shadow-xl">
+      <div className="w-[90%] max-w-[520px] flex flex-col gap-6 p-7 bg-elevated border border-subtle rounded-[var(--r-card)] shadow-xl">
         <h2
           id="pause-progress-title"
           className="m-0 text-lg font-semibold text-fg-primary"

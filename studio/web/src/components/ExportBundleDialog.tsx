@@ -44,7 +44,7 @@ export default function ExportBundleDialog({ onConfirm, onCancel }: Props) {
     >
       <form
         onSubmit={handleSubmit}
-        className="bg-elevated border border-dim rounded-lg w-[90%] max-w-[420px] p-6 flex flex-col gap-5 shadow-xl"
+        className="bg-elevated border border-subtle rounded-[var(--r-card)] w-[90%] max-w-[420px] p-6 flex flex-col gap-5 shadow-xl"
       >
         <div>
           <h2 className="m-0 text-lg font-semibold text-fg-primary">

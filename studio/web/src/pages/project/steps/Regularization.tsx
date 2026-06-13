@@ -665,7 +665,7 @@ function SourceSegmented({
   return (
     <div className="mb-4">
       <div
-        className="inline-flex p-0.5 gap-0.5 rounded-md border border-dim bg-sunken"
+        className="inline-flex p-[3px] gap-0.5 rounded-md bg-sunken"
       >
         <SourceSegBtn
           active={source === 'ai'}
@@ -701,10 +701,10 @@ function SourceSegBtn({
       type="button"
       onClick={onClick}
       className={
-        'inline-flex items-center gap-1.5 px-4 py-1.5 rounded text-sm font-medium border-0 cursor-pointer whitespace-nowrap transition-colors ' +
+        'inline-flex items-center gap-1.5 px-4 py-1.5 rounded-[calc(var(--r-md)-2px)] text-sm border-0 cursor-pointer whitespace-nowrap transition-all duration-100 ' +
         (active
-          ? 'bg-accent text-white'
-          : 'bg-transparent text-fg-secondary hover:text-fg-primary')
+          ? 'bg-surface text-fg-primary font-semibold shadow-sm'
+          : 'bg-transparent text-fg-secondary font-medium hover:text-fg-primary')
       }
     >
       <span>{label}</span>
@@ -1642,10 +1642,10 @@ function RegFolderTab({
       type="button"
       onClick={onClick}
       className={
-        'px-2 py-0.5 rounded-full text-xs font-medium transition-colors ' +
+        'px-2 py-0.5 rounded-full text-xs transition-colors ' +
         (active
-          ? 'bg-accent text-white'
-          : 'bg-overlay text-fg-secondary hover:bg-accent-soft')
+          ? 'bg-accent-soft text-accent font-semibold'
+          : 'bg-overlay text-fg-secondary font-medium hover:text-fg-primary')
       }
     >
       <span className="font-mono">{label}</span>

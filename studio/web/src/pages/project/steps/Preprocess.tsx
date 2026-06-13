@@ -715,10 +715,10 @@ function ImagesPanel({
     <button
       onClick={() => setFilter(key)}
       className={
-        'px-2 py-0.5 rounded-full text-xs font-medium transition-colors ' +
+        'px-2 py-0.5 rounded-full text-xs transition-colors ' +
         (filter === key
-          ? 'bg-accent text-white'
-          : 'bg-overlay text-fg-secondary hover:bg-accent-soft')
+          ? 'bg-accent-soft text-accent font-semibold'
+          : 'bg-overlay text-fg-secondary font-medium hover:text-fg-primary')
       }
     >
       {label} {count}

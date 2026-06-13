@@ -467,7 +467,7 @@ export default function QueuePage() {
                 >
                   <div
                     className="px-[22px] py-4 grid gap-4 items-center"
-                    style={{ gridTemplateColumns: '60px 1fr 110px 1fr 160px' }}
+                    style={{ gridTemplateColumns: '64px minmax(0,1fr) 120px minmax(0,1.1fr) 170px' }}
                   >
                     <span className={`font-mono text-sm ${isRunning ? 'text-accent font-semibold' : 'text-fg-tertiary font-normal'}`}>
                       #{task.id}

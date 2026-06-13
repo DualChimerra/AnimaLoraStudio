@@ -223,20 +223,26 @@ export default function Topbar() {
         {runningTask && (
           <button
             onClick={() => navigate(`/queue/${runningTask.id}`)}
-            className="flex items-center gap-2 px-3 py-[5px] rounded-md border border-warn bg-warn-soft cursor-pointer hover:bg-warn/10 transition-colors shrink-0 max-w-xs"
+            className="flex items-center gap-2 px-3 py-[5px] rounded-md border border-dim bg-surface cursor-pointer hover:border-bold transition-colors shrink-0 max-w-[340px]"
             title={t('topbar.taskId', { id: runningTask.id })}
           >
-            <span className="w-1.5 h-1.5 rounded-full bg-warn animate-pulse shrink-0" />
-            <span className="text-xs font-mono text-warn overflow-hidden text-ellipsis whitespace-nowrap">
-              {t('topbar.trainingCapsule', { label: taskLabel, suffix: progressSuffix })}
+            <span className="w-[7px] h-[7px] rounded-full bg-fg-tertiary animate-pulse shrink-0" />
+            <span className="text-sm font-semibold text-fg-secondary whitespace-nowrap">{t('topbar.trainingLabel')}</span>
+            <span className="text-xs font-mono text-fg-tertiary overflow-hidden text-ellipsis whitespace-nowrap">
+              {taskLabel}
             </span>
+            {progressSuffix && (
+              <span className="text-xs font-mono text-fg-tertiary shrink-0">
+                {progressSuffix.replace(/^ · /, '')}
+              </span>
+            )}
           </button>
         )}
 
         {!runningTask && pendingCount > 0 && (
           <button
             onClick={() => navigate('/queue')}
-            className="flex items-center gap-1.5 px-2.5 py-[5px] rounded-md text-xs font-mono text-warn bg-warn-soft border border-warn cursor-pointer hover:bg-warn/10 transition-colors shrink-0"
+            className="flex items-center gap-1.5 px-3 py-1 rounded-[var(--r-pill)] text-xs font-mono text-accent bg-accent-soft border border-transparent cursor-pointer hover:bg-[var(--accent-veil)] transition-colors shrink-0"
           >
             {QueueIcon}
             <span>{t('topbar.pendingCount', { n: pendingCount })}</span>
@@ -257,7 +263,6 @@ export default function Topbar() {
       <CommandPalette
         open={paletteOpen}
         onClose={() => setPaletteOpen(false)}
-        anchorEl={searchBtnRef.current}
       />
     </>
   )

@@ -2,45 +2,27 @@ import { useEffect, useState } from 'react'
 import { api, type SystemStats as SystemStatsData } from '../api/client'
 import { useEventStream } from '../lib/useEventStream'
 
-function toneClasses(pct: number): { text: string; bg: string } {
-  if (pct >= 90) return { text: 'text-err', bg: 'bg-err-soft' }
-  if (pct >= 70) return { text: 'text-warn', bg: 'bg-warn-soft' }
-  return { text: 'text-fg-primary', bg: 'bg-accent-soft' }
+function barColor(pct: number): string {
+  if (pct > 90) return 'var(--err)'
+  if (pct > 70) return 'var(--warn)'
+  return 'var(--ok)'
 }
 
-function fmtGb(used: number, total: number): string {
-  return `${used.toFixed(1)}/${Math.round(total)}G`
-}
-
-interface PillProps {
-  label: string
-  value: string
-  pct: number
-  tooltip: string
-}
-
-/** 进度条胶囊 — 整个 pill 背景按占用百分比填色 (>=70% warn, >=90% err)，
- *  高度与 topbar 上其他元素 (搜索 icon 32px) 一致。
- *
- *  `min-w-[96px]` + `justify-between` 让 4 个 pill 视觉等宽：CPU/GPU 只占 3-4
- *  字符（"CPU 13%"），MEM/VRAM 占 11 字符（"MEM 35.6/63G"），auto-width 下
- *  宽度差近 1 倍。固定下界 96px (够 "VRAM 80.0/128G" 之类最长情况)，label 左
- *  value 右两端对齐，bg 填充自然居于中间。 */
-function Pill({ label, value, pct, tooltip }: PillProps) {
-  const tone = toneClasses(pct)
+/** redesign 原型 SystemStats：一个 sunken pill，CPU/GPU/MEM 各为
+ *  caption 标签 + 36px 迷你进度条 + 百分比；VRAM 用文本 used/totalG。
+ *  (prototype shell.jsx → SystemStats) */
+function MeterItem({ label, pct, tooltip }: { label: string; pct: number; tooltip: string }) {
   const clamped = Math.min(100, Math.max(0, pct))
   return (
-    <div
-      className="relative flex items-center justify-between gap-1.5 h-8 min-w-[96px] px-2 rounded-md border border-dim bg-surface overflow-hidden shrink-0"
-      title={tooltip}
-    >
-      <div
-        aria-hidden
-        className={`absolute inset-y-0 left-0 ${tone.bg} transition-[width] duration-500 ease-out`}
-        style={{ width: `${clamped}%` }}
-      />
-      <span className="relative z-10 text-2xs uppercase tracking-wider text-fg-tertiary">{label}</span>
-      <span className={`relative z-10 font-mono text-xs tabular-nums ${tone.text}`}>{value}</span>
+    <div className="flex items-center gap-1.5" title={tooltip}>
+      <span className="caption text-2xs">{label}</span>
+      <div className="w-9 h-[5px] rounded-full bg-overlay overflow-hidden shrink-0">
+        <div
+          className="h-full rounded-full transition-[width] duration-500 ease-out"
+          style={{ width: `${clamped}%`, background: barColor(clamped) }}
+        />
+      </div>
+      <span className="font-mono text-2xs text-fg-secondary tabular-nums w-[26px]">{Math.round(clamped)}%</span>
     </div>
   )
 }
@@ -86,34 +68,34 @@ export default function SystemStats() {
   const gpuLabel = gpu0 ? `${gpu0.name}${gpuTempText}${gpuExtra}` : ''
 
   return (
-    <div className="hidden md:flex items-center gap-2 shrink-0">
-      <Pill
+    <div className="hidden md:flex items-center gap-3.5 shrink-0 px-3 py-[5px] rounded-md bg-sunken border border-subtle">
+      <MeterItem
         label="CPU"
-        value={`${stats.cpu_pct.toFixed(0)}%`}
         pct={stats.cpu_pct}
         tooltip={`CPU usage ${stats.cpu_pct.toFixed(1)}%`}
       />
-      <Pill
+      {gpu0 && (
+        <MeterItem
+          label="GPU"
+          pct={gpu0.util_pct}
+          tooltip={`GPU utilization · ${gpuLabel}`}
+        />
+      )}
+      <MeterItem
         label="MEM"
-        value={fmtGb(stats.ram_used_gb, stats.ram_total_gb)}
         pct={ramPct}
         tooltip={`RAM ${stats.ram_used_gb.toFixed(1)} / ${stats.ram_total_gb.toFixed(1)} GB (${ramPct.toFixed(0)}%)`}
       />
       {gpu0 && (
-        <>
-          <Pill
-            label="GPU"
-            value={`${gpu0.util_pct}%`}
-            pct={gpu0.util_pct}
-            tooltip={`GPU utilization · ${gpuLabel}`}
-          />
-          <Pill
-            label="VRAM"
-            value={fmtGb(gpu0.vram_used_gb, gpu0.vram_total_gb)}
-            pct={vramPct}
-            tooltip={`VRAM ${gpu0.vram_used_gb.toFixed(1)} / ${gpu0.vram_total_gb.toFixed(1)} GB (${vramPct.toFixed(0)}%) · ${gpuLabel}`}
-          />
-        </>
+        <div
+          className="flex items-center gap-1.5"
+          title={`VRAM ${gpu0.vram_used_gb.toFixed(1)} / ${gpu0.vram_total_gb.toFixed(1)} GB (${vramPct.toFixed(0)}%) · ${gpuLabel}`}
+        >
+          <span className="caption text-2xs">VRAM</span>
+          <span className="font-mono text-2xs text-fg-secondary tabular-nums">
+            {gpu0.vram_used_gb.toFixed(1)}/{Math.round(gpu0.vram_total_gb)}G
+          </span>
+        </div>
       )}
     </div>
   )

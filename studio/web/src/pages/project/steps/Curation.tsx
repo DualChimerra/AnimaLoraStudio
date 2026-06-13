@@ -740,14 +740,10 @@ function AltHoverPreview({ focus }: { focus: Focus }) {
   )
 }
 
-const ACCENT_BAR_CLS: Record<'emerald' | 'cyan', string> = {
-  emerald: 'bg-ok',
-  cyan: 'bg-info',
-}
-
 function PanelCard({
   accent, title, subtitle, actions, children,
 }: {
+  /** 'cyan' = 当前版本 train set 面板 → accent-veil 边框（原型 Panel accent）。 */
   accent: 'emerald' | 'cyan'
   title: string
   subtitle: string
@@ -755,15 +751,17 @@ function PanelCard({
   children: React.ReactNode
 }) {
   return (
-    <section className="flex flex-col min-h-0 rounded-md border border-subtle bg-surface overflow-hidden">
-      <div className={`h-0.5 ${ACCENT_BAR_CLS[accent]}`} />
-      <header className="flex flex-wrap items-center gap-1.5 px-2.5 py-1.5 border-b border-subtle text-sm">
+    <section
+      className="card flex flex-col min-h-0 overflow-hidden"
+      style={accent === 'cyan' ? { borderColor: 'var(--accent-veil)' } : undefined}
+    >
+      <header className="flex flex-wrap items-center gap-1.5 px-3.5 py-2.5 border-b border-subtle text-sm shrink-0">
         <h3 className="font-semibold">{title}</h3>
         <span className="text-xs text-fg-tertiary">{subtitle}</span>
         <span className="flex-1" />
         {actions}
       </header>
-      <div className="flex-1 min-h-0 flex flex-col p-2">{children}</div>
+      <div className="flex-1 min-h-0 flex flex-col p-3">{children}</div>
     </section>
   )
 }

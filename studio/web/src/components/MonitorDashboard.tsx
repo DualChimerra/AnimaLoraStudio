@@ -43,11 +43,11 @@ function StatCard({ label, value, sub, tone }: {
 }) {
   const colorCls = tone === 'accent' ? 'text-accent' : tone === 'ok' ? 'text-ok' : tone === 'warn' ? 'text-warn' : 'text-fg-primary'
   return (
-    <div className="bg-surface border border-subtle rounded-md px-[18px] py-[14px]">
-      <div className="text-xs text-fg-tertiary font-mono uppercase tracking-[0.04em] mb-1.5">
+    <div className="card px-[14px] py-3">
+      <div className="caption mb-1.5">
         {label}
       </div>
-      <div className={`text-3xl font-semibold font-mono tabular-nums tracking-[-0.02em] leading-[1.1] ${colorCls}`}>
+      <div className={`text-xl font-bold font-mono tabular-nums tracking-[-0.02em] leading-[1.05] ${colorCls}`}>
         {value}
       </div>
       {sub && (
@@ -536,7 +536,7 @@ export default function MonitorDashboard({ taskId }: { taskId: number }) {
           右卡 minHeight 形成下界，flex-1 在 row 高度 > 3*min+gap 时均分扩展；
           总 min 超视口时由外层 overflow-y-auto 滚 */}
       <div
-        className="grid grid-cols-[1fr_1.5fr] gap-3.5 flex-1"
+        className="grid grid-cols-[1.5fr_1fr] gap-3.5 flex-1"
         style={{ gridTemplateRows: '1fr' }}
       >
         {/* 左：采样图 */}
@@ -563,7 +563,7 @@ export default function MonitorDashboard({ taskId }: { taskId: number }) {
             </div>
             <SeriesChart
               data={losses.map((l) => ({ step: l.step, value: l.loss }))}
-              rawColor="rgba(74,71,64,0.35)"
+              rawColor="color-mix(in srgb, var(--fg-secondary) 35%, transparent)"
               smoothColor="var(--accent)"
               fillColor="var(--accent-soft)"
               emaAlpha={emaAlpha}
@@ -579,7 +579,7 @@ export default function MonitorDashboard({ taskId }: { taskId: number }) {
             </div>
             <SeriesChart
               data={lrSeries}
-              rawColor="rgba(224,162,58,0.35)"
+              rawColor="color-mix(in srgb, var(--warn) 35%, transparent)"
               smoothColor="var(--warn)"
               emaAlpha={lrAlpha}
               yFormat={fmtLr}
@@ -600,7 +600,7 @@ export default function MonitorDashboard({ taskId }: { taskId: number }) {
               </div>
               <SeriesChart
                 data={dSeries}
-                rawColor="rgba(237,107,58,0.30)"
+                rawColor="color-mix(in srgb, var(--accent) 30%, transparent)"
                 smoothColor="var(--accent)"
                 emaAlpha={dAlpha}
                 yFormat={fmtMetric}

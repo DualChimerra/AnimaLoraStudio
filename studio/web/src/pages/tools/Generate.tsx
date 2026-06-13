@@ -478,9 +478,9 @@ export default function GeneratePage() {
             {/* mode=single：独立 LoRA 卡片；mode=xy：LoRA 选择合并到 XY 卡片顶部 */}
             {mode === 'single' && (
               <div className="card" style={{ padding: 18 }}>
-                <div className="flex items-baseline justify-between mb-3">
-                  <h3 className="m-0 text-md font-semibold">LoRA</h3>
-                  <span className="text-xs text-fg-tertiary">{t('generate.loraHint')}</span>
+                <div className="flex items-baseline justify-between gap-4 mb-3">
+                  <h3 className="m-0 text-md font-semibold shrink-0">LoRA</h3>
+                  <span className="text-xs text-fg-tertiary text-right">{t('generate.loraHint')}</span>
                 </div>
                 <SidebarLoras
                   key={`single-${urlConsumedKey}`}

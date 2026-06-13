@@ -26,7 +26,7 @@ export function PauseConfirmModal({ onCancel, onConfirm }: PauseConfirmModalProp
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-md"
       data-testid="pause-confirm-modal"
     >
-      <div className="w-[90%] max-w-[480px] flex flex-col gap-5 p-7 bg-elevated border border-dim rounded-lg shadow-xl">
+      <div className="w-[90%] max-w-[480px] flex flex-col gap-5 p-7 bg-elevated border border-subtle rounded-[var(--r-card)] shadow-xl">
         <h2
           id="pause-confirm-title"
           className="m-0 text-lg font-semibold text-fg-primary"

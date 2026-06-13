@@ -609,26 +609,26 @@ export default function TrainPage() {
             ) : config ? (
               <section ref={schemaScrollRef} className="flex-1 min-h-0 overflow-y-auto pr-1">
                 <div className="flex justify-end mb-2">
-                  <div className="inline-flex rounded-md border border-subtle overflow-hidden text-xs">
+                  <div className="inline-flex items-center gap-0.5 bg-sunken rounded-md p-[3px] text-xs">
                     <button
                       type="button"
                       onClick={() => !advancedMode || toggleAdvancedMode()}
-                      className={`px-3 py-1 transition-colors ${!advancedMode ? 'bg-accent text-white' : 'bg-surface text-fg-secondary hover:bg-subtle'}`}
+                      className={`border-none px-3 py-1 rounded-[calc(var(--r-md)-2px)] transition-all duration-100 cursor-pointer ${!advancedMode ? 'bg-surface text-fg-primary font-semibold shadow-sm' : 'bg-transparent text-fg-secondary font-medium hover:text-fg-primary'}`}
                     >
                       {t('train.simpleMode')}
                     </button>
                     <button
                       type="button"
                       onClick={() => advancedMode || toggleAdvancedMode()}
-                      className={`px-3 py-1 transition-colors ${advancedMode ? 'bg-accent text-white' : 'bg-surface text-fg-secondary hover:bg-subtle'}`}
+                      className={`border-none px-3 py-1 rounded-[calc(var(--r-md)-2px)] transition-all duration-100 cursor-pointer ${advancedMode ? 'bg-surface text-fg-primary font-semibold shadow-sm' : 'bg-transparent text-fg-secondary font-medium hover:text-fg-primary'}`}
                     >
                       {t('train.advancedMode')}
                     </button>
                   </div>
                 </div>
                 {(droppedFields.length > 0 || defaultedFields.length > 0) && (
-                  <div className="mb-3 rounded-md border border-amber-400/50 bg-amber-950/60 px-3.5 py-2.5 text-xs text-amber-100 space-y-1">
-                    <span className="font-semibold text-amber-300">{t('presets.compatNoticeTitle')}</span>
+                  <div className="mb-3 rounded-md border border-warn bg-warn-soft px-3.5 py-2.5 text-xs text-warn space-y-1">
+                    <span className="font-semibold">{t('presets.compatNoticeTitle')}</span>
                     {droppedFields.length > 0 && (
                       <div>{t('presets.droppedFieldsBody')}<code className="ml-1 text-[11px] opacity-80">{droppedFields.join(', ')}</code></div>
                     )}
