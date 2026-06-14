@@ -380,6 +380,7 @@ def reg_generate_prior(pid: int, vid: int, body: RegAiRequest) -> dict[str, Any]
         scheduler=body.scheduler,
         seed=body.seed,
         incremental=body.incremental,
+        repeat=body.repeat,
         mixed_precision=body.mixed_precision,
         attention_backend=detect_attention_backend(),
     )

@@ -51,6 +51,15 @@ class RegAiConfig(BaseModel):
         False,
         description="补足模式：跳过 reg 子文件夹中已有以 train_stem 开头的图（重启续跑用）",
     )
+    repeat: int = Field(
+        1,
+        ge=1,
+        le=100,
+        description=(
+            "reg 子文件夹 Kohya 风格 repeat 前缀（N_label）。reg 集独立于 train "
+            "repeat，默认 1（DreamBooth 标准：reg 每张每 epoch 见 1 次）。"
+        ),
+    )
     mixed_precision: str = Field("bf16")
     attention_backend: AttentionBackend = Field(
         "flash_attn",

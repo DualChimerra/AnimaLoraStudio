@@ -98,6 +98,9 @@ export default function RegularizationPage() {
   const [aiCfg, setAiCfg] = useState(4.0)
   const [aiSeed, setAiSeed] = useState(0)
   const [aiIncremental, setAiIncremental] = useState(false)
+  // reg 子文件夹 repeat 前缀（N_data）。reg 集独立于 train repeat，默认 1
+  // （DreamBooth 标准：reg 每张每 epoch 见 1 次）。见 anima-phase-cursor-sse-desync 周边讨论。
+  const [aiRepeat, setAiRepeat] = useState(1)
   const [aiTask, setAiTask] = useState<Task | null>(null)
   const [aiLogs, setAiLogs] = useState<string[]>([])
   const [aiBusy, setAiBusy] = useState(false)
@@ -306,6 +309,7 @@ export default function RegularizationPage() {
         cfg_scale: aiCfg,
         seed: aiSeed,
         incremental: aiIncremental,
+        repeat: aiRepeat,
       }
       const task = await api.enqueueRegPrior(project.id, vid, body)
       setAiTask(task)
@@ -454,6 +458,7 @@ export default function RegularizationPage() {
                 seed={aiSeed} onSeedChange={setAiSeed}
                 incremental={aiIncremental}
                 onIncrementalChange={setAiIncremental}
+                repeat={aiRepeat} onRepeatChange={setAiRepeat}
               />
             ) : (
               <BooruForm
@@ -865,6 +870,7 @@ function AiForm({
   cfg, onCfgChange,
   seed, onSeedChange,
   incremental, onIncrementalChange,
+  repeat, onRepeatChange,
 }: {
   trainTags: RegTagCount[]
   excluded: Set<string>
@@ -877,6 +883,7 @@ function AiForm({
   cfg: number; onCfgChange: (v: number) => void
   seed: number; onSeedChange: (v: number) => void
   incremental: boolean; onIncrementalChange: (v: boolean) => void
+  repeat: number; onRepeatChange: (v: number) => void
 }) {
   const { t } = useTranslation()
   return (
@@ -925,6 +932,18 @@ function AiForm({
             <option value="incremental">{t('reg.modeIncrementalAi')}</option>
             <option value="full">{t('reg.modeFullAi')}</option>
           </select>
+        </Field>
+        <Field
+          label={t('reg.repeatLabel')}
+          hint={t('reg.repeatHint')}
+        >
+          <input
+            type="number"
+            className="input font-mono"
+            value={repeat}
+            onChange={(e) => onRepeatChange(Math.max(1, Number(e.target.value) || 1))}
+            min={1} max={100}
+          />
         </Field>
       </GrpCard>
 

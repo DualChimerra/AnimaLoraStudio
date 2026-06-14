@@ -86,6 +86,7 @@ class RegAiRequest(BaseModel):
     scheduler: str = "simple"
     seed: int = 0
     incremental: bool = False
+    repeat: int = 1  # reg 子文件夹 repeat 前缀（N_label）；1 = DreamBooth 标准
     mixed_precision: str = "bf16"
 
 

@@ -2115,6 +2115,8 @@
     "autoTagKindDisabled": "需勾选「拉完后自动打标」",
     "autoDedupSub": "按 phash 跳过近重复图",
     "seedHintRandom": "0=随机",
+    "repeatLabel": "Repeat",
+    "repeatHint": "reg 文件夹 repeat 前缀（N_data），独立于 train；1 = DreamBooth 默认",
     "source": "来源",
     "targetCount": "目标数量",
     "mirrorTrain": "（镜像 train）",

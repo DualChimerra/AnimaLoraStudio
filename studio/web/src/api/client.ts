@@ -1077,6 +1077,7 @@ export interface RegAiRequest {
   scheduler?: string
   seed?: number
   incremental?: boolean
+  repeat?: number
   mixed_precision?: string
 }
 
