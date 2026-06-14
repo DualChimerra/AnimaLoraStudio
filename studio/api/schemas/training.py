@@ -74,6 +74,12 @@ class RegDeleteFilesRequest(BaseModel):
     relative_paths: list[str]
 
 
+class RegRenameFolderRequest(BaseModel):
+    """重命名 reg/ 下的子文件夹（改 Kohya repeat 前缀，如 2_data → 1_data）。"""
+    name: str
+    new_name: str
+
+
 class RegAiRequest(BaseModel):
     """先验生成请求 —— 不含 lora_configs，先验生成不带 LoRA。"""
     excluded_tags: list[str] = []

@@ -512,6 +512,10 @@ export default function RegularizationPage() {
               void refreshReg()
               void reload()
             }}
+            onRenamed={() => {
+              void refreshReg()
+              void reload()
+            }}
           />
         ) : (
           <section
@@ -1489,6 +1493,7 @@ function RegPreview({
   isLive,
   onPick,
   onDeleted,
+  onRenamed,
 }: {
   pid: number
   vid: number
@@ -1496,6 +1501,7 @@ function RegPreview({
   isLive: boolean
   onPick: (idx: number) => void
   onDeleted: () => void
+  onRenamed: () => void
 }) {
   const { t } = useTranslation()
   const { toast } = useToast()
@@ -1598,6 +1604,28 @@ function RegPreview({
     }
   }
 
+  // 文件夹改名（对齐 Step 1 train 改名）：主要场景 = 改 Kohya repeat 前缀
+  // （2_data → 1_data），调 reg repeat 不必去 Colab 文件系统手动 rename。
+  const [renaming, setRenaming] = useState<{ from: string; value: string } | null>(null)
+  const [renameBusy, setRenameBusy] = useState(false)
+  const doRename = async () => {
+    if (!renaming) return
+    const next = renaming.value.trim()
+    if (!next || next === renaming.from) { setRenaming(null); return }
+    setRenameBusy(true)
+    try {
+      await api.renameRegFolder(pid, vid, renaming.from, next)
+      toast(t('reg.renameFolderDone', { from: renaming.from, to: next }), 'success')
+      if (activeFolder === renaming.from) setActiveFolder(next)
+      setRenaming(null)
+      onRenamed()
+    } catch (e) {
+      toast(String(e), 'error')
+    } finally {
+      setRenameBusy(false)
+    }
+  }
+
   // A4 — 自动去重：用默认参数扫，把每组里的"推荐删除"项直接删，没 review panel。
   // reg 集 quality bar 比 train 低，不需要逐组人工选保留。
   const [dedupBusy, setDedupBusy] = useState(false)
@@ -1651,6 +1679,16 @@ function RegPreview({
             {t('reg.regPreviewSelected', { n: selected.size })}
           </span>
         )}
+        {activeFolder !== null && activeFolder !== '' && (
+          <button
+            onClick={() => setRenaming({ from: activeFolder, value: activeFolder })}
+            disabled={isLive || dedupBusy || renameBusy}
+            className="btn btn-sm"
+            title={t('reg.renameFolderTitle')}
+          >
+            {t('reg.renameFolderBtn')}
+          </button>
+        )}
         <button
           onClick={() => void onDedup()}
           disabled={dedupBusy || isLive}
@@ -1668,6 +1706,39 @@ function RegPreview({
           {t('reg.deleteFilesBtn', { n: selected.size })}
         </button>
       </div>
+
+      {renaming && (
+        <div className="flex items-center gap-2 pb-1.5 border-b border-subtle">
+          <span className="text-2xs text-fg-secondary">
+            {t('reg.renameFolderLabel', { name: renaming.from })}
+          </span>
+          <input
+            autoFocus
+            className="input font-mono"
+            style={{ maxWidth: 180 }}
+            value={renaming.value}
+            onChange={(e) => setRenaming({ from: renaming.from, value: e.target.value })}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') void doRename()
+              if (e.key === 'Escape') setRenaming(null)
+            }}
+          />
+          <button
+            className="btn btn-sm btn-primary"
+            onClick={() => void doRename()}
+            disabled={renameBusy}
+          >
+            {t('reg.renameFolderOk')}
+          </button>
+          <button
+            className="btn btn-sm"
+            onClick={() => setRenaming(null)}
+            disabled={renameBusy}
+          >
+            {t('reg.renameFolderCancel')}
+          </button>
+        </div>
+      )}
 
       <div className="flex-1 min-h-0 overflow-y-auto">
         <p className="text-2xs text-fg-tertiary px-1 pb-1 m-0">
