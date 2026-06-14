@@ -26,6 +26,7 @@ import argparse
 import json
 import logging
 import random
+import re
 import shutil
 import sys
 import time
@@ -272,6 +273,25 @@ def _normalize(tag: str) -> str:
     return _tag_key(tag)
 
 
+def _reg_subfolder(train_subfolder: str, repeat: int) -> str:
+    """train 子文件夹名 → reg 子文件夹名，按 `repeat` 重写 Kohya 前缀。
+
+    reg 集 repeat 独立于 train —— 不再原样镜像 train 的 `N_` 前缀（那会让 reg
+    跟着 train 的 repeat 走，2_data 训练里 reg 每 epoch 见 2 次）。统一改成
+    用户在 UI 选的 repeat，保留 label：
+      - ""（train 根）          → "{repeat}_data"
+      - "2_data" / "data"       → "{repeat}_data"
+      - "嵌套/5_concept"         → "嵌套/{repeat}_concept"（逐段只重写末段前缀）
+    """
+    if not train_subfolder:
+        return f"{repeat}_data"
+    parent, _, leaf = train_subfolder.rpartition("/")
+    m = re.match(r"^\d+_(.*)$", leaf)
+    label = m.group(1) if m else leaf
+    new_leaf = f"{repeat}_{label}"
+    return f"{parent}/{new_leaf}" if parent else new_leaf
+
+
 def _scan_train(train_dir: Path) -> list[dict]:
     """扫 train 目录，返回每张图的信息列表。
 
@@ -370,6 +390,7 @@ def main() -> None:
     scheduler: str = cfg.get("scheduler", "simple")
     base_seed: int = int(cfg.get("seed", 0))
     incremental: bool = bool(cfg.get("incremental", False))
+    repeat: int = max(1, int(cfg.get("repeat", 1)))
     mixed_precision: str = cfg.get("mixed_precision", "bf16")
     backend: str = cfg.get("attention_backend", "flash_attn")
     use_flash = (backend == "flash_attn")
@@ -406,7 +427,7 @@ def main() -> None:
         to_generate = [
             e for e in entries
             if not _already_has_reg(
-                reg_dir / e["subfolder"] if e["subfolder"] else reg_dir,
+                reg_dir / _reg_subfolder(e["subfolder"], repeat),
                 e["stem"],
             )
         ]
@@ -459,8 +480,7 @@ def main() -> None:
         torch.manual_seed(seed)
         random.seed(seed)
 
-        subfolder = entry["subfolder"]
-        reg_sub = (reg_dir / subfolder) if subfolder else reg_dir
+        reg_sub = reg_dir / _reg_subfolder(entry["subfolder"], repeat)
         reg_sub.mkdir(parents=True, exist_ok=True)
 
         out_name = f"{entry['stem']}_ai_{seed}.png"

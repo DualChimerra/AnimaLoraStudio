@@ -2115,6 +2115,8 @@
     "autoTagKindDisabled": "Requires \"auto-tag after download\"",
     "autoDedupSub": "skip near-duplicates by phash",
     "seedHintRandom": "0=random",
+    "repeatLabel": "Repeat",
+    "repeatHint": "Reg folder repeat (N_data), independent of train; 1 = DreamBooth default",
     "source": "Source",
     "targetCount": "Target count",
     "mirrorTrain": "(mirrors train)",
