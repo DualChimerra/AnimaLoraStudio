@@ -204,6 +204,42 @@ export default function RegularizationPage() {
     }
   })
 
+  // SSE 不可靠兜底（Colab 代理常断 SSE → 见 anima-phase-cursor-sse-desync）：
+  // reg 生成跑着时定时轮询后端状态，不只靠 task_state_changed / job_state_changed。
+  // 没有它，SSE 一死 badge 永远停在 "Queued #N"、aiBusy 永远 true（生成按钮锁死），
+  // 而 worker 其实正常出图（reg/ 里картинки 在涨）。状态非终态时每 3s 拉一次。
+  useEffect(() => {
+    const taskLive = aiTask?.status === 'pending' || aiTask?.status === 'running'
+    const jobLive = job?.status === 'pending' || job?.status === 'running'
+    if ((!taskLive && !jobLive) || !vid) return
+    const timer = setInterval(() => {
+      const tid = aiTaskIdRef.current
+      if (taskLive && tid) {
+        void api.getRegPriorTask(project.id, vid, tid).then((t) => {
+          setAiTask(t)
+          if (t.status === 'done' || t.status === 'failed' || t.status === 'canceled') {
+            setAiBusy(false)
+            void refreshReg()
+            if (t.status === 'done') setActiveTab('images')
+          }
+        }).catch(() => {})
+      }
+      const jid = jobIdRef.current
+      if (jobLive && jid) {
+        void api.getJob(jid).then((j) => {
+          setJob(j)
+          if (j.status === 'done' || j.status === 'failed' || j.status === 'canceled') {
+            void refreshReg()
+            void reload()
+            if (j.status === 'done') setActiveTab('images')
+          }
+        }).catch(() => {})
+      }
+    }, 3000)
+    return () => clearInterval(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [aiTask?.status, job?.status, vid])
+
   const trainImageCount = activeVersion?.stats?.train_image_count ?? 0
   // 任意一种生成跑着都视为 live —— 防止 booru / AI 并发同时写 reg/。
   const isLive = job?.status === 'running' || job?.status === 'pending' || aiBusy
