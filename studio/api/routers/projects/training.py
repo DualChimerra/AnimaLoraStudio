@@ -336,6 +336,19 @@ def reg_generate_prior(pid: int, vid: int, body: RegAiRequest) -> dict[str, Any]
     if not has_image:
         raise HTTPException(400, "train 还没有图片，请先完成 Step 1（下载）或 Step 2（筛选）")
 
+    # 防重复入队：同 version 已有 pending/running 的 reg_ai task → 直接返回它，不新建。
+    # 否则 UI badge 卡住时（SSE 死，见 anima-phase-cursor-sse-desync）用户连点会堆一摞
+    # reg_ai task，supervisor 串行逐个跑（created_at ASC），新点的永远排在队尾 →
+    # 表现为「新建的 queued、日志空，而旧任务在出图」。幂等返回让连点不再堆积。
+    with db.connection_for() as conn:
+        for t in db.list_tasks(conn):
+            if (
+                t.get("task_type") == "reg_ai"
+                and t.get("version_id") == vid
+                and t.get("status") in ("pending", "running")
+            ):
+                return t
+
     rdir = _reg_dir(vdir)
     rdir.mkdir(parents=True, exist_ok=True)
 
