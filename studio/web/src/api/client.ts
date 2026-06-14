@@ -2018,6 +2018,13 @@ export const api = {
   getRegPriorTask: (pid: number, vid: number, taskId: number) =>
     req<Task>(`/api/projects/${pid}/versions/${vid}/reg/generate-prior/${taskId}`),
 
+  /** 重命名 reg/ 子文件夹（改 Kohya repeat 前缀，如 2_data → 1_data）。 */
+  renameRegFolder: (pid: number, vid: number, name: string, newName: string) =>
+    req<{ path: string }>(`/api/projects/${pid}/versions/${vid}/reg/folder`, {
+      method: 'POST',
+      body: JSON.stringify({ name, new_name: newName }),
+    }),
+
   /** 列出 version output/ 下所有 LoRA ckpt 文件（XY ckpt 轴 + 单图模式切 ckpt）。 */
   listVersionLoraCkpts: (pid: number, vid: number) =>
     req<{ items: LoraCkpt[] }>(`/api/projects/${pid}/versions/${vid}/lora_ckpts`)

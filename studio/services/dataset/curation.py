@@ -400,6 +400,42 @@ def rename_folder(
     return dst
 
 
+def _version_reg_dir(conn, project_id: int, version_id: int) -> tuple[
+    dict[str, Any], dict[str, Any], Path
+]:
+    p = projects.get_project(conn, project_id)
+    if not p:
+        raise CurationError(f"项目不存在: id={project_id}")
+    v = versions.get_version(conn, version_id)
+    if not v or v["project_id"] != project_id:
+        raise CurationError(f"版本不存在: id={version_id}")
+    reg_dir = versions.version_dir(p["id"], p["slug"], v["label"]) / "reg"
+    return p, v, reg_dir
+
+
+def rename_reg_folder(
+    conn, project_id: int, version_id: int, name: str, new_name: str
+) -> Path:
+    """重命名 reg/ 下的子文件夹（如改 Kohya repeat 前缀 2_data → 1_data）。
+
+    跟 rename_folder（train/）同构，只是作用在 reg/。UI 在「已生成 reg 图」
+    那步用它，对齐 Step 1 train 文件夹改名体验。
+    """
+    _validate_folder(name)
+    _validate_folder(new_name)
+    if name == new_name:
+        return _version_reg_dir(conn, project_id, version_id)[2] / name
+    _, _, reg = _version_reg_dir(conn, project_id, version_id)
+    src = reg / name
+    dst = reg / new_name
+    if not src.exists():
+        raise CurationError(f"文件夹不存在: {name}")
+    if dst.exists():
+        raise CurationError(f"目标已存在: {new_name}")
+    src.rename(dst)
+    return dst
+
+
 def delete_folder(conn, project_id: int, version_id: int, name: str) -> None:
     """整个子文件夹连同里面的 train 副本一起删；download 不动。"""
     _validate_folder(name)

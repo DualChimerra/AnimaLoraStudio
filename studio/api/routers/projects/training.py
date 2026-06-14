@@ -49,6 +49,7 @@ from ...schemas.training import (
     RegAiRequest,
     RegBuildRequest,
     RegDeleteFilesRequest,
+    RegRenameFolderRequest,
     SaveAsPresetRequest,
 )
 from ._shared import (
@@ -71,6 +72,7 @@ from ....services import presets as preset_flow
 from ....services.tagging import caption_snapshot
 from ....services.reg import builder as reg_builder, dedup as reg_dedup
 from ....services.dataset import tagedit
+from ....services.dataset import curation as dataset_curation
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -414,6 +416,25 @@ def get_reg_prior_task(pid: int, vid: int, task_id: int) -> dict[str, Any]:
     if not task or task.get("task_type") != "reg_ai":
         raise HTTPException(404)
     return task
+
+
+@router.post("/api/projects/{pid}/versions/{vid}/reg/folder")
+def reg_rename_folder(
+    pid: int, vid: int, body: RegRenameFolderRequest,
+) -> dict[str, Any]:
+    """重命名 reg/ 下子文件夹（如改 Kohya repeat 前缀 2_data → 1_data）。
+
+    对齐 Step 1（Curation）的 train 文件夹改名：用户在「已生成 reg 图」那步
+    想调 reg repeat，不必去 Colab 文件系统手动 rename。
+    """
+    with db.connection_for() as conn:
+        try:
+            p = dataset_curation.rename_reg_folder(
+                conn, pid, vid, body.name, body.new_name,
+            )
+        except dataset_curation.CurationError as exc:
+            raise HTTPException(400, str(exc)) from exc
+    return {"path": str(p)}
 
 
 @router.delete("/api/projects/{pid}/versions/{vid}/reg")
