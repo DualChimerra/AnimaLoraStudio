@@ -38,7 +38,7 @@ from typing import Any, Optional
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 
-from ...deps import _resolve_anima_model_paths
+from ...deps import _resolve_anima_model_paths, _supervisor
 from ...errors import _preset_err_code as _err_code, _safe_join_or_400
 from ...responses import _thumb_response
 from ...schemas.training import (
@@ -335,6 +335,32 @@ def reg_generate_prior(pid: int, vid: int, body: RegAiRequest) -> dict[str, Any]
     )
     if not has_image:
         raise HTTPException(400, "train 还没有图片，请先完成 Step 1（下载）或 Step 2（筛选）")
+
+    # 「最新一次点击优先」：再点生成 = 放弃同 version 所有旧 reg_ai（pending + running），
+    # 只跑这次新建的。否则 UI badge 卡住时（SSE 死，见 anima-phase-cursor-sse-desync）
+    # 用户连点会堆一摞 reg_ai task，supervisor 串行逐个跑（created_at ASC），新点的排在
+    # 队尾 → 表现为「新建的 queued、日志空，而旧任务还在出图」。先取消旧的再建新的：
+    #   - pending → supervisor.cancel 直接标 canceled
+    #   - running → 异步 SIGTERM，slot 退出后 supervisor 自然 pick up 新 task
+    try:
+        sup: Optional[Any] = _supervisor()
+    except HTTPException:
+        sup = None  # test / 启动期无 supervisor：下面对 pending 走 db 兜底
+    with db.connection_for() as conn:
+        stale = [
+            t for t in db.list_tasks(conn)
+            if t.get("task_type") == "reg_ai"
+            and t.get("version_id") == vid
+            and t.get("status") in ("pending", "running")
+        ]
+    for t in stale:
+        tid = int(t["id"])
+        if sup is not None:
+            sup.cancel(tid)
+        elif t.get("status") == "pending":
+            with db.connection_for() as conn:
+                db.update_task(conn, tid, status="canceled", finished_at=time.time())
+            bus.publish({"type": "task_state_changed", "task_id": tid, "status": "canceled"})
 
     rdir = _reg_dir(vdir)
     rdir.mkdir(parents=True, exist_ok=True)
