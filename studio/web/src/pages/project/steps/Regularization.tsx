@@ -223,6 +223,11 @@ export default function RegularizationPage() {
             if (t.status === 'done') setActiveTab('images')
           }
         }).catch(() => {})
+        // 日志同样不能只靠 SSE task_log_appended（Colab 上 SSE 死 → 日志永远空、
+        // 要手动刷新页面才见更新）。拉全量 run.log 整体替换（全量 ⊇ 增量，自愈）。
+        void api.getLog(tid).then((r) => {
+          setAiLogs(r.content ? r.content.split('\n') : [])
+        }).catch(() => {})
       }
       const jid = jobIdRef.current
       if (jobLive && jid) {
@@ -233,6 +238,9 @@ export default function RegularizationPage() {
             void reload()
             if (j.status === 'done') setActiveTab('images')
           }
+        }).catch(() => {})
+        void api.getJobLog(jid).then((r) => {
+          setLogs(r.content ? r.content.split('\n') : [])
         }).catch(() => {})
       }
     }, 3000)
