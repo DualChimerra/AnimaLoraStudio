@@ -11,6 +11,10 @@ Optimizer Utils Module - 优化器创建
 6. Automagic - Per-parameter adaptive lr via sign-agreement tracking
    原作者: Ostris (https://github.com/ostris/ai-toolkit, MIT license, Copyright (c)
    2024 Ostris, LLC). bf16 Kahan summation path 借鉴自 tdrussell/diffusion-pipe.
+7. CAME - Confidence-guided Adaptive Memory Efficient (Luo et al., ACL 2023,
+   arxiv 2307.02047)。Adafactor 式 factored 二阶矩 + confidence-guided 修正，显存接近
+   Adafactor。外部 lr + scheduler 系（同 AdamW / Lion），非 schedule-free，无需 lr=1.0
+   强制或 lr_scheduler=none 约束。依赖 `came-pytorch`（import 名 came_pytorch）。
 """
 
 from __future__ import annotations
@@ -196,10 +200,20 @@ def create_optimizer(
             **kwargs,
         )
 
+    elif optimizer_type == "came":
+        return create_came(
+            params=params,
+            lr=learning_rate,
+            betas=betas,
+            eps=eps,
+            weight_decay=weight_decay,
+            **kwargs,
+        )
+
     else:
         raise ValueError(
             f"Unknown optimizer type: {optimizer_type}. "
-            f"Choose from: adamw, automagic, lion, prodigy, prodigy_plus_schedulefree"
+            f"Choose from: adamw, automagic, came, lion, prodigy, prodigy_plus_schedulefree"
         )
 
 
@@ -766,6 +780,80 @@ def create_lion(
     optimizer = Lion(param_list, lr=lr, betas=betas, weight_decay=weight_decay, **kwargs)
     print(f"Creating Lion optimizer (lr={lr}, betas={betas}, weight_decay={weight_decay})")
     print("  [OK] Lion optimizer created")
+    return optimizer
+
+
+def create_came(
+    params: Iterator[nn.Parameter],
+    lr: float,
+    betas: tuple = (0.9, 0.999, 0.9999),
+    eps: tuple = (1e-30, 1e-16),
+    clip_threshold: float = 1.0,
+    weight_decay: float = 0.0,
+    **kwargs,
+) -> Optimizer:
+    """创建 CAME 优化器 (https://github.com/yangluo7/CAME)。
+
+    CAME = Confidence-guided Adaptive Memory Efficient（Luo et al., ACL 2023,
+    arxiv 2307.02047）。Adafactor 式 factored 二阶矩 + 一个 confidence（instability）
+    项做修正，显存接近 Adafactor 而稳定性接近 Adam。
+
+    *学习率*: 外部 lr（同 AdamW / Lion），不自适应、不 schedule-free，可叠加 lr_scheduler。
+    LoRA / 扩散微调常用 lr ≈ 1e-4 量级。
+
+    *betas*: 三元组 (β1 动量, β2 二阶矩, β3 confidence)。上游默认 (0.9, 0.999, 0.9999)。
+    *eps*: 二元组 (eps1 梯度平方正则, eps2 instability 正则)。上游默认 (1e-30, 1e-16)。
+
+    上层通用 create_optimizer 默认传 betas=(0.9, 0.999)（2 元组，AdamW 形状）+ eps=1e-8
+    （标量），形状对 CAME 不合法。这里检测到这些 AdamW 形状默认时回退到 CAME 上游默认，
+    保证直接 create_optimizer("came", ...) 调用（如测试 / CLI）也安全；came.build 始终
+    显式传正确形状，不受影响。
+
+    Args:
+        params: 模型参数
+        lr: 外部学习率
+        betas: (β1, β2, β3)
+        eps: (eps1, eps2)
+        clip_threshold: update RMS 裁剪阈值
+        weight_decay: 权重衰减
+
+    Returns:
+        CAME: 优化器实例
+    """
+    try:
+        from came_pytorch import CAME
+    except ImportError as e:
+        raise ImportError(
+            "came-pytorch is required for the CAME optimizer. "
+            "Install with: pip install came-pytorch"
+        ) from e
+
+    # 上层默认 betas=(0.9, 0.999)（AdamW 2 元组）→ 回退 CAME 默认 3 元组。
+    betas_t = tuple(betas)
+    if len(betas_t) != 3:
+        betas_t = (0.9, 0.999, 0.9999)
+    # 上层默认 eps=1e-8（标量）→ 回退 CAME 默认 2 元组。
+    eps_t = eps if isinstance(eps, (tuple, list)) and len(eps) == 2 else (1e-30, 1e-16)
+    eps_t = tuple(eps_t)
+
+    param_list = params if _is_param_groups(params) else list(params)
+
+    candidate = dict(
+        lr=lr,
+        betas=betas_t,
+        eps=eps_t,
+        clip_threshold=clip_threshold,
+        weight_decay=weight_decay,
+        **kwargs,
+    )
+    safe_kwargs = _filter_kwargs_by_signature(CAME, candidate)
+
+    optimizer = CAME(param_list, **safe_kwargs)
+    print(
+        f"Creating CAME optimizer (lr={lr}, betas={betas_t}, eps={eps_t}, "
+        f"clip_threshold={clip_threshold}, weight_decay={weight_decay})"
+    )
+    print("  [OK] CAME optimizer created")
     return optimizer
 
 

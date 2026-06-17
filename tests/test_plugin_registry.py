@@ -43,10 +43,11 @@ def test_adapter_builders_dict_has_lokr_loha_lora() -> None:
     assert set(BUILDERS) == {"lokr", "loha", "lora"}
 
 
-def test_optimizer_builders_dict_has_5_variants() -> None:
+def test_optimizer_builders_dict_has_6_variants() -> None:
     from training.optimizers import BUILDERS, VALIDATORS
-    assert set(BUILDERS) == {"adamw", "automagic", "lion", "prodigy", "prodigy_plus_schedulefree"}
-    # Automagic / PPSF 有专属 validator，adamw / lion / prodigy 没有
+    assert set(BUILDERS) == {"adamw", "automagic", "came", "lion", "prodigy", "prodigy_plus_schedulefree"}
+    # Automagic / PPSF 有专属 validator，adamw / came / lion / prodigy 没有
+    # （CAME 是外部 lr + scheduler 系，无 lr=1.0 / lr_scheduler=none 约束）
     assert set(VALIDATORS) == {"automagic", "prodigy_plus_schedulefree"}
 
 
@@ -247,6 +248,41 @@ def test_ppsf_explicit_prodigy_steps_is_preserved(monkeypatch) -> None:
     ppsf.build(args, params=[], lr=1.0, weight_decay=0.0)
 
     assert captured["prodigy_steps"] == 750
+
+
+def test_came_build_assembles_betas_eps_tuples(monkeypatch) -> None:
+    """came.build 把 6 个 came_* 字段组装成 betas 三元组 + eps 二元组 + clip_threshold，
+    并透传外部 lr / weight_decay（CAME 不强制 lr=1.0）。"""
+    from training.optimizers import came
+
+    captured = {}
+
+    def fake_create_optimizer(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "utils.optimizer_utils",
+        types.SimpleNamespace(create_optimizer=fake_create_optimizer),
+    )
+    args = argparse.Namespace(
+        came_beta1=0.9,
+        came_beta2=0.999,
+        came_beta3=0.9999,
+        came_eps1=1e-30,
+        came_eps2=1e-16,
+        came_clip_threshold=1.0,
+    )
+
+    came.build(args, params=[], lr=1e-4, weight_decay=0.01)
+
+    assert captured["optimizer_type"] == "came"
+    assert captured["betas"] == (0.9, 0.999, 0.9999)
+    assert captured["eps"] == (1e-30, 1e-16)
+    assert captured["clip_threshold"] == 1.0
+    assert captured["learning_rate"] == 1e-4  # 外部 lr 透传，不强制 1.0
+    assert captured["weight_decay"] == 0.01
 
 
 # ---------------------------------------------------------------------------
