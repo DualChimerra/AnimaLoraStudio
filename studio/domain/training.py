@@ -235,9 +235,9 @@ class TrainingConfig(BaseModel):
         description="cosine_with_warmup 预热步数",
         json_schema_extra=_meta("training", show_when="lr_scheduler==cosine_with_warmup", advanced=True),
     )
-    optimizer_type: Literal["adamw", "automagic", "lion", "prodigy", "prodigy_plus_schedulefree"] = Field(
+    optimizer_type: Literal["adamw", "automagic", "came", "lion", "prodigy", "prodigy_plus_schedulefree"] = Field(
         "adamw",
-        description="优化器。adamw 标准基线；automagic 自适应每参数 lr（推荐 lr=1e-6）；lion 显存约 AdamW 一半（推荐 lr=AdamW lr / 3）；prodigy / prodigy_plus_schedulefree 自适应估 lr（lr 填 1.0）",
+        description="优化器。adamw 标准基线；automagic 自适应每参数 lr（推荐 lr=1e-6）；came 显存高效（Adafactor 式 + confidence 修正，外部 lr 同 adamw，可叠 scheduler）；lion 显存约 AdamW 一半（推荐 lr=AdamW lr / 3）；prodigy / prodigy_plus_schedulefree 自适应估 lr（lr 填 1.0）",
         json_schema_extra=_meta("training"),
     )
     prodigy_d_coef: float = Field(
@@ -337,6 +337,39 @@ class TrainingConfig(BaseModel):
         True,
         description="PPSF 启用 stable AdamW 风格归一化，防止单步梯度尺度异常；默认开启",
         json_schema_extra=_meta("training", show_when="optimizer_type==prodigy_plus_schedulefree", advanced=True),
+    )
+    # ---------------- CAME 专属字段 ----------------
+    # CAME 是外部 lr + scheduler 系（同 AdamW / Lion）：用 learning_rate / lr_scheduler /
+    # weight_decay 公共字段，不强制 lr=1.0、不要求 lr_scheduler=none。
+    came_beta1: float = Field(
+        0.9, ge=0.0, lt=1.0,
+        description="CAME β1（一阶动量衰减率）；上游默认 0.9",
+        json_schema_extra=_meta("training", show_when="optimizer_type==came", advanced=True),
+    )
+    came_beta2: float = Field(
+        0.999, ge=0.0, lt=1.0,
+        description="CAME β2（二阶矩衰减率）；上游默认 0.999",
+        json_schema_extra=_meta("training", show_when="optimizer_type==came", advanced=True),
+    )
+    came_beta3: float = Field(
+        0.9999, ge=0.0, lt=1.0,
+        description="CAME β3（confidence / instability 项衰减率）；上游默认 0.9999",
+        json_schema_extra=_meta("training", show_when="optimizer_type==came", advanced=True),
+    )
+    came_eps1: float = Field(
+        1e-30, gt=0.0,
+        description="CAME eps1（梯度平方数值稳定项）；上游默认 1e-30",
+        json_schema_extra=_meta("training", show_when="optimizer_type==came", advanced=True),
+    )
+    came_eps2: float = Field(
+        1e-16, gt=0.0,
+        description="CAME eps2（instability 项数值稳定项）；上游默认 1e-16",
+        json_schema_extra=_meta("training", show_when="optimizer_type==came", advanced=True),
+    )
+    came_clip_threshold: float = Field(
+        1.0, gt=0.0,
+        description="CAME update RMS 裁剪阈值；上游默认 1.0",
+        json_schema_extra=_meta("training", show_when="optimizer_type==came", advanced=True),
     )
     weight_decay: float = Field(
         0.0, ge=0.0,

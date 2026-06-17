@@ -18,6 +18,7 @@ from torch import nn
 from utils.optimizer_utils import (
     Automagic,
     Lion,
+    create_came,
     create_optimizer,
     create_prodigy_plus_schedulefree,
     get_optimizer_monitor_metrics,
@@ -412,3 +413,72 @@ def test_create_ppsf_exposes_train_eval_methods() -> None:
     optim = create_prodigy_plus_schedulefree(model.parameters(), lr=1.0)
     assert hasattr(optim, "train") and callable(optim.train)
     assert hasattr(optim, "eval") and callable(optim.eval)
+
+
+# ---------------------------------------------------------------------------
+# create_came
+# ---------------------------------------------------------------------------
+
+
+def _has_came() -> bool:
+    try:
+        importlib.import_module("came_pytorch")
+        return True
+    except ImportError:
+        return False
+
+
+def test_create_came_import_error_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    """没装 came-pytorch 时报错信息要含安装提示，而不是裸 ImportError。
+
+    用 builtins.__import__ 强制让 `from came_pytorch import CAME` 抛 ImportError，
+    不依赖运行环境是否真装了 came-pytorch。
+    """
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "came_pytorch" or name.startswith("came_pytorch."):
+            raise ImportError("simulated: no came_pytorch")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.delitem(sys.modules, "came_pytorch", raising=False)
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    model = nn.Linear(4, 4)
+    with pytest.raises(ImportError, match="came-pytorch"):
+        create_came(model.parameters(), lr=1e-4)
+
+
+@pytest.mark.skipif(not _has_came(), reason="came-pytorch 未安装")
+def test_create_came_updates_parameters() -> None:
+    """CAME 单步：参数被更新，外部 lr 写进 param_group（非 schedule-free）。"""
+    model = nn.Linear(2, 1, bias=False)
+    with torch.no_grad():
+        model.weight.fill_(1.0)
+    optim = create_came(model.parameters(), lr=1e-2, weight_decay=0.0)
+
+    model(torch.ones(1, 2)).sum().backward()
+    optim.step()
+
+    assert not torch.allclose(model.weight, torch.ones_like(model.weight))
+    assert optim.param_groups[0]["lr"] == pytest.approx(1e-2)
+
+
+@pytest.mark.skipif(not _has_came(), reason="came-pytorch 未安装")
+def test_create_came_normalizes_adamw_shape_defaults() -> None:
+    """通用 create_optimizer 默认 betas=(0.9,0.999)（2 元组）+ eps=1e-8（标量）形状对
+    CAME 不合法；create_came 应回退到 CAME 上游默认 3 元组 / 2 元组而不是崩。"""
+    model = nn.Linear(4, 4)
+    optim = create_optimizer("came", model.parameters(), learning_rate=1e-4)
+    betas = optim.param_groups[0]["betas"]
+    eps = optim.param_groups[0]["eps"]
+    assert len(tuple(betas)) == 3
+    assert len(tuple(eps)) == 2
+
+
+@pytest.mark.skipif(not _has_came(), reason="came-pytorch 未安装")
+def test_came_monitor_metrics_use_plain_lr() -> None:
+    """CAME 是外部 lr 系，监控按普通 param_group['lr'] 读，不走 Prodigy d 逻辑。"""
+    model = nn.Linear(4, 4)
+    optim = create_came(model.parameters(), lr=2e-4)
+    assert get_optimizer_monitor_metrics(optim) == {"lr": pytest.approx(2e-4)}
