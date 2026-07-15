@@ -892,6 +892,7 @@
     "modelRootDefault": "已恢复默认模型根目录",
     "mainModelSelected": "默认主模型已切到 {{name}}",
     "selectDefaultMainModel": "选作默认主模型",
+    "localBaseModel": "本地",
     "downloadInProgress": "下载中...",
     "downloadRequiredFirst": "未下载，请先下载",
     "defaultUpscaler": "默认放大器: {{name}}",

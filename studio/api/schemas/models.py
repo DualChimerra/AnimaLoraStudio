@@ -19,3 +19,13 @@ class UpscalerCustomDownloadRequest(BaseModel):
     source: str   # "hf" | "ms"
     repo_id: str  # 例 "Kim2091/UltraSharp" 或 ModelScope 同形式
     filename: str  # 例 "4x-UltraSharp.pth"
+
+
+class AnimaSelectRequest(BaseModel):
+    variant: str   # 预设 variant label 或已注册的自定义本地文件名
+
+
+class AnimaCustomDownloadRequest(BaseModel):
+    source: str   # "hf" | "ms"
+    repo_id: str  # 例 "user/my-anima-finetune"
+    filename: str  # 例 "my-base-v2.safetensors"

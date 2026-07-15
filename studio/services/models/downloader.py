@@ -34,9 +34,11 @@ from .paths import (
     UPSCALER_EXTS,
     UPSCALER_VARIANTS,
     WD14_FILES,
+    ANIMA_EXTS,
     anima_main_target,
     anima_vae_target,
     cltagger_target_root,
+    diffusion_models_dir,
     models_root,
     qwen_dir,
     selected_anima_variant,
@@ -221,6 +223,42 @@ def download_upscaler_custom(
         return False
     target = upscaler_dir(root) / save_name
     on_log(f"\n📥 自定义放大器 [{source}] {repo_id}/{repo_subpath} → {target}")
+    if source == "ms":
+        return _sources.download_flat_ms(repo_id, repo_subpath, target, on_log=on_log)
+    return _sources.download_flat(repo_id, repo_subpath, target, on_log=on_log)
+
+
+def download_anima_custom(
+    source: str,
+    repo_id: str,
+    filename: str,
+    root: Optional[Path] = None,
+    *,
+    on_log: Callable[[str], None] = print,
+) -> bool:
+    """自定义 base 模型下载：用户指定 HF/MS 仓库 + 文件名，落到
+    `{diffusion_models}/{filename}`，随后可在 Settings 里注册为默认 base。
+
+    与 download_upscaler_custom 同一套逻辑：扩展名白名单 ANIMA_EXTS
+    （.safetensors），filename 剥成纯文件名防穿越；repo 内子路径直接走
+    repo_id + filename（大多数 base repo 权重摆在根目录，需子目录时用户可在
+    filename 里写相对路径）。
+    """
+    if source not in ("hf", "ms"):
+        on_log(f"✗ 未知下载源 {source!r}（支持 hf / ms）")
+        return False
+    repo_subpath = filename
+    save_name = Path(filename).name  # 剥目录前缀，仅保留纯文件名
+    if "/" in save_name or "\\" in save_name or ".." in save_name:
+        on_log(f"✗ 非法文件名 {save_name!r}")
+        return False
+    if not save_name.lower().endswith(ANIMA_EXTS):
+        on_log(f"✗ 仅支持 {ANIMA_EXTS} 扩展名，收到 {save_name!r}")
+        return False
+    target_dir = diffusion_models_dir(root)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / save_name
+    on_log(f"\n📥 自定义 base 模型 [{source}] {repo_id}/{repo_subpath} → {target}")
     if source == "ms":
         return _sources.download_flat_ms(repo_id, repo_subpath, target, on_log=on_log)
     return _sources.download_flat(repo_id, repo_subpath, target, on_log=on_log)

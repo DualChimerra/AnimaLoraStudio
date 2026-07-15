@@ -64,8 +64,32 @@ class TrainingConfig(BaseModel):
     )
     resolution: int = Field(
         1024, ge=256, le=4096,
-        description="训练分辨率",
+        description="训练分辨率（= ARB 分桶的目标面积基准 base²）",
         json_schema_extra=_meta("dataset"),
+    )
+    # ---------------- 多分辨率 ARB 分桶（可配置桶比例）----------------
+    # 默认值与 runtime/training/dataset.py:BucketManager 及前端
+    # studio/web/src/lib/trainBuckets.ts 的 DEFAULTS 逐一对齐（512/2048/64/2.0/0.1）。
+    # 保持默认值不动 = 现有行为逐字节不变、裁剪页预测桶继续对齐（见 dataset.py §SYNC）。
+    bucket_min_reso: int = Field(
+        512, ge=64, le=4096,
+        description="ARB 分桶每边最小像素（step 的倍数）。默认 512",
+        json_schema_extra=_meta("dataset", advanced=True),
+    )
+    bucket_max_reso: int = Field(
+        2048, ge=64, le=8192,
+        description="ARB 分桶每边最大像素（step 的倍数）。默认 2048。调大可保留更大原图细节，显存也随之上升",
+        json_schema_extra=_meta("dataset", advanced=True),
+    )
+    bucket_step: int = Field(
+        64, ge=8, le=256,
+        description="ARB 分桶宽/高粒度（像素）。默认 64；VAE 下采样对齐要求通常为 8/16 的倍数",
+        json_schema_extra=_meta("dataset", advanced=True),
+    )
+    bucket_max_ar: float = Field(
+        2.0, ge=1.0, le=8.0,
+        description="ARB 分桶最大长宽比 max(w/h, h/w) 上限。默认 2.0；调大允许更极端的横/竖构图桶",
+        json_schema_extra=_meta("dataset", advanced=True),
     )
     reg_data_dir: Optional[str] = Field(
         None,
@@ -113,6 +137,83 @@ class TrainingConfig(BaseModel):
         True,
         description="缓存 VAE latent 加速训练",
         json_schema_extra=_meta("system"),
+    )
+
+    # --------------------------------------------------- NaViT / Patch-n-Pack
+    # 块对角打包训练。以下字段全部默认关闭 / 行为中立：navit_packing=False 时走原有
+    # ARB 分桶路径，字节等价。互斥项按本 fork 现有特性裁剪（无 leap/sra/tlora）。
+    navit_packing: bool = Field(
+        False,
+        description="启用 NaViT / Patch-n-Pack 块对角打包：按 token 预算把多张不同尺寸的图"
+                    "拼进一个训练序列（零 padding），替代 ARB 固定桶分批。需配合 cache_latents + 安装 xformers",
+        json_schema_extra=_meta(
+            "system",
+            advanced=True,
+            disable_when="infonoise_enabled==true",
+            disable_hint="与 InfoNoise 互斥（navit v1 未适配），需先关掉它",
+        ),
+    )
+    navit_token_budget: int = Field(
+        16384, ge=1,
+        description="单个打包序列的 token 预算上限（所有图 token 数之和 ≤ 此值）",
+        json_schema_extra=_meta("system", show_when="navit_packing==true", advanced=True),
+    )
+    navit_max_images_per_pack: int = Field(
+        0, ge=0,
+        description="每个包最多图片数（0=不限，仅受 token 预算约束）",
+        json_schema_extra=_meta("system", show_when="navit_packing==true", advanced=True),
+    )
+    navit_text_trim_padding: bool = Field(
+        False,
+        description="cross-attn 文本截断 padding（数据层标志，仅 navit_packing 时生效）",
+        json_schema_extra=_meta("system", show_when="navit_packing==true", advanced=True),
+    )
+    navit_pack_strategy: Literal["next_fit", "ffd"] = Field(
+        "next_fit",
+        description="打包策略：next_fit=顺序贪心（快、包较松）；ffd=First-Fit-Decreasing 窗口化（包更紧、更少步）",
+        json_schema_extra=_meta("system", show_when="navit_packing==true", advanced=True),
+    )
+    navit_pack_ffd_window: int = Field(
+        256, ge=0,
+        description="FFD 窗口大小（0=全局 FFD，每 epoch 包固定；>0=窗口内 FFD + 跨 epoch reshuffle）",
+        json_schema_extra=_meta("system", show_when="navit_packing==true", advanced=True),
+    )
+    navit_drop_last: bool = Field(
+        False,
+        description="丢弃最后一个未填满的包（对齐 step 计数；False=保留短包）",
+        json_schema_extra=_meta("system", show_when="navit_packing==true", advanced=True),
+    )
+    navit_native_resolution: bool = Field(
+        False,
+        description="按原生分辨率定尺寸（floor 对齐 16px、零 padding），绕过 ARB 桶对单图尺寸的量化；"
+                    "超大图按 navit_native_over_budget 处理。需 navit_packing + cache_latents",
+        json_schema_extra=_meta("system", show_when="navit_packing==true", advanced=True),
+    )
+    navit_native_over_budget: Literal["downscale", "fail"] = Field(
+        "downscale",
+        description="原生 token 数超 navit_token_budget（或模型 RoPE 单边上限）时的处理："
+                    "downscale=等比降采样到 fit（默认，永不 OOM/爆 token）；fail=报错要求调大预算或数据集端裁图",
+        json_schema_extra=_meta("system", show_when="navit_native_resolution==true", advanced=True),
+    )
+    cache_encode_tiled: bool = Field(
+        False,
+        description="缓存编码分块：超大图按 tile_px 分块 VAE encode + latent 羽化拼接（峰值显存 ∝ 单块像素）",
+        json_schema_extra=_meta("system", advanced=True),
+    )
+    cache_encode_tile_px: int = Field(
+        1024, ge=64,
+        description="分块 encode 的像素块边长（须为 VAE 下采样 8 的整倍数）",
+        json_schema_extra=_meta("system", show_when="cache_encode_tiled==true", advanced=True),
+    )
+    cache_encode_tile_overlap: int = Field(
+        128, ge=0,
+        description="分块重叠像素（羽化接缝宽度；0=无重叠硬接缝）",
+        json_schema_extra=_meta("system", show_when="cache_encode_tiled==true", advanced=True),
+    )
+    cache_encode_max_pixels: int = Field(
+        0, ge=0,
+        description="单次 encode 总像素上限（含翻转份）；0=用内置保守默认 4M。也是分块触发阈值",
+        json_schema_extra=_meta("system", show_when="cache_encode_tiled==true", advanced=True),
     )
 
     # ------------------------------------------------------------------- LoRA
@@ -207,12 +308,12 @@ class TrainingConfig(BaseModel):
     )
     lr_scheduler: Literal["none", "cosine", "cosine_with_restart", "cosine_with_warmup"] = Field(
         "none",
-        description="学习率调度（none = 常数；Prodigy / PPSF 固定为 none）",
+        description="学习率调度（none = 常数；Prodigy / PPSF / Automagic / SOAP-SF 固定为 none）",
         json_schema_extra=_meta(
             "training",
-            disable_when="optimizer_type==automagic||optimizer_type==prodigy||optimizer_type==prodigy_plus_schedulefree",
+            disable_when="optimizer_type==automagic||optimizer_type==prodigy||optimizer_type==prodigy_plus_schedulefree||optimizer_type==soap_sf",
             disable_value="none",
-            disable_hint="自适应优化器固定为常数学习率",
+            disable_hint="自适应 / Schedule-Free 优化器固定为常数学习率",
         ),
     )
     lr_scheduler_t0: int = Field(
@@ -235,9 +336,9 @@ class TrainingConfig(BaseModel):
         description="cosine_with_warmup 预热步数",
         json_schema_extra=_meta("training", show_when="lr_scheduler==cosine_with_warmup", advanced=True),
     )
-    optimizer_type: Literal["adamw", "automagic", "came", "lion", "prodigy", "prodigy_plus_schedulefree"] = Field(
+    optimizer_type: Literal["adamw", "automagic", "came", "lion", "prodigy", "prodigy_plus_schedulefree", "soap", "soap_sf"] = Field(
         "adamw",
-        description="优化器。adamw 标准基线；automagic 自适应每参数 lr（推荐 lr=1e-6）；came 显存高效（Adafactor 式 + confidence 修正，外部 lr 同 adamw，可叠 scheduler）；lion 显存约 AdamW 一半（推荐 lr=AdamW lr / 3）；prodigy / prodigy_plus_schedulefree 自适应估 lr（lr 填 1.0）",
+        description="优化器。adamw 标准基线；automagic 自适应每参数 lr（推荐 lr=1e-6）；came 显存高效（Adafactor 式 + confidence 修正，外部 lr 同 adamw，可叠 scheduler）；lion 显存约 AdamW 一半（推荐 lr=AdamW lr / 3）；prodigy / prodigy_plus_schedulefree 自适应估 lr（lr 填 1.0）；soap Adam-in-Shampoo-eigenbasis 二阶预条件（拟合更快，lr 同 AdamW 量级）；soap_sf SOAP + Schedule-Free（lr_scheduler 固定 none）",
         json_schema_extra=_meta("training"),
     )
     prodigy_d_coef: float = Field(
@@ -370,6 +471,55 @@ class TrainingConfig(BaseModel):
         1.0, gt=0.0,
         description="CAME update RMS 裁剪阈值；上游默认 1.0",
         json_schema_extra=_meta("training", show_when="optimizer_type==came", advanced=True),
+    )
+    # ------------------------- SOAP / SOAP-SF 专属字段 -------------------------
+    # SOAP = Adam in the Shampoo eigenbasis（Vyas et al. 2024, arxiv 2409.11321）。
+    # soap_sf = SOAP + Schedule-Free（arxiv 2405.15682）；选 soap_sf 时 lr_scheduler
+    # 必须 none（启动期校验会 fatal），lr 用 AdamW 量级（不像 Prodigy 填 1.0）。
+    soap_beta1: float = Field(
+        0.95, ge=0.0, lt=1.0,
+        description="SOAP β1。soap：Adam 一阶动量衰减；soap_sf：Schedule-Free 的 z↔x 插值权重（不是动量）。soap_sf 常用 0.9",
+        json_schema_extra=_meta("training", show_when="optimizer_type==soap||optimizer_type==soap_sf", advanced=True),
+    )
+    soap_beta2: float = Field(
+        0.95, ge=0.0, lt=1.0,
+        description="SOAP β2（二阶矩 / eigenbasis 协方差衰减）",
+        json_schema_extra=_meta("training", show_when="optimizer_type==soap||optimizer_type==soap_sf", advanced=True),
+    )
+    soap_precondition_frequency: int = Field(
+        10, ge=1,
+        description="每 N 步刷新一次 Shampoo 特征基：越大越省算力、特征基越旧。典型 5-20",
+        json_schema_extra=_meta("training", show_when="optimizer_type==soap||optimizer_type==soap_sf", advanced=True),
+    )
+    soap_max_precond_dim: int = Field(
+        10000, ge=1,
+        description="逐维阈值：某轴维度 ≤ 此值才建满秩二阶预条件，> 此值该轴退化为 Adam。设大（10000）让大特征维也做二阶=提速主来源；设小=SOAP-lite 省显存",
+        json_schema_extra=_meta("training", show_when="optimizer_type==soap||optimizer_type==soap_sf", advanced=True),
+    )
+    soap_shampoo_beta: float = Field(
+        -1.0, le=1.0,
+        description="Shampoo 协方差 EMA 衰减；< 0 时复用 β2（推荐）",
+        json_schema_extra=_meta("training", show_when="optimizer_type==soap||optimizer_type==soap_sf", advanced=True),
+    )
+    soap_precond_in_state: bool = Field(
+        True,
+        description="是否把可重算的 Shampoo 矩阵（GG/Q）存进 ckpt。False=ckpt 更小、resume 时冷重建特征基（从零训练不 resume 时零代价）",
+        json_schema_extra=_meta("training", show_when="optimizer_type==soap||optimizer_type==soap_sf", advanced=True),
+    )
+    soap_sf_weight_lr_power: float = Field(
+        2.0, ge=0.0,
+        description="Schedule-Free Polyak 权重里 lr 的幂；越大越偏向 lr 大的步",
+        json_schema_extra=_meta("training", show_when="optimizer_type==soap_sf", advanced=True),
+    )
+    soap_sf_r: float = Field(
+        0.0, ge=0.0,
+        description="Schedule-Free Polyak 权重里 step index 的幂（0=均匀平均；越大越偏向后期 iterate，短训练 x 追 z 更快）",
+        json_schema_extra=_meta("training", show_when="optimizer_type==soap_sf", advanced=True),
+    )
+    soap_sf_warmup_steps: int = Field(
+        0, ge=0,
+        description="Schedule-Free 线性 lr warmup 步数；SF 一般不需要，几步可稳定早期预条件估计",
+        json_schema_extra=_meta("training", show_when="optimizer_type==soap_sf", advanced=True),
     )
     weight_decay: float = Field(
         0.0, ge=0.0,
@@ -583,10 +733,52 @@ class TrainingConfig(BaseModel):
     def _migrate_noise_enhancement(cls, data: Any) -> Any:
         return migrate_noise_enhancement_type(data)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_navit_attention_backend(cls, data: Any) -> Any:
+        """NaViT 打包的块对角 attention 必需 xformers varlen（运行时只认 xformers 是否
+        安装）。navit_packing 开启时强制 attention_backend=xformers——避免用户选了
+        flash/none 以为对 navit 训练生效，实际 navit 训练步只走 xformers varlen。"""
+        if isinstance(data, dict) and data.get("navit_packing"):
+            data["attention_backend"] = "xformers"
+        return data
+
+    @model_validator(mode="after")
+    def _validate_navit_exclusive(self) -> "TrainingConfig":
+        """NaViT / Patch-n-Pack 打包训练的配置校验与互斥（本 fork 裁剪版）。
+
+        navit 改变了 batch 语义（一包异构图、逐图 t）。v1 fail-fast：与 InfoNoise
+        互斥（InfoNoise 的 I-MMSE record 需标准路径 per-sample MSE，navit 的 per-image
+        loss 语义不同，v1 未适配）。上游还互斥 leap/sra/tlora，本 fork 无这些特性。
+        前置：cache_latents=true（按 latent token 数预算分包）、navit_token_budget>0。
+        """
+        if self.navit_native_resolution and not self.navit_packing:
+            raise ValueError(
+                "navit_native_resolution=true 需要 navit_packing=true"
+                "（原生定尺寸只在 NaViT 块对角打包路径生效）。"
+            )
+        if not self.navit_packing:
+            return self
+        if self.infonoise_enabled:
+            raise ValueError(
+                "navit_packing(v1) 暂不支持与 InfoNoise 同时开启（infonoise_enabled）。"
+                "请关掉它，或暂不使用 NaViT 打包。"
+            )
+        if not self.cache_latents:
+            raise ValueError(
+                "navit_packing 需要 cache_latents=true（打包按 latent token 数预算分包，"
+                "需要预编码缓存）。"
+            )
+        if self.navit_token_budget <= 0:
+            raise ValueError(
+                "navit_packing 需要显式设置 navit_token_budget（>0，按显存定）。"
+            )
+        return self
+
     @model_validator(mode="after")
     def _validate_prodigy_scheduler(self) -> "TrainingConfig":
-        """Prodigy 系列固定使用常数学习率，外部 scheduler 统一拦截。"""
-        if self.optimizer_type in {"automagic", "prodigy", "prodigy_plus_schedulefree"} and self.lr_scheduler != "none":
+        """Prodigy / Automagic / Schedule-Free 系列固定使用常数学习率，外部 scheduler 统一拦截。"""
+        if self.optimizer_type in {"automagic", "prodigy", "prodigy_plus_schedulefree", "soap_sf"} and self.lr_scheduler != "none":
             raise ValueError(
                 f"optimizer_type={self.optimizer_type} requires lr_scheduler=none "
                 "(自适应优化器固定使用常数学习率)."
@@ -600,6 +792,16 @@ class TrainingConfig(BaseModel):
             raise ValueError(
                 f"detail_inv_t_min ({self.detail_inv_t_min}) 不能大于 "
                 f"detail_inv_t_max ({self.detail_inv_t_max})。"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_bucket_reso_range(self) -> "TrainingConfig":
+        """ARB 分桶 min 必须 <= max，且区间至少能容纳一个 step，否则桶集为空。"""
+        if self.bucket_min_reso > self.bucket_max_reso:
+            raise ValueError(
+                f"bucket_min_reso ({self.bucket_min_reso}) 不能大于 "
+                f"bucket_max_reso ({self.bucket_max_reso})。"
             )
         return self
 
