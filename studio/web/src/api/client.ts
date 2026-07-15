@@ -437,6 +437,10 @@ export interface AnimaVariantInfo extends ModelFileStatus {
   variant: string
   is_latest: boolean
   target_path: string
+  /** 'preset' = 可下载的官方 variant；'custom' = diffusion_models/ 里的本地 checkpoint。
+   *  旧后端不返回此字段时按 'preset' 处理（向后兼容）。 */
+  kind?: 'preset' | 'custom'
+  is_current?: boolean
 }
 
 export interface AnimaMainCatalog {

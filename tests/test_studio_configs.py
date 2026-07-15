@@ -91,7 +91,7 @@ def test_schema_carries_ui_metadata(client: TestClient) -> None:
     assert props["lion_beta1"]["show_when"] == "optimizer_type==lion"
     assert props["lion_beta2"]["show_when"] == "optimizer_type==lion"
     assert "automagic" not in props["learning_rate"]["disable_when"]
-    assert props["lr_scheduler"]["disable_when"] == "optimizer_type==automagic||optimizer_type==prodigy||optimizer_type==prodigy_plus_schedulefree"
+    assert props["lr_scheduler"]["disable_when"] == "optimizer_type==automagic||optimizer_type==prodigy||optimizer_type==prodigy_plus_schedulefree||optimizer_type==soap_sf"
     assert props["lr_scheduler_warmup_steps"]["show_when"] == "lr_scheduler==cosine_with_warmup"
     assert props["automagic_min_lr"]["show_when"] == "optimizer_type==automagic"
     assert props["automagic_max_lr"]["show_when"] == "optimizer_type==automagic"
@@ -367,7 +367,7 @@ def test_get_preset_with_warnings_reports_defaulted(
 ) -> None:
     """字段值不合法时回退默认值并列入 defaulted_fields。"""
     payload = _payload()
-    payload["optimizer_type"] = "lion"  # 不在 Literal 里
+    payload["optimizer_type"] = "nonexistent_opt"  # 不在 Literal 里（lion 已是合法值）
     yaml_bytes = yaml.safe_dump(payload, allow_unicode=True).encode("utf-8")
     (presets_dir / "badval.yaml").write_bytes(yaml_bytes)
 

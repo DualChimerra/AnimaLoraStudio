@@ -23,14 +23,17 @@ from .paths import (
     T5_REPO,
     TAEFLUX_FILES,
     TAEFLUX_REPO,
+    ANIMA_EXTS,
     UPSCALER_EXTS,
     UPSCALER_VARIANTS,
     WD14_FILES,
     anima_main_target,
     anima_vae_target,
     cltagger_target_root,
+    diffusion_models_dir,
     models_root,
     qwen_dir,
+    selected_anima_variant,
     selected_upscaler,
     t5_tokenizer_dir,
     taeflux_dir,
@@ -61,16 +64,42 @@ def build_catalog(root: Optional[Path] = None) -> dict[str, Any]:
     """
     r = root or models_root()
 
+    # Anima 主模型：预设 variant + 扫盘合并自定义本地 base（镜像 upscaler 逻辑）。
+    # - Pass 1：ANIMA_VARIANTS 预设全列（即便未下载，提供下载入口），kind=preset
+    # - Pass 2：扫 diffusion_models/ 里所有 .safetensors，把不属于预设文件名的当
+    #   custom base 加进列表（用户手动放置 / download_anima_custom 落地的文件）
+    selected_anima = selected_anima_variant()
     anima_variants = []
+    preset_filenames: set[str] = set()
     for vname, subpath in ANIMA_VARIANTS.items():
         target = anima_main_target(r, vname)
+        preset_filenames.add(target.name)
         st = _file_status(target)
         anima_variants.append({
             "variant": vname,
+            "kind": "preset",
             "is_latest": vname == LATEST_ANIMA,
+            "is_current": vname == selected_anima,
             "target_path": str(target),
             **st,
         })
+    dm_dir = diffusion_models_dir(r)
+    if dm_dir.exists():
+        for f in sorted(dm_dir.iterdir()):
+            if not f.is_file():
+                continue
+            if f.suffix.lower() not in ANIMA_EXTS:
+                continue
+            if f.name in preset_filenames:
+                continue
+            anima_variants.append({
+                "variant": f.name,
+                "kind": "custom",
+                "is_latest": False,
+                "is_current": f.name == selected_anima,
+                "target_path": str(f),
+                **_file_status(f),
+            })
 
     vae_target = anima_vae_target(r)
     qwen_d = qwen_dir(r)

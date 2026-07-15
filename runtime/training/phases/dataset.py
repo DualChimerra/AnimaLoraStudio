@@ -19,8 +19,10 @@ from training.dataset import (
     CachedLatentDataset,
     ImageDataset,
     MergedDataset,
+    NavitPackBatchSampler,
     collate_fn,
     collate_fn_cached,
+    collate_fn_navit_pack,
 )
 
 
@@ -39,7 +41,33 @@ def run(ctx: TrainingContext) -> None:
     args = ctx.args
 
     # 数据集
-    ctx.bucket_mgr = BucketManager(args.resolution)
+    # 多分辨率 ARB 分桶（可配置桶比例）。getattr 兜底旧 yaml —— 缺字段时用与
+    # BucketManager / trainBuckets.ts 一致的默认值（512/2048/64/2.0），行为不变。
+    ctx.bucket_mgr = BucketManager(
+        base_reso=args.resolution,
+        min_reso=int(getattr(args, "bucket_min_reso", 512) or 512),
+        max_reso=int(getattr(args, "bucket_max_reso", 2048) or 2048),
+        step=int(getattr(args, "bucket_step", 64) or 64),
+        max_ar=float(getattr(args, "bucket_max_ar", 2.0) or 2.0),
+    )
+    # NaViT 原生定尺寸参数（navit_native_resolution，opt-in）。关闭时全为中性值 →
+    # ImageDataset 走原有 ARB 桶路径，行为不变。RoPE 单边上限从模型取（max_img_h//
+    # patch_spatial）；取不到则 0（不设限，前向 _packed_rope_from_grid 会 fail-fast）。
+    _navit_native = bool(getattr(args, "navit_native_resolution", False))
+    _native_max_tokens = int(getattr(args, "navit_token_budget", 0) or 0) if _navit_native else 0
+    _native_max_side = 0
+    if _navit_native:
+        _m = getattr(ctx, "model", None)
+        _mh = getattr(_m, "max_img_h", None)
+        _ps = getattr(_m, "patch_spatial", 2) or 2
+        if _mh:
+            _native_max_side = int(_mh) // int(_ps)
+    _native_kwargs = dict(
+        native_resolution=_navit_native,
+        native_max_tokens=_native_max_tokens,
+        native_max_side_tokens=_native_max_side,
+        native_over_budget=str(getattr(args, "navit_native_over_budget", "downscale") or "downscale"),
+    )
     ctx.base_dataset = ImageDataset(
         args.data_dir, args.resolution, ctx.bucket_mgr,
         shuffle_caption=args.shuffle_caption,
@@ -47,6 +75,7 @@ def run(ctx: TrainingContext) -> None:
         flip_augment=args.flip_augment,
         tag_dropout=args.tag_dropout,
         prefer_json=args.prefer_json,
+        **_native_kwargs,
     )
     ctx.dataset = ctx.base_dataset
 
@@ -68,6 +97,7 @@ def run(ctx: TrainingContext) -> None:
                 tag_dropout=0.0,  # 正则集通常不用 dropout
                 prefer_json=args.prefer_json,
                 caption_override=reg_caption if reg_caption else None,
+                **_native_kwargs,
             )
             ctx.reg_dataset = reg_base
             reg_weight = float(getattr(args, "reg_weight", 1.0) or 1.0)
@@ -91,7 +121,26 @@ def run(ctx: TrainingContext) -> None:
         logger.warning("num_workers > 0 在 Windows 上容易崩溃：已强制设为 0（避免多进程 spawn 问题）")
         args.num_workers = 0
 
-    if ctx.use_cached:
+    if bool(getattr(args, "navit_packing", False)):
+        # NaViT / Patch-n-Pack：按 token 预算把异构图打成块对角包（需 cache_latents，
+        # schema 层已 fail-fast 校验）。collate 保留 per-image latent 列表，loop.py 的
+        # navit 分支做块对角打包前向。
+        navit_sampler = NavitPackBatchSampler(
+            ctx.dataset,
+            token_budget=int(getattr(args, "navit_token_budget", 16384) or 16384),
+            max_images_per_pack=int(getattr(args, "navit_max_images_per_pack", 0) or 0),
+            shuffle=True,
+            seed=getattr(args, "seed", 42),
+            drop_last=bool(getattr(args, "navit_drop_last", False)),
+            strategy=str(getattr(args, "navit_pack_strategy", "next_fit") or "next_fit"),
+            ffd_window=int(getattr(args, "navit_pack_ffd_window", 256) or 0),
+        )
+        ctx.dataloader = DataLoader(
+            ctx.dataset, batch_sampler=navit_sampler,
+            collate_fn=collate_fn_navit_pack,
+            num_workers=args.num_workers,
+        )
+    elif ctx.use_cached:
         # drop_last=False：桶尾不足 batch_size 出短 batch 而非丢图。
         # 对齐 kohya sd-scripts / ostris ai-toolkit；diffusion 用 LayerNorm/GroupNorm，
         # 对动态 batch 不敏感，loop.py 也按 latents.shape[0] 动态读 bs。

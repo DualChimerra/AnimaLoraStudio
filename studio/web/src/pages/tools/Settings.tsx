@@ -859,10 +859,12 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
                       style={{ accentColor: 'var(--accent)' }}
                       title={canSelect ? t('settings.selectDefaultMainModel') : v.exists ? t('settings.downloadInProgress') : t('settings.downloadRequiredFirst')}
                     />
-                    <code className="font-mono text-fg-primary w-32 shrink-0">{v.variant}</code>
+                    <code className="font-mono text-fg-primary w-32 shrink-0 truncate" title={v.variant}>{v.variant}</code>
                     <ModelStatusBadge exists={v.exists} size={v.size} status={dl?.status} />
                     <span style={{ flex: 1 }} />
-                    <DownloadButton exists={v.exists} status={dl?.status} busy={busy.has(key)} onClick={() => void start('anima_main', v.variant)} />
+                    {v.kind === 'custom'
+                      ? <span className="text-fg-tertiary shrink-0" title={v.target_path}>{t('settings.localBaseModel')}</span>
+                      : <DownloadButton exists={v.exists} status={dl?.status} busy={busy.has(key)} onClick={() => void start('anima_main', v.variant)} />}
                   </li>
                 )
               })}

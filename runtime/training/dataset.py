@@ -11,7 +11,9 @@
 from __future__ import annotations
 
 import logging
+import math
 import random
+from dataclasses import dataclass
 from pathlib import Path
 
 import torch
@@ -19,6 +21,113 @@ from torch.utils.data import Dataset
 
 
 logger = logging.getLogger(__name__)
+
+
+# ===========================================================================
+# NaViT / Patch-n-Pack 原生定尺寸规划（navit_native_resolution，opt-in）
+# ===========================================================================
+
+
+@dataclass
+class NativeFitImagePlan:
+    """NaViT 原生定尺寸的规划结果（``navit_native_resolution``）。
+
+    ``width``/``height`` 是最终喂给 VAE 的像素尺寸（``align`` 的整倍数）。像素路径
+    复用 ``ImageDataset`` 现有的 resize-cover + center-crop（零 padding），因此有效区
+    永远填满整张 latent（navit 缓存路径不携带 mask 的前提成立）。
+    """
+    source_width: int
+    source_height: int
+    width: int
+    height: int
+    token_w: int
+    token_h: int
+    token_count: int
+    was_downscaled: bool
+
+
+def plan_native_fit_image(
+    width: int,
+    height: int,
+    *,
+    max_tokens: int = 0,
+    max_side_tokens: int = 0,
+    align: int = 16,
+    over_budget: str = "downscale",
+) -> NativeFitImagePlan:
+    """规划单张图的原生定尺寸（floor 对齐到 ``align``，可选超预算 downscale）。
+
+    对齐单元 ``align = patch_spatial(2) × vae_downsample(8) = 16px``。
+
+    - 普通情形（原生 token ≤ ``max_tokens`` 且各边 ≤ ``max_side_tokens``）：每边 floor 到
+      ``align`` 整倍数（丢 ≤align-1 px），不缩放、宽高比几乎不变。
+    - 超预算：``downscale``（默认）等比缩到同时满足两上限，再各轴 floor 到 align；
+      ``fail`` 直接报错。``max_tokens`` / ``max_side_tokens`` 为 0 表示该维不设限。
+    """
+    W, H = int(width), int(height)
+    if W <= 0 or H <= 0:
+        raise ValueError(f"image dimensions must be positive, got {W}x{H}")
+    align = max(1, int(align))
+    max_tokens = max(0, int(max_tokens or 0))
+    max_side = max(0, int(max_side_tokens or 0))
+
+    gw, gh = W // align, H // align
+    if gw <= 0 or gh <= 0:
+        raise ValueError(
+            f"image {W}x{H} smaller than one align unit ({align}px); cannot form a token"
+        )
+
+    over_side = bool(max_side and (gw > max_side or gh > max_side))
+    over_budget_tokens = bool(max_tokens and gw * gh > max_tokens)
+
+    if not over_side and not over_budget_tokens:
+        return NativeFitImagePlan(
+            source_width=W, source_height=H,
+            width=gw * align, height=gh * align,
+            token_w=gw, token_h=gh, token_count=gw * gh,
+            was_downscaled=False,
+        )
+
+    strategy = (over_budget or "downscale").lower()
+    if strategy == "fail":
+        reasons = []
+        if over_budget_tokens:
+            reasons.append(f"{gw * gh} tokens > navit_token_budget={max_tokens}")
+        if over_side:
+            reasons.append(
+                f"side {max(gw, gh)} tokens > RoPE 单边上限 {max_side}"
+                f"（≈{max_side * align}px）"
+            )
+        raise ValueError(
+            f"[navit-native] 图 {W}x{H} 原生尺寸超限（{'；'.join(reasons)}）。"
+            "调大 navit_token_budget / 提高 max_img_h·max_img_w，或把 "
+            "navit_native_over_budget 设为 downscale（默认，自动等比降采样）。"
+        )
+    if strategy != "downscale":
+        raise ValueError(
+            f"unknown navit_native_over_budget={over_budget!r}; expected downscale or fail"
+        )
+
+    s = 1.0
+    if over_side:
+        s = min(s, max_side / float(max(gw, gh)))
+    if max_tokens and gw * gh > max_tokens:
+        s = min(s, math.sqrt(max_tokens / float(gw * gh)))
+    ngw = max(1, int(gw * s))
+    ngh = max(1, int(gh * s))
+    if max_side:
+        ngw, ngh = min(ngw, max_side), min(ngh, max_side)
+    if max_tokens and ngw * ngh > max_tokens:
+        if ngw >= ngh:
+            ngw = max(1, max_tokens // ngh)
+        else:
+            ngh = max(1, max_tokens // ngw)
+    return NativeFitImagePlan(
+        source_width=W, source_height=H,
+        width=ngw * align, height=ngh * align,
+        token_w=ngw, token_h=ngh, token_count=ngw * ngh,
+        was_downscaled=True,
+    )
 
 
 class BucketManager:
@@ -36,25 +145,29 @@ class BucketManager:
     See ``docs/design/preprocess-crop-design.md`` §7 for the UX policy and
     rationale.
     """
-    def __init__(self, base_reso=1024, min_reso=512, max_reso=2048, step=64):
+    def __init__(self, base_reso=1024, min_reso=512, max_reso=2048, step=64,
+                 max_ar=2.0, area_tolerance=0.1):
         self.base_reso = base_reso
-        self.buckets = self._generate(min_reso, max_reso, step, base_reso)
+        self.buckets = self._generate(min_reso, max_reso, step, base_reso,
+                                      max_ar, area_tolerance)
 
-    def _generate(self, min_r, max_r, step, base):
+    def _generate(self, min_r, max_r, step, base, max_ar=2.0, area_tolerance=0.1):
         # Keep algorithm identical to trainBuckets.generateBuckets() in TS:
         #   - double loop over (w, h) in [min_r, max_r] step `step`
-        #   - area within ±10% of base² (the 0.1 below)
-        #   - max AR ratio ≤ 2.0 (the 2.0 below)
-        # Default-param consumers should see exactly the same 37 buckets on
-        # both sides — covered by `studio/web/src/lib/trainBuckets.test.ts`
-        # asserting count == 37.
+        #   - area within ±area_tolerance of base² (0.1 default)
+        #   - max AR ratio ≤ max_ar (2.0 default)
+        # With DEFAULT params both sides must still yield exactly 37 buckets —
+        # covered by `studio/web/src/lib/trainBuckets.test.ts` asserting == 37.
+        # These params are now runtime-configurable (multi-res bucket ratios);
+        # the TS defaults are unchanged so the crop-page prediction stays aligned
+        # for the default case (see docstring §SYNC).
         buckets = []
         base_area = base * base
         for w in range(min_r, max_r + 1, step):
             for h in range(min_r, max_r + 1, step):
-                if abs(w * h - base_area) / base_area > 0.1:
+                if abs(w * h - base_area) / base_area > area_tolerance:
                     continue
-                if max(w/h, h/w) > 2.0:
+                if max(w/h, h/w) > max_ar:
                     continue
                 buckets.append((w, h))
         return buckets
@@ -87,7 +200,9 @@ class ImageDataset(Dataset):
 
     def __init__(self, data_dir, resolution=1024, bucket_mgr=None,
                  shuffle_caption=False, keep_tokens=0, flip_augment=False,
-                 tag_dropout=0.0, prefer_json=True, caption_override=None):
+                 tag_dropout=0.0, prefer_json=True, caption_override=None,
+                 native_resolution=False, native_max_tokens=0,
+                 native_max_side_tokens=0, native_over_budget="downscale"):
         self.data_dir = Path(data_dir)
         self.resolution = resolution
         self.bucket_mgr = bucket_mgr
@@ -97,6 +212,13 @@ class ImageDataset(Dataset):
         self.tag_dropout = tag_dropout
         self.prefer_json = prefer_json
         self.caption_override = caption_override  # 正则集：统一 caption，如 "1girl, solo"
+        # NaViT 原生定尺寸（navit_native_resolution，opt-in）：开启时单图按原生尺寸
+        # floor 对齐 16px 定尺寸（绕过 ARB 桶量化），复用同一 resize-cover + center-crop
+        # → 永远零 padding。关闭时（默认）走原有 bucket_mgr 路径，字节等价。
+        self.native_resolution = bool(native_resolution)
+        self.native_max_tokens = int(native_max_tokens or 0)
+        self.native_max_side_tokens = int(native_max_side_tokens or 0)
+        self.native_over_budget = str(native_over_budget or "downscale")
         
         # 尝试导入 caption_utils（直接导入避开 __init__.py）
         self.caption_utils = None
@@ -270,6 +392,27 @@ class ImageDataset(Dataset):
     def __len__(self):
         return len(self.samples)
 
+    def target_size_for(self, img_w, img_h):
+        """单图目标像素尺寸 ``(tw, th)``。
+
+        - ``native_resolution=False``（默认）：ARB 桶 ``bucket_mgr.get_bucket`` 或
+          方形 ``resolution``（与历史行为逐字节一致）。
+        - ``native_resolution=True``：``plan_native_fit_image`` 原生 floor-16 + 超预算
+          downscale。cache 校验与 encode 都走本方法，保证尺寸一致。
+        """
+        if self.native_resolution:
+            plan = plan_native_fit_image(
+                img_w, img_h,
+                max_tokens=self.native_max_tokens,
+                max_side_tokens=self.native_max_side_tokens,
+                align=16,
+                over_budget=self.native_over_budget,
+            )
+            return plan.width, plan.height
+        if self.bucket_mgr:
+            return self.bucket_mgr.get_bucket(img_w, img_h)
+        return self.resolution, self.resolution
+
     def __getitem__(self, idx):
         # 默认 path：DataLoader 不能传额外参数，所以由 flip_augment 决定是否随机翻转。
         # CachedLatentDataset 想显式控制 flip 时直接调 get_with_flip(idx, flip=...)，
@@ -303,11 +446,8 @@ class ImageDataset(Dataset):
         if caption is None:
             caption = ""
 
-        # ARB 分桶
-        if self.bucket_mgr:
-            tw, th = self.bucket_mgr.get_bucket(img.width, img.height)
-        else:
-            tw = th = self.resolution
+        # 目标尺寸：ARB 桶（默认）或原生 floor-16 定尺寸（native_resolution 开）
+        tw, th = self.target_size_for(img.width, img.height)
 
         # 缩放裁剪
         scale = max(tw / img.width, th / img.height)
@@ -495,6 +635,9 @@ class CachedLatentDataset(Dataset):
         self.samples = self._get_base_samples(base_dataset)
         self.cache_dir = Path(cache_dir) if cache_dir else None
         self.bucket_for_index = []
+        # NaViT 打包器读的逐索引 token 数（patchify 后 = (h//2)*(w//2)）。
+        # 与 bucket_for_index 同步填充；navit_packing 关闭时无人读取。
+        self.token_count_for_index = []
         # cache 是否需要双份 latent —— 取决于底层 ImageDataset.flip_augment
         self.flip_augment = bool(
             getattr(self.base_image_dataset, "flip_augment", False)
@@ -523,6 +666,10 @@ class CachedLatentDataset(Dataset):
         try:
             from PIL import Image
             with Image.open(img_path) as img:
+                # target_size_for 同时覆盖 ARB 桶与 native_resolution 路径，保证
+                # cache 校验尺寸 == encode 实际尺寸（native 下取原生 floor-16）。
+                if hasattr(base, "target_size_for"):
+                    return base.target_size_for(img.width, img.height)
                 if getattr(base, "bucket_mgr", None):
                     return base.bucket_mgr.get_bucket(img.width, img.height)
                 resolution = int(getattr(base, "resolution"))
@@ -605,6 +752,7 @@ class CachedLatentDataset(Dataset):
         """Fill bucket_for_index for all samples (needed for BucketBatchSampler).
         Uses latent spatial shape (h, w) as grouping key so batches have consistent tensor sizes."""
         self.bucket_for_index = [None] * len(self.samples)
+        self.token_count_for_index = [0] * len(self.samples)
         for i in range(len(self.samples)):
             npz_path = self._get_npz_path(self.samples[i]["image"])
             if not npz_path.exists():
@@ -617,6 +765,8 @@ class CachedLatentDataset(Dataset):
             else:
                 _, _, h, w = s
             self.bucket_for_index[i] = (int(h), int(w))
+            # patch_spatial=2：patchify 后每图 token 数 = (h//2)*(w//2)。
+            self.token_count_for_index[i] = (int(h) // 2) * (int(w) // 2)
 
     def _encode_and_save(self, indices, vae, device, dtype):
         """编码图像并保存为 npz。
@@ -713,5 +863,248 @@ def collate_fn_cached(batch):
     result = {"latents": latents, "captions": captions}
     if "loss_weight" in batch[0]:
         result["loss_weight"] = torch.tensor([b["loss_weight"] for b in batch], dtype=torch.float32)
+        result["is_reg"] = torch.tensor([b["is_reg"] for b in batch], dtype=torch.bool)
+    return result
+
+
+# ===========================================================================
+# NaViT / Patch-n-Pack: token-budget 打包（NavitPackBatchSampler / collate）
+# ===========================================================================
+
+
+def pack_indices_by_budget(token_counts, token_budget, order, max_images_per_pack=0):
+    """贪心 next-fit 打包：把样本索引分进 token 总数 ≤ budget 的包。
+
+    NaViT 块对角打包无 padding，一个包的代价 = 各图 token 数之和。``order`` 是已打乱
+    的索引序列；自身 token 数超 budget 的图单独成包。覆盖 ``order`` 每索引恰好一次。
+    """
+    packs = []
+    cur, cur_sum = [], 0
+    cap = int(max_images_per_pack or 0)
+    budget = int(token_budget)
+    for idx in order:
+        n = int(token_counts[idx])
+        over_budget = bool(cur) and (cur_sum + n > budget)
+        over_count = cap > 0 and len(cur) >= cap
+        if over_budget or over_count:
+            packs.append(cur)
+            cur, cur_sum = [], 0
+        cur.append(idx)
+        cur_sum += n
+    if cur:
+        packs.append(cur)
+    return packs
+
+
+def pack_indices_ffd_windowed(token_counts, token_budget, order,
+                              max_images_per_pack=0, window=0):
+    """First-Fit-Decreasing 窗口化打包：在（已打乱的）``order`` 的窗口内做 FFD。
+
+    经典 FFD（按尺寸降序、逐个放入第一个能放下的桶）比 next-fit 打包更紧。``window``
+    把 ``order`` 切成连续窗口、FFD 在窗口内运行——``order`` 每 epoch 重洗 → 窗口成员
+    跨 epoch 变化，恢复大部分填充收益又保留 batch 多样性。``window<=0`` = 单个全局窗口。
+    """
+    budget = int(token_budget)
+    cap = int(max_images_per_pack or 0)
+    win = int(window or 0)
+    order = list(order)
+    if win <= 0:
+        windows = [order]
+    else:
+        windows = [order[i:i + win] for i in range(0, len(order), win)]
+
+    packs = []
+    for w in windows:
+        items = sorted(w, key=lambda i: int(token_counts[i]), reverse=True)
+        bins = []  # each: [list_of_indices, summed_tokens]
+        for idx in items:
+            n = int(token_counts[idx])
+            placed = False
+            for b in bins:
+                over_count = cap > 0 and len(b[0]) >= cap
+                if (not over_count) and (b[1] + n <= budget):
+                    b[0].append(idx)
+                    b[1] += n
+                    placed = True
+                    break
+            if not placed:
+                bins.append([[idx], n])
+        packs.extend(b[0] for b in bins)
+    return packs
+
+
+def _lookup_token_count_walk(d, idx):
+    """遍历数据集包装器解析样本 token 数（MergedDataset 两分支 + 单链兜底）。"""
+    main = getattr(d, "main_dataset", None)
+    reg = getattr(d, "reg_dataset", None)
+    if main is not None and reg is not None:
+        ml = getattr(d, "_main_len", len(main))
+        if idx < ml:
+            return _lookup_token_count_walk(main, idx)
+        return _lookup_token_count_walk(reg, idx - ml)
+    inner = getattr(d, "dataset", None)
+    if inner is not None and inner is not d and not isinstance(inner, list):
+        return _lookup_token_count_walk(inner, idx % len(inner))
+    counts = getattr(d, "token_count_for_index", None)
+    if counts is not None and len(counts) > 0:
+        return int(counts[idx % len(counts)])
+    inner = getattr(d, "base_dataset", None)
+    if inner is not None and inner is not d:
+        return _lookup_token_count_walk(inner, idx % len(inner))
+    return 0
+
+
+def _walk_attr_list(dataset, attr):
+    """在单链包装器（RepeatDataset/CachedLatentDataset）里找叶数据集的 per-index
+    列表属性 ``attr``，按 ``% len`` 映射到 ``len(dataset)``。MergedDataset（两分支）
+    或属性不存在时返回 None。"""
+    cur = dataset
+    for _ in range(12):
+        if getattr(cur, "main_dataset", None) is not None and getattr(cur, "reg_dataset", None) is not None:
+            return None  # MergedDataset: not a single chain
+        v = getattr(cur, attr, None)
+        if v is not None and len(v) > 0:
+            n = len(dataset)
+            return [v[i % len(v)] for i in range(n)]
+        nxt = getattr(cur, "dataset", None)
+        if nxt is None or nxt is cur or isinstance(nxt, list):
+            nxt = getattr(cur, "base_dataset", None)
+        if nxt is None or nxt is cur:
+            return None
+        cur = nxt
+    return None
+
+
+def dataset_token_counts(dataset, patch_spatial=2):
+    """NaViT 打包的逐索引 token 数。
+
+    优先用 ``token_count_for_index``（CachedLatentDataset 填充）；退化时从
+    ``bucket_for_index=(h,w)`` 推导 ``(h//ps)*(w//ps)``；都不可用则逐索引 walk 兜底
+    （返回 0 → 打包器 fail-fast）。
+    """
+    counts = _walk_attr_list(dataset, "token_count_for_index")
+    if counts is not None and any(int(c) > 0 for c in counts):
+        return [int(c) for c in counts]
+
+    shapes = _walk_attr_list(dataset, "bucket_for_index")
+    if shapes is not None:
+        ps = max(1, int(patch_spatial))
+        derived = []
+        for s in shapes:
+            if not s:
+                derived.append(0)
+                continue
+            h, w = int(s[0]), int(s[1])
+            derived.append((h // ps) * (w // ps))
+        if any(c > 0 for c in derived):
+            return derived
+
+    return [int(_lookup_token_count_walk(dataset, i) or 0) for i in range(len(dataset))]
+
+
+class NavitPackBatchSampler:
+    """为 NaViT/Patch-n-Pack 块对角训练产出数据集索引包。
+
+    每个产出的列表是一个打包训练序列：其各图 token 数之和 ≤ ``token_budget``，整包
+    作为一个零 padding 的块对角 forward。把"每步图片数"与单图形状解耦——不同 token
+    数和长宽比的图可共享一个包，小数据集也能填满大 effective batch。
+    """
+
+    def __init__(self, dataset, token_budget, max_images_per_pack=0,
+                 shuffle=True, seed=42, drop_last=False,
+                 strategy="next_fit", ffd_window=256):
+        self.dataset = dataset
+        self.token_budget = int(token_budget)
+        self.max_images_per_pack = int(max_images_per_pack or 0)
+        self.shuffle = bool(shuffle)
+        self.seed = int(seed)
+        self.drop_last = bool(drop_last)
+        self.strategy = str(strategy or "next_fit").lower()
+        if self.strategy not in ("next_fit", "ffd"):
+            raise ValueError(
+                f"navit pack strategy 必须是 'next_fit' 或 'ffd'，收到 {strategy!r}"
+            )
+        self.ffd_window = int(ffd_window or 0)
+        self.epoch = 0
+        self.token_counts = dataset_token_counts(dataset)
+        self._cached_packs = None
+        # Fail-fast：全 0 token 数 → 无法解析每图尺寸 → 整集打成一个巨包 → OOM。
+        if not self.token_counts or not any(int(c) > 0 for c in self.token_counts):
+            raise RuntimeError(
+                "[NavitPack] 无法解析任一样本的 token 数（token_count_for_index 与 "
+                "bucket_for_index 都不可用/全 0）。NaViT 打包需要缓存数据集 "
+                "（cache_latents=true）以拿到每图 latent 形状。"
+            )
+        mx = max(self.token_counts) if self.token_counts else 0
+        if self.token_counts and self.token_budget < mx:
+            logger.warning(
+                "[NavitPack] token_budget=%d < 最大单图 token=%d：该图将单独成包，"
+                "可能超出预算并 OOM。建议 token_budget >= 最大单图 token。",
+                self.token_budget, mx,
+            )
+        logger.info(
+            "[NavitPack] dataset_len=%d token_budget=%d max_images_per_pack=%s "
+            "strategy=%s ffd_window=%s (token 数范围 %d..%d)",
+            len(self.token_counts), self.token_budget,
+            self.max_images_per_pack or "∞", self.strategy,
+            (self.ffd_window or "全局") if self.strategy == "ffd" else "-",
+            min(self.token_counts) if self.token_counts else 0, mx,
+        )
+
+    def set_epoch(self, epoch):
+        self.epoch = int(epoch)
+        self._cached_packs = None
+
+    def _build_packs(self):
+        order = list(range(len(self.token_counts)))
+        if self.shuffle:
+            random.Random(self.seed + self.epoch).shuffle(order)
+        if self.strategy == "ffd":
+            packs = pack_indices_ffd_windowed(
+                self.token_counts, self.token_budget, order,
+                self.max_images_per_pack, self.ffd_window,
+            )
+        else:
+            packs = pack_indices_by_budget(
+                self.token_counts, self.token_budget, order, self.max_images_per_pack
+            )
+        if self.drop_last and len(packs) > 1:
+            last_sum = sum(self.token_counts[i] for i in packs[-1])
+            if last_sum < self.token_budget:
+                packs = packs[:-1]
+        return packs
+
+    def __iter__(self):
+        packs = self._build_packs()
+        self._cached_packs = packs
+        for pack in packs:
+            yield pack
+
+    def __len__(self):
+        if self._cached_packs is None:
+            self._cached_packs = self._build_packs()
+        return len(self._cached_packs)
+
+
+def collate_fn_navit_pack(batch):
+    """NaViT 打包 collate。
+
+    一个包内缓存 latent 有不同空间形状、无法 stack；保留为列表。训练循环把每图
+    patchify 为 token、拼接 per-image RoPE grid、编码 caption 并拼接 text_seqlens，
+    再调用 ``forward_packed_navit``。
+    """
+    latents = [b["latent"] for b in batch]        # each [C, T, h_i, w_i]
+    captions = [b["caption"] for b in batch]
+    images = [b.get("image", "") for b in batch]
+    result = {
+        "navit_latents": latents,
+        "captions": captions,
+        "images": images,
+    }
+    # 正则集降权：透传 loss_weight / is_reg 供训练循环在 per-image loss 上应用。
+    if "loss_weight" in batch[0]:
+        result["loss_weight"] = torch.tensor(
+            [b["loss_weight"] for b in batch], dtype=torch.float32
+        )
         result["is_reg"] = torch.tensor([b["is_reg"] for b in batch], dtype=torch.bool)
     return result

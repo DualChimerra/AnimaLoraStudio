@@ -43,12 +43,16 @@ def test_adapter_builders_dict_has_lokr_loha_lora() -> None:
     assert set(BUILDERS) == {"lokr", "loha", "lora"}
 
 
-def test_optimizer_builders_dict_has_6_variants() -> None:
+def test_optimizer_builders_dict_has_8_variants() -> None:
     from training.optimizers import BUILDERS, VALIDATORS
-    assert set(BUILDERS) == {"adamw", "automagic", "came", "lion", "prodigy", "prodigy_plus_schedulefree"}
-    # Automagic / PPSF 有专属 validator，adamw / came / lion / prodigy 没有
+    assert set(BUILDERS) == {
+        "adamw", "automagic", "came", "lion", "prodigy", "prodigy_plus_schedulefree",
+        "soap", "soap_sf",
+    }
+    # Automagic / PPSF / soap_sf 有专属 validator（schedule-free 要求 lr_scheduler=none）；
+    # adamw / came / lion / prodigy / soap 没有
     # （CAME 是外部 lr + scheduler 系，无 lr=1.0 / lr_scheduler=none 约束）
-    assert set(VALIDATORS) == {"automagic", "prodigy_plus_schedulefree"}
+    assert set(VALIDATORS) == {"automagic", "prodigy_plus_schedulefree", "soap_sf"}
 
 
 def test_scheduler_builders_dict_excludes_none() -> None:

@@ -171,6 +171,55 @@ def anima_main_target(root: Path, variant: str) -> Path:
     return root / "diffusion_models" / Path(ANIMA_VARIANTS[variant]).name
 
 
+# 基础模型（Anima 主模型）扩展名白名单 —— 注册本地 checkpoint 为 base 时校验。
+ANIMA_EXTS: tuple[str, ...] = (".safetensors",)
+
+
+def diffusion_models_dir(root: Optional[Path] = None) -> Path:
+    """本地主模型（.safetensors）存放目录 —— 预设与自定义 base 都落在这里。"""
+    return (root or models_root()) / "diffusion_models"
+
+
+def _anima_preset_filenames() -> set[str]:
+    """预设 variant 落地后的纯文件名集合（把自定义文件从预设中区分开）。"""
+    return {Path(sp).name for sp in ANIMA_VARIANTS.values()}
+
+
+def is_custom_anima(name: Optional[str], root: Optional[Path] = None) -> bool:
+    """`name` 是否指向一个已落盘的自定义 base checkpoint（非预设 variant）。
+
+    判据同 `selected_upscaler` 的 custom 分支：带白名单扩展名、纯文件名（拒绝
+    路径分隔符 / 穿越）、不属于任何预设 variant、且在 diffusion_models/ 实际存在。
+    """
+    if not name or name in ANIMA_VARIANTS:
+        return False
+    safe = Path(name).name
+    if safe != name:  # 带目录前缀 / .. → 拒绝
+        return False
+    if not safe.lower().endswith(ANIMA_EXTS):
+        return False
+    if safe in _anima_preset_filenames():
+        return False
+    return (diffusion_models_dir(root) / safe).exists()
+
+
+def resolve_anima_main_path(variant: str, root: Optional[Path] = None) -> Path:
+    """把 variant（预设 label 或自定义本地文件名）解析成主模型绝对路径。
+
+    - 预设 label（含 "latest"）→ anima_main_target（行为不变）
+    - 已落盘的自定义文件名 → diffusion_models/{filename}
+    未知值回退到 LATEST_ANIMA 预设路径（与 selected_anima_variant 兜底一致）。
+    """
+    r = root or models_root()
+    if variant == "latest":
+        variant = LATEST_ANIMA
+    if variant in ANIMA_VARIANTS:
+        return anima_main_target(r, variant)
+    if is_custom_anima(variant, r):
+        return diffusion_models_dir(r) / Path(variant).name
+    return anima_main_target(r, LATEST_ANIMA)
+
+
 def anima_vae_target(root: Path) -> Path:
     return root / "vae" / Path(ANIMA_VAE_PATH).name
 
@@ -254,12 +303,20 @@ def find_anima_main(root: Optional[Path] = None) -> Optional[Path]:
 
 
 def selected_anima_variant() -> str:
-    """读 `secrets.models.selected_anima`，回退 LATEST_ANIMA。"""
+    """读 `secrets.models.selected_anima`，回退 LATEST_ANIMA。
+
+    返回值可能是：
+      - 预设 variant label（在 ANIMA_VARIANTS 中）
+      - 已注册的自定义本地 checkpoint 文件名（在 diffusion_models/ 存在）
+    两者都不匹配时回退 LATEST_ANIMA（与 selected_upscaler 的 custom 逻辑一致）。
+    """
     try:
         v = secrets.load().models.selected_anima
     except Exception:
         v = None
     if v and v in ANIMA_VARIANTS:
+        return v
+    if v and is_custom_anima(v):
         return v
     return LATEST_ANIMA
 
@@ -296,7 +353,7 @@ def default_paths_for_new_version() -> dict[str, str]:
     root = models_root()
     variant = selected_anima_variant()
     return {
-        "transformer_path": str(anima_main_target(root, variant)),
+        "transformer_path": str(resolve_anima_main_path(variant, root)),
         "vae_path": str(anima_vae_target(root)),
         "text_encoder_path": str(qwen_dir(root)),
         "t5_tokenizer_path": str(t5_tokenizer_dir(root)),

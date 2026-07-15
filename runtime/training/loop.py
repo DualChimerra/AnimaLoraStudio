@@ -18,6 +18,7 @@ import torch.nn.functional as F
 from training.context import TrainingContext
 from training.loss_weighting import compute_loss_weight
 from training.model_loading import forward_with_optional_checkpoint
+from training.navit import navit_packed_forward_and_loss, pack_cross_embeddings
 from training.noise import make_noise
 from training.observability import render_curve_panel
 from training.sample_runner import run_sample
@@ -58,16 +59,23 @@ def run(ctx: TrainingContext) -> None:
 
             captions = batch["captions"]
 
-            # 获取 latents（缓存模式或实时编码）
-            if ctx.use_cached:
+            # 获取 latents（缓存模式或实时编码 / NaViT 打包列表）
+            navit_latents = None
+            if bool(getattr(args, "navit_packing", False)):
+                # NaViT pack：per-image 缓存 latent（尺寸各异 → 保留为列表）。
+                navit_latents = [
+                    l.to(ctx.device, dtype=ctx.dtype) for l in batch["navit_latents"]
+                ]
+                bs = len(navit_latents)
+            elif ctx.use_cached:
                 latents = batch["latents"].to(ctx.device, dtype=ctx.dtype)
+                bs = latents.shape[0]
             else:
                 pixels = batch["pixel_values"].to(ctx.device, dtype=ctx.dtype)
                 with torch.no_grad():
                     pixels_5d = pixels.unsqueeze(2)  # [B,C,1,H,W]
                     latents = ctx.vae.model.encode(pixels_5d, ctx.vae.scale)
-
-            bs = latents.shape[0]
+                bs = latents.shape[0]
 
             # 文本编码
             with torch.no_grad():
@@ -110,69 +118,106 @@ def run(ctx: TrainingContext) -> None:
             )
             ctx.injector.on_step_begin(step_ctx)
 
-            t_exp = t.view(-1, 1, 1, 1, 1)
-            noise = make_noise(
-                latents,
-                noise_offset=float(getattr(args, "noise_offset", 0.0) or 0.0),
-                pyramid_iters=int(getattr(args, "pyramid_noise_iters", 0) or 0),
-                pyramid_discount=float(getattr(args, "pyramid_noise_discount", 0.35) or 0.35),
-            )
-            noisy = (1 - t_exp) * latents + t_exp * noise
-            target = noise - latents
-
-            # 前向
-            pad_mask = torch.zeros(bs, 1, latents.shape[-2], latents.shape[-1], device=ctx.device, dtype=ctx.dtype)
-            with torch.autocast("cuda", dtype=ctx.dtype):
-                pred = forward_with_optional_checkpoint(
-                    ctx.model, noisy, t.view(-1, 1), cross, pad_mask,
-                    use_checkpoint=args.grad_checkpoint,
-                )
-                # 训练 loss 通过 losses/ plugin registry 派发（mse / huber / ...）
-                loss_per_sample = ctx.loss_fn.compute(pred.float(), target.float(), t)
-                # 自适应采样器（如 InfoNoise）记录原始 per-sample MSE（不受 huber/loss_weighting 等
-                # 加工影响）；跟训练 loss 解耦保证 InfoNoise 论文一致性。
-                # baseline 采样器是 no-op，无需 if 守卫。
-                # 用 no_grad 避免构造 autograd 元数据（比 .detach() 少一份 grad_fn 开销）。
-                with torch.no_grad():
-                    _raw_mse_per_sample = F.mse_loss(pred.float(), target.float(), reduction="none")
-                    _raw_mse = _raw_mse_per_sample.mean(
-                        dim=list(range(1, _raw_mse_per_sample.dim()))
+            if navit_latents is not None:
+                # ── NaViT / Patch-n-Pack 块对角打包路径 ──
+                # per-image 加噪 + 一次块对角打包前向。InfoNoise 与 navit 互斥（schema
+                # 层 fail-fast），此路径不做 timestep_sampler.record。loss_weighting / 正则集
+                # loss_weight 按 per-image 权重接入（navit 逐图 t 对应 per-sample SNR 语义）。
+                with torch.autocast("cuda", dtype=ctx.dtype):
+                    cross_packed, text_seqlens = pack_cross_embeddings(
+                        cross, t5_attn,
+                        bool(getattr(args, "navit_text_trim_padding", False)),
                     )
-                # 仅 main 集样本进 InfoNoise schedule 学习：I-MMSE 假设单一数据分布，
-                # reg 集典型是通用图（booru）vs main 集是单一主题，混入 record 学到的是
-                # mixture MMSE 不是 mmse_main(t)。用 is_reg flag 而非 loss_weight 阈值
-                # 是因为 distribution identity 跟 gradient 权重是两条独立轴
-                # （reg_weight=1.0 时 loss_weight=1.0 但 reg 仍是不同分布）。
-                # 见 docs/todo/infonoise-reg-policy-reeval.md 未来重评估条件。
-                if "is_reg" in batch:
-                    _main_mask = ~batch["is_reg"].to(t.device)
-                    if _main_mask.any():
-                        ctx.timestep_sampler.record(t.detach()[_main_mask], _raw_mse[_main_mask])
-                else:
-                    ctx.timestep_sampler.record(t.detach(), _raw_mse)
-                # 按样本加权（正则集可降低权重）
-                if "loss_weight" in batch:
-                    w = batch["loss_weight"].to(ctx.device).view(-1, *([1] * (loss_per_sample.dim() - 1)))
-                    loss_per_sample = loss_per_sample * w
-                # timestep-dependent loss 权重
-                lw_scheme = str(getattr(args, "loss_weighting", "none") or "none")
-                if lw_scheme != "none":
-                    lw = compute_loss_weight(
-                        t,
-                        scheme=lw_scheme,
-                        min_snr_gamma=float(getattr(args, "min_snr_gamma", 5.0) or 5.0),
-                        weight_cap_ratio=float(getattr(args, "weight_cap_ratio", 0.0) or 0.0),
-                        detail_inv_t_min=float(getattr(args, "detail_inv_t_min", 1.0) or 1.0),
-                        detail_inv_t_max=float(getattr(args, "detail_inv_t_max", 5.0) or 5.0),
-                    ).to(device=ctx.device, dtype=torch.float32)
-                    loss_per_sample = loss_per_sample * lw.view(-1, *([1] * (loss_per_sample.dim() - 1)))
-                loss = loss_per_sample.mean()
+                    _piw = None
+                    if "loss_weight" in batch:
+                        _piw = batch["loss_weight"].to(ctx.device, dtype=torch.float32)
+                    _lw_scheme = str(getattr(args, "loss_weighting", "none") or "none")
+                    if _lw_scheme != "none":
+                        _lw = compute_loss_weight(
+                            t,
+                            scheme=_lw_scheme,
+                            min_snr_gamma=float(getattr(args, "min_snr_gamma", 5.0) or 5.0),
+                            weight_cap_ratio=float(getattr(args, "weight_cap_ratio", 0.0) or 0.0),
+                            detail_inv_t_min=float(getattr(args, "detail_inv_t_min", 1.0) or 1.0),
+                            detail_inv_t_max=float(getattr(args, "detail_inv_t_max", 5.0) or 5.0),
+                        ).to(device=ctx.device, dtype=torch.float32)
+                        _piw = _lw if _piw is None else _piw * _lw
+                    loss, pred, _navit_info = navit_packed_forward_and_loss(
+                        ctx.model, navit_latents, t, cross_packed, text_seqlens,
+                        ctx.loss_fn,
+                        noise_offset=float(getattr(args, "noise_offset", 0.0) or 0.0),
+                        pyramid_iters=int(getattr(args, "pyramid_noise_iters", 0) or 0),
+                        pyramid_discount=float(getattr(args, "pyramid_noise_discount", 0.35) or 0.35),
+                        use_checkpoint=bool(args.grad_checkpoint),
+                        per_image_weights=_piw,
+                    )
+                    reg = ctx.injector.regularization_loss(step_ctx)
+                    if reg is not None:
+                        loss = loss + reg
+            else:
+                t_exp = t.view(-1, 1, 1, 1, 1)
+                noise = make_noise(
+                    latents,
+                    noise_offset=float(getattr(args, "noise_offset", 0.0) or 0.0),
+                    pyramid_iters=int(getattr(args, "pyramid_noise_iters", 0) or 0),
+                    pyramid_discount=float(getattr(args, "pyramid_noise_discount", 0.35) or 0.35),
+                )
+                noisy = (1 - t_exp) * latents + t_exp * noise
+                target = noise - latents
 
-                # PR-C：adapter hook — 变体可加正则项（OFT orth penalty /
-                # Ortho-Hydra balance loss 等）。LyCORIS 返回 None，noop。
-                reg = ctx.injector.regularization_loss(step_ctx)
-                if reg is not None:
-                    loss = loss + reg
+                # 前向
+                pad_mask = torch.zeros(bs, 1, latents.shape[-2], latents.shape[-1], device=ctx.device, dtype=ctx.dtype)
+                with torch.autocast("cuda", dtype=ctx.dtype):
+                    pred = forward_with_optional_checkpoint(
+                        ctx.model, noisy, t.view(-1, 1), cross, pad_mask,
+                        use_checkpoint=args.grad_checkpoint,
+                    )
+                    # 训练 loss 通过 losses/ plugin registry 派发（mse / huber / ...）
+                    loss_per_sample = ctx.loss_fn.compute(pred.float(), target.float(), t)
+                    # 自适应采样器（如 InfoNoise）记录原始 per-sample MSE（不受 huber/loss_weighting 等
+                    # 加工影响）；跟训练 loss 解耦保证 InfoNoise 论文一致性。
+                    # baseline 采样器是 no-op，无需 if 守卫。
+                    # 用 no_grad 避免构造 autograd 元数据（比 .detach() 少一份 grad_fn 开销）。
+                    with torch.no_grad():
+                        _raw_mse_per_sample = F.mse_loss(pred.float(), target.float(), reduction="none")
+                        _raw_mse = _raw_mse_per_sample.mean(
+                            dim=list(range(1, _raw_mse_per_sample.dim()))
+                        )
+                    # 仅 main 集样本进 InfoNoise schedule 学习：I-MMSE 假设单一数据分布，
+                    # reg 集典型是通用图（booru）vs main 集是单一主题，混入 record 学到的是
+                    # mixture MMSE 不是 mmse_main(t)。用 is_reg flag 而非 loss_weight 阈值
+                    # 是因为 distribution identity 跟 gradient 权重是两条独立轴
+                    # （reg_weight=1.0 时 loss_weight=1.0 但 reg 仍是不同分布）。
+                    # 见 docs/todo/infonoise-reg-policy-reeval.md 未来重评估条件。
+                    if "is_reg" in batch:
+                        _main_mask = ~batch["is_reg"].to(t.device)
+                        if _main_mask.any():
+                            ctx.timestep_sampler.record(t.detach()[_main_mask], _raw_mse[_main_mask])
+                    else:
+                        ctx.timestep_sampler.record(t.detach(), _raw_mse)
+                    # 按样本加权（正则集可降低权重）
+                    if "loss_weight" in batch:
+                        w = batch["loss_weight"].to(ctx.device).view(-1, *([1] * (loss_per_sample.dim() - 1)))
+                        loss_per_sample = loss_per_sample * w
+                    # timestep-dependent loss 权重
+                    lw_scheme = str(getattr(args, "loss_weighting", "none") or "none")
+                    if lw_scheme != "none":
+                        lw = compute_loss_weight(
+                            t,
+                            scheme=lw_scheme,
+                            min_snr_gamma=float(getattr(args, "min_snr_gamma", 5.0) or 5.0),
+                            weight_cap_ratio=float(getattr(args, "weight_cap_ratio", 0.0) or 0.0),
+                            detail_inv_t_min=float(getattr(args, "detail_inv_t_min", 1.0) or 1.0),
+                            detail_inv_t_max=float(getattr(args, "detail_inv_t_max", 5.0) or 5.0),
+                        ).to(device=ctx.device, dtype=torch.float32)
+                        loss_per_sample = loss_per_sample * lw.view(-1, *([1] * (loss_per_sample.dim() - 1)))
+                    loss = loss_per_sample.mean()
+
+                    # PR-C：adapter hook — 变体可加正则项（OFT orth penalty /
+                    # Ortho-Hydra balance loss 等）。LyCORIS 返回 None，noop。
+                    reg = ctx.injector.regularization_loss(step_ctx)
+                    if reg is not None:
+                        loss = loss + reg
 
             # NaN 检测：forward 出 NaN 时跳过本 micro-batch
             if not torch.isfinite(loss):

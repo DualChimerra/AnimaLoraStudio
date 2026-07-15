@@ -892,6 +892,7 @@
     "modelRootDefault": "Restored default model root",
     "mainModelSelected": "Default main model switched to {{name}}",
     "selectDefaultMainModel": "Use as default main model",
+    "localBaseModel": "local",
     "downloadInProgress": "Downloading...",
     "downloadRequiredFirst": "Not downloaded yet; download it first",
     "defaultUpscaler": "Default upscaler: {{name}}",
