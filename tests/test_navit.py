@@ -49,9 +49,14 @@ def test_navit_requires_cache_latents():
 
 
 def test_native_resolution_requires_packing():
+    """navit_packing 关闭时孤儿 navit_native_resolution=true 静默收敛为 False。
+
+    UI 上该字段 show_when="navit_packing==true"：关掉 packing 后字段从界面消失但值
+    仍透传，若 fail-fast 会让每次保存都报错（用户看不见原因）。故改为跟随父开关关闭。
+    """
     from studio.schema import TrainingConfig
-    with pytest.raises(Exception):
-        TrainingConfig(**_base(), navit_native_resolution=True, navit_packing=False)
+    cfg = TrainingConfig(**_base(), navit_native_resolution=True, navit_packing=False)
+    assert cfg.navit_native_resolution is False
 
 
 # ---------------------------------------------------------------------------

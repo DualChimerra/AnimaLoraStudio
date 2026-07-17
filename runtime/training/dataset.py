@@ -615,6 +615,10 @@ class BucketBatchSampler:
                 yield batch
 
 
+# cache_encode_tiled 的默认像素预算：超过该像素数的图走分块 encode（4MP ≈ 2048²）
+_CACHE_ENCODE_MAX_PIXELS = 4 * 1024 * 1024
+
+
 class CachedLatentDataset(Dataset):
     """Kohya 风格 npz 文件缓存的数据集。
 
@@ -626,7 +630,9 @@ class CachedLatentDataset(Dataset):
     50% 数据被永久镜像污染；新版通过 _is_cache_valid 检测缺 latent_flipped
     键，自动重 encode 修复。
     """
-    def __init__(self, base_dataset, vae, device, dtype, cache_dir=None):
+    def __init__(self, base_dataset, vae, device, dtype, cache_dir=None, cache_batch_size=1,
+                 encode_tiled=False, encode_tile_px=1024, encode_tile_overlap=128,
+                 encode_max_pixels=0):
         import numpy as np
         self.base_dataset = base_dataset
         self.base_image_dataset = self._get_base_image_dataset(base_dataset)
@@ -638,9 +644,19 @@ class CachedLatentDataset(Dataset):
         # NaViT 打包器读的逐索引 token 数（patchify 后 = (h//2)*(w//2)）。
         # 与 bucket_for_index 同步填充；navit_packing 关闭时无人读取。
         self.token_count_for_index = []
+        self.cache_batch_size = max(1, int(cache_batch_size or 1))
         # cache 是否需要双份 latent —— 取决于底层 ImageDataset.flip_augment
         self.flip_augment = bool(
             getattr(self.base_image_dataset, "flip_augment", False)
+        )
+        # cache_encode_tiled（opt-in）：超大图改走分块 encode + latent 羽化拼接，
+        # 峰值显存 ∝ 单块像素。阈值内的图路径不变（逐字节等价）。
+        self.encode_tiled = bool(encode_tiled)
+        self.encode_tile_px = int(encode_tile_px or 1024)
+        self.encode_tile_overlap = int(encode_tile_overlap or 128)
+        self.encode_max_pixels = (
+            int(encode_max_pixels) if int(encode_max_pixels or 0) > 0
+            else _CACHE_ENCODE_MAX_PIXELS
         )
         self._build_cache(vae, device, dtype)
 
@@ -774,35 +790,120 @@ class CachedLatentDataset(Dataset):
         flip_augment=True 时对每张图编码两次（flip=False / flip=True）分别存到
         `latent` / `latent_flipped` 键；训练时 __getitem__ 随机选其一。
         flip_augment=False 时只编码一次，存 `latent`。
+
+        按实际 bucket 尺寸分组并批量送入 VAE；不同尺寸不能 stack，分别攒批。
+        cache_encode_tiled=True 时，超像素预算的图改走分块 encode + latent 羽化拼接。
         """
         base_img = self.base_image_dataset
         want_flip = self.flip_augment and base_img is not None
-        for count, i in enumerate(indices):
-            npz_kwargs = {}
+        pending = {}
+        encoded_count = 0
+
+        def _encode_pixels(pixel_tensors):
+            pixels = torch.stack(pixel_tensors, dim=0).to(device, dtype=dtype)
+            with torch.inference_mode():
+                # 走 VAEWrapper.encode（含 auto/on 分块），大图/大 batch 不会撞 VRAM 崖
+                latents = vae.encode(pixels.unsqueeze(2))
+            return latents.detach().cpu().float()
+
+        def _encode_tiled_single(pixel_tensor):
+            """分块 encode 单张图（cache_encode_tiled 超像素预算时）。"""
+            pixels = pixel_tensor.unsqueeze(0).to(device, dtype=dtype).unsqueeze(2)  # [1,C,1,H,W]
+            with torch.inference_mode():
+                # 直接用 VAEWrapper 的分块 encode（可配 tile 尺寸）：单层分块 + 统一
+                # cosine 羽化，避免外层再套一层 vae.encode 导致的双重分块。
+                lat = vae._tiled_encode(
+                    pixels, self.encode_tile_px, self.encode_tile_overlap
+                )
+            return lat.detach().cpu().float()[0]
+
+        def _flush(bucket_key):
+            nonlocal encoded_count
+            batch = pending.pop(bucket_key, [])
+            if not batch:
+                return
+
+            h, w = int(batch[0]["bucket_h"]), int(batch[0]["bucket_w"])
+            use_tiled = (
+                getattr(self, "encode_tiled", False)
+                and h > 0 and w > 0
+                and h * w > self.encode_max_pixels
+            )
+
+            if use_tiled:
+                logger.info(
+                    "[cache-tiled] %dx%d 超像素预算，分块 encode（tile=%d overlap=%d）",
+                    w, h, self.encode_tile_px, self.encode_tile_overlap,
+                )
+                for entry in batch:
+                    lat = _encode_tiled_single(entry["pixels"])
+                    lat_f = _encode_tiled_single(entry["pixels_flipped"]) if want_flip else None
+                    npz_kwargs = {"latent": lat.numpy()}
+                    if lat_f is not None:
+                        npz_kwargs["latent_flipped"] = lat_f.numpy()
+                    npz_path = self._get_npz_path(self.samples[entry["index"]]["image"])
+                    self.np.savez(
+                        npz_path,
+                        bucket_w=entry["bucket_w"],
+                        bucket_h=entry["bucket_h"],
+                        **npz_kwargs,
+                    )
+                    encoded_count += 1
+                    if encoded_count % 10 == 0 or encoded_count == len(indices):
+                        logger.info(f"  编码进度: {encoded_count}/{len(indices)}")
+                return
+
+            latents = _encode_pixels([entry["pixels"] for entry in batch])
+            if want_flip:
+                latents_flipped = _encode_pixels([entry["pixels_flipped"] for entry in batch])
+            else:
+                latents_flipped = [None] * len(batch)
+
+            for n, entry in enumerate(batch):
+                npz_kwargs = {"latent": latents[n].numpy()}
+                if want_flip:
+                    npz_kwargs["latent_flipped"] = latents_flipped[n].numpy()
+
+                npz_path = self._get_npz_path(self.samples[entry["index"]]["image"])
+                self.np.savez(
+                    npz_path,
+                    bucket_w=entry["bucket_w"],
+                    bucket_h=entry["bucket_h"],
+                    **npz_kwargs,
+                )
+                encoded_count += 1
+                if encoded_count % 10 == 0 or encoded_count == len(indices):
+                    logger.info(f"  编码进度: {encoded_count}/{len(indices)}")
+
+        logger.info(f"VAE cache batch size: {self.cache_batch_size}")
+        for i in indices:
             if base_img is not None:
                 # 显式控制 flip，避免随机性 baked 进 npz
                 item = base_img.get_with_flip(i, flip=False)
             else:
                 item = self.base_dataset[i]
-            pixels = item["pixel_values"].unsqueeze(0).to(device, dtype=dtype)
-            _, _, ph, pw = pixels.shape
+            pixels = item["pixel_values"]
+            _, ph, pw = pixels.shape
             bucket_w, bucket_h = pw, ph
-            with torch.no_grad():
-                pixels_5d = pixels.unsqueeze(2)
-                latent = vae.model.encode(pixels_5d, vae.scale)
-            npz_kwargs["latent"] = latent.squeeze(0).cpu().float().numpy()
 
+            pixels_flipped = None
             if want_flip:
                 item_f = base_img.get_with_flip(i, flip=True)
-                pixels_f = item_f["pixel_values"].unsqueeze(0).to(device, dtype=dtype)
-                with torch.no_grad():
-                    latent_f = vae.model.encode(pixels_f.unsqueeze(2), vae.scale)
-                npz_kwargs["latent_flipped"] = latent_f.squeeze(0).cpu().float().numpy()
+                pixels_flipped = item_f["pixel_values"]
 
-            npz_path = self._get_npz_path(self.samples[i]["image"])
-            self.np.savez(npz_path, bucket_w=bucket_w, bucket_h=bucket_h, **npz_kwargs)
-            if (count + 1) % 10 == 0 or count == len(indices) - 1:
-                logger.info(f"  编码进度: {count + 1}/{len(indices)}")
+            bucket_key = (bucket_h, bucket_w)
+            pending.setdefault(bucket_key, []).append({
+                "index": i,
+                "pixels": pixels,
+                "pixels_flipped": pixels_flipped,
+                "bucket_w": bucket_w,
+                "bucket_h": bucket_h,
+            })
+            if len(pending[bucket_key]) >= self.cache_batch_size:
+                _flush(bucket_key)
+
+        for bucket_key in list(pending):
+            _flush(bucket_key)
 
     def __len__(self):
         return len(self.samples)
