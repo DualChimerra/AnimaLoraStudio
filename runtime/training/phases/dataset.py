@@ -108,9 +108,27 @@ def run(ctx: TrainingContext) -> None:
     # 缓存 VAE latents（在 repeat 之前）
     ctx.use_cached = getattr(args, "cache_latents", False)
     if ctx.use_cached:
-        ctx.dataset = CachedLatentDataset(ctx.dataset, ctx.vae, ctx.device, ctx.dtype)
+        # 0 = 跟随训练 batch size（对齐 kohya GUI 的 VAE batch size 语义）
+        cache_batch_size = int(getattr(args, "vae_cache_batch_size", 0) or 0)
+        if cache_batch_size <= 0:
+            cache_batch_size = int(getattr(args, "batch_size", 1) or 1)
+        ctx.dataset = CachedLatentDataset(
+            ctx.dataset, ctx.vae, ctx.device, ctx.dtype,
+            cache_batch_size=cache_batch_size,
+            encode_tiled=getattr(args, "cache_encode_tiled", False),
+            encode_tile_px=getattr(args, "cache_encode_tile_px", 1024),
+            encode_tile_overlap=getattr(args, "cache_encode_tile_overlap", 128),
+            encode_max_pixels=getattr(args, "cache_encode_max_pixels", 0),
+        )
     if ctx.reg_dataset is not None and ctx.use_cached:
-        ctx.reg_dataset = CachedLatentDataset(ctx.reg_dataset, ctx.vae, ctx.device, ctx.dtype)
+        ctx.reg_dataset = CachedLatentDataset(
+            ctx.reg_dataset, ctx.vae, ctx.device, ctx.dtype,
+            cache_batch_size=cache_batch_size,
+            encode_tiled=getattr(args, "cache_encode_tiled", False),
+            encode_tile_px=getattr(args, "cache_encode_tile_px", 1024),
+            encode_tile_overlap=getattr(args, "cache_encode_tile_overlap", 128),
+            encode_max_pixels=getattr(args, "cache_encode_max_pixels", 0),
+        )
 
     # repeat: 主数据集和正则数据集均通过文件夹名 Kohya 风格 repeat（如 5_concept），无需全局 repeat
     if ctx.reg_dataset is not None:
@@ -169,8 +187,8 @@ def run(ctx: TrainingContext) -> None:
             item0 = ctx.base_dataset[0]
             pixels0 = item0["pixel_values"].unsqueeze(0).to(ctx.device, dtype=ctx.dtype)  # [1,3,H,W]
             with torch.no_grad():
-                z0 = ctx.vae.model.encode(pixels0.unsqueeze(2), ctx.vae.scale)   # [1,16,1,h,w]
-                recon0 = ctx.vae.model.decode(z0, ctx.vae.scale).squeeze(2)      # [1,3,H,W]
+                z0 = ctx.vae.encode(pixels0.unsqueeze(2))                        # [1,16,1,h,w]
+                recon0 = ctx.vae.decode(z0).squeeze(2)                           # [1,3,H,W]
                 recon0 = (recon0.clamp(-1, 1) + 1) / 2
             arr0 = (recon0[0].permute(1, 2, 0).detach().cpu().float().numpy() * 255).clip(0, 255).astype("uint8")
             Image.fromarray(arr0).save(ctx.sample_dir / "vae_roundtrip.png")

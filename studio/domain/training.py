@@ -133,10 +133,22 @@ class TrainingConfig(BaseModel):
         description="优先使用 JSON 标签文件（推荐，支持分类 shuffle）",
         json_schema_extra=_meta("caption"),
     )
+    caption_comfy_encoding: bool = Field(
+        True,
+        description="标签按 ComfyUI 方式编码文本（与测试出图、采样预览同一条编码链路，"
+                    "推荐保持开启）；关闭走旧版逐 tag 编码，用于新旧编码 A/B 对比，"
+                    "或继续用旧编码训练的断点状态",
+        json_schema_extra=_meta("caption", advanced=True),
+    )
     cache_latents: bool = Field(
         True,
         description="缓存 VAE latent 加速训练",
         json_schema_extra=_meta("system"),
+    )
+    vae_cache_batch_size: int = Field(
+        0, ge=0,
+        description="VAE latent 缓存编码批次大小；0=跟随训练 batch size，显存不足时设为 1 逐张编码",
+        json_schema_extra=_meta("system", show_when="cache_latents==true", advanced=True),
     )
 
     # --------------------------------------------------- NaViT / Patch-n-Pack
@@ -149,8 +161,8 @@ class TrainingConfig(BaseModel):
         json_schema_extra=_meta(
             "system",
             advanced=True,
-            disable_when="infonoise_enabled==true",
-            disable_hint="与 InfoNoise 互斥（navit v1 未适配），需先关掉它",
+            disable_when="leap_enabled==true||infonoise_enabled==true||sra_enabled==true",
+            disable_hint="与 LeapAlign / InfoNoise / SRA 互斥（navit v1 未适配），需先关掉它们",
         ),
     )
     navit_token_budget: int = Field(
@@ -531,6 +543,13 @@ class TrainingConfig(BaseModel):
         description="Cross-attention KV trim：按实际 token 数裁到最近 bucket（64/128/256/512），减少 padding 计算量",
         json_schema_extra=_meta("system", advanced=True),
     )
+    vae_tiling: Literal["auto", "on", "off"] = Field(
+        "auto",
+        description="VAE 分块 encode/decode：auto=可用显存紧张时自动分块（推荐）；on=始终分块（省显存、慢约 30%）；"
+                    "off=整图，仅真正 OOM 时回退。大显存卡整图 decode 接近占满显存时会触发系统内存回退、"
+                    "单次 decode 从不到 1 秒退化到上百秒，auto 可避免",
+        json_schema_extra=_meta("system", advanced=True),
+    )
     noise_enhancement_type: Literal["none", "offset", "pyramid"] = Field(
         "none",
         description="噪声增强机制（默认 none）。offset 在噪声上加 per-sample DC 偏置；pyramid 在多个尺度叠加低频噪声。两者机制不同，但都改变低频成分，互斥防双倍叠加。LoRA 训练默认保持 none",
@@ -568,8 +587,8 @@ class TrainingConfig(BaseModel):
         description="采样分布。logit_normal 偏中段（SD3/Anima 默认）；uniform 等概率；mode 单峰偏移；mixed_* 混合 uniform 与偏置端（比例由 timestep_mix_low_prob 控制）",
         json_schema_extra=_meta(
             "timestep_sampling",
-            alt_description="【时间步采样】分布；InfoNoise 启用时作为热身期 baseline，正式阶段由自适应 CDF 接管",
-            alt_description_when="infonoise_enabled==true",
+            alt_description="【时间步采样】InfoNoise 启用时作为热身期 baseline，正式阶段由自适应 CDF 接管；Leap 启用时 leap 路径恒用 U(0,1)，本字段仅作用于 (1-leap_ratio) 比例的标准 step",
+            alt_description_when="infonoise_enabled==true||leap_enabled==true",
             advanced=True,
         ),
     )
@@ -579,8 +598,8 @@ class TrainingConfig(BaseModel):
         json_schema_extra=_meta(
             "timestep_sampling",
             show_when="timestep_sampling!=uniform",
-            alt_description="【InfoNoise 热身期】InfoNoise 开启时作为热身阶段的 baseline shift，正式阶段由自适应 CDF 接管",
-            alt_description_when="infonoise_enabled==true",
+            alt_description="InfoNoise 开启时作为热身阶段的 baseline shift，正式阶段由自适应 CDF 接管；Leap 启用时 leap 路径恒用 U(0,1)，本字段仅作用于 (1-leap_ratio) 比例的标准 step",
+            alt_description_when="infonoise_enabled==true||leap_enabled==true",
             advanced=True,
         ),
     )
@@ -590,8 +609,8 @@ class TrainingConfig(BaseModel):
         json_schema_extra=_meta(
             "timestep_sampling",
             show_when="timestep_sampling!=uniform",
-            alt_description="【InfoNoise 热身期】InfoNoise 开启 + mixed_* baseline 时，热身阶段混合比例；正式阶段由自适应 CDF 接管",
-            alt_description_when="infonoise_enabled==true",
+            alt_description="InfoNoise 开启 + mixed_* baseline 时，热身阶段混合比例，正式阶段由自适应 CDF 接管；Leap 启用时 leap 路径恒用 U(0,1)，本字段仅作用于 (1-leap_ratio) 比例的标准 step",
+            alt_description_when="infonoise_enabled==true||leap_enabled==true",
             advanced=True,
         ),
     )
@@ -600,11 +619,23 @@ class TrainingConfig(BaseModel):
         description="采样后对 t 做的额外 σ schedule 偏移：1.0 = 无偏移；越大整体偏向高噪声端。与 timestep_shift 区别：作用于最终 t 而非 logit-normal 内部",
         json_schema_extra=_meta(
             "timestep_sampling",
-            alt_description="【InfoNoise 热身期】InfoNoise 开启时仅热身期生效；正式阶段由自适应 CDF 接管",
-            alt_description_when="infonoise_enabled==true",
+            alt_description="InfoNoise 开启时仅热身期生效，正式阶段由自适应 CDF 接管；Leap 启用时 leap 路径恒用 U(0,1)，本字段仅作用于 (1-leap_ratio) 比例的标准 step",
+            alt_description_when="infonoise_enabled==true||leap_enabled==true",
             advanced=True,
             disable_when="infonoise_enabled==true",
             disable_hint="InfoNoise 启用时禁用 schedule shift（schema 互斥，仅 1.0 兼容）",
+        ),
+    )
+    timestep_shift_resolution_aware: bool = Field(
+        False,
+        description="按每图 token 数对采样后的 t 做分辨率修正（SD3 式 s=sqrt(该图 token 数/基准档 token 数)，"
+                    "基准档取 resolution）：基准档尺寸的图不变，更大的图偏向高噪声端、更小的偏向低噪声端。"
+                    "NaViT 原生分辨率训练下，各尺寸的图落在与基准档等效的噪声水平；单分辨率训练下无效果",
+        json_schema_extra=_meta(
+            "timestep_sampling",
+            alt_description="Leap 启用时 leap 路径的 t_k/t_j 不做本修正，仅作用于 (1-leap_ratio) 比例的标准 step",
+            alt_description_when="leap_enabled==true",
+            advanced=True,
         ),
     )
     infonoise_enabled: bool = Field(
@@ -618,8 +649,9 @@ class TrainingConfig(BaseModel):
                 "||loss_weighting!=none"
                 "||loss_type==huber"
                 "||timestep_schedule_shift!=1"
+                "||leap_enabled==true"
             ),
-            disable_hint="互斥字段（noise_enhancement / loss_weighting / loss_type / schedule_shift）非默认时不可启用（schema 互斥）",
+            disable_hint="互斥字段（noise_enhancement / loss_weighting / loss_type / schedule_shift / leap）非默认时不可启用（schema 互斥）",
         ),
     )
     infonoise_K: int = Field(
@@ -662,8 +694,8 @@ class TrainingConfig(BaseModel):
         description="训练 loss 类型。mse 经典；huber 对 outlier 鲁棒（在 |x|<δ 时用二次，|x|≥δ 时用线性）",
         json_schema_extra=_meta(
             "loss",
-            disable_when="infonoise_enabled==true",
-            disable_hint="InfoNoise 启用时禁用 loss 类型切换（schema 互斥，仅 mse 兼容）",
+            disable_when="infonoise_enabled==true||leap_enabled==true",
+            disable_hint="InfoNoise / Leap 启用时禁用 loss 类型切换（schema 互斥，仅 mse 兼容）",
         ),
     )
     huber_c: float = Field(
@@ -676,8 +708,8 @@ class TrainingConfig(BaseModel):
         description="loss 加权方案：none 不加权；min_snr 抑制极端时步的权重；detail_inv_t 强化低 t 细节；cosmap 用 SD3 cosine 映射",
         json_schema_extra=_meta(
             "loss",
-            disable_when="infonoise_enabled==true",
-            disable_hint="InfoNoise 启用时禁用 loss 加权（schema 互斥，仅 none 兼容）",
+            disable_when="infonoise_enabled==true||leap_enabled==true",
+            disable_hint="InfoNoise / Leap 启用时禁用 loss 加权（schema 互斥，仅 none 兼容）",
         ),
     )
     min_snr_gamma: float = Field(
@@ -699,6 +731,88 @@ class TrainingConfig(BaseModel):
         5.0, ge=0.1, le=50.0,
         description="detail_inv_t 权重上限。默认 5.0；降低（如 3）减弱细节强化，提高（如 8）激进强化细节",
         json_schema_extra=_meta("loss", show_when="loss_weighting==detail_inv_t", advanced=True),
+    )
+    leap_enabled: bool = Field(
+        False,
+        description="【LeapAlign 自蒸馏】启用两步跳跃自蒸馏（去奖励模型版）：每步用真实 latent 当 x0，per-sample 采两个时刻 (k>j) 做两步跳跃，loss=MSE(两步预测的 x̂0, 真实 x0)。本质是 shortcut/consistency 式自蒸馏。开销：leap_ratio=1.0 时每步 2 次前向 ≈ 2× 算力 + activation 显存接近 2×（两次前向都带 grad）。与 InfoNoise / loss_weighting / loss_type=huber 互斥",
+        json_schema_extra=_meta(
+            "loss",
+            advanced=True,
+            disable_when="infonoise_enabled==true||loss_weighting!=none||loss_type==huber",
+            disable_hint="互斥字段（InfoNoise / loss_weighting / loss_type=huber）非默认时不可启用（schema 互斥，与对侧形成对称锁）",
+        ),
+    )
+    leap_ratio: float = Field(
+        0.6, ge=0.0, le=1.0,
+        description="【LeapAlign 混合训练】每步按此概率走 leap 自蒸馏、其余走传统 rectified flow：1.0 纯 leap（管全局结构）；0.0 纯传统（管细节锐度）；0.6 大头吃 leap 全局对齐、留点传统精修兜住细节。两股梯度叠在同一组 LoRA 权重上各取所长",
+        json_schema_extra=_meta("loss", show_when="leap_enabled==true", advanced=True),
+    )
+    leap_variant: Literal["original", "sparse", "bridge", "lagrange"] = Field(
+        "original",
+        description="【LeapAlign/FlowBP】轨迹自蒸馏变体（统一形式：解析构造轨迹点+沿轨迹积分 x̂0+MSE(x̂0,真实x0)）：original=两步跳+straight-through connector（K=2，1 雅可比，行为同历史版，默认）；sparse=K 点 Euler 重放纯直接项求和（FlowBP-Sparse，零 connector/零雅可比，K 点稠密监督，最稳，代价 K× 前向+K× 显存，K 由 leap_activation_k 控）；bridge=两步跳+Euler 重构 connector（FlowBP-Bridge，无 straight-through 偏差）；lagrange=两段跳每段三点 Lagrange/Simpson 积分（FlowBP-Lagrange，6× 前向，单段积分误差 O(Δt²)→O(Δt⁵)）。注：自蒸馏下真值是解析直线插值点、无 rollout 噪声，connector 残差被釜底抽薪，故 bridge/lagrange 相比 original 增益收窄，sparse 是唯一结构性差异",
+        json_schema_extra=_meta("loss", show_when="leap_enabled==true", advanced=True),
+    )
+    leap_activation_k: int = Field(
+        3, ge=2, le=8,
+        description="【FlowBP-Sparse】激活集大小 K：沿 (0,1) 分层抖动采 K 个降序时刻做 Euler 重放，K 点全带梯度。K 直接决定显存/算力（K× 前向+K× activation 显存）与监督稠密度。3 是显存与稠密度的平衡点（比 original 的 2× 略重）；消费级小显存可设 2（退化到 original 同档显存）；4+ 监督更密但 12G 卡可能吃紧。仅 sparse 变体生效",
+        json_schema_extra=_meta("loss", show_when="leap_enabled==true&&leap_variant==sparse", advanced=True),
+    )
+    leap_nested_grad_coe: float = Field(
+        0.3, ge=0.0, le=1.0,
+        description="【LeapAlign】梯度折扣 α（论文 Eq 9）：缩放第二跳对 x_j 的嵌套梯度。0=砍掉嵌套梯度（最省显存），1=不折扣（梯度最完整但易爆）。论文最优 0.3。对 original/bridge/lagrange 生效；sparse 零 connector/零雅可比不使用此参数",
+        json_schema_extra=_meta("loss", show_when="leap_enabled==true&&leap_variant!=sparse", advanced=True),
+    )
+    leap_min_gap: float = Field(
+        0.1, ge=0.01, le=0.9,
+        description="【LeapAlign】两个采样时刻 (k,j) 的最小间隔：越大跳跃跨度越大、自蒸馏越激进但误差累积越多。典型 0.1-0.3。仅 original/bridge/lagrange 生效；sparse 的激活集用分层抖动铺满 (0,1)，不用此字段",
+        json_schema_extra=_meta("loss", show_when="leap_enabled==true&&leap_variant!=sparse", advanced=True),
+    )
+    leap_traj_sim_weighting: bool = Field(
+        False,
+        description="【LeapAlign】轨迹相似度加权（论文 Eq 12）：跳跃越贴近真实路径权重越高，抑制大跨度跳跃的离谱预测主导 loss。默认关",
+        json_schema_extra=_meta("loss", show_when="leap_enabled==true", advanced=True),
+    )
+    leap_traj_sim_min: float = Field(
+        0.1, ge=1e-4,
+        description="【LeapAlign】轨迹相似度加权下限 τ：防止近乎相同的跳跃对被 1/d 过度放大。越小越激进。典型 0.05-0.2",
+        json_schema_extra=_meta("loss", show_when="leap_traj_sim_weighting==true", advanced=True),
+    )
+
+    # ----------------------------------------------------------- SRA v2 表征对齐
+    sra_enabled: bool = Field(
+        False,
+        description="【SRA v2 表征对齐】启用 VAE Self-Representation Alignment：将中间 transformer block 的 hidden state 对齐到 clean VAE latent，加速收敛并正则化表征。仅增加 ~4% GFLOPs（一个轻量 MLP），训练完自动丢弃",
+        json_schema_extra=_meta("loss", advanced=True),
+    )
+    sra_block: int = Field(
+        4, ge=1, le=35,
+        description="【SRA v2】从哪一层 block 取中间表征做对齐（0-indexed）。论文建议浅层效果最好",
+        json_schema_extra=_meta("loss", show_when="sra_enabled==true", advanced=True),
+    )
+    sra_weight: float = Field(
+        0.2, ge=0.0,
+        description="【SRA v2】对齐 loss 权重 λ：align_loss 乘以此值后加到总 loss。trainer 默认 0.2，过大会导致异常",
+        json_schema_extra=_meta("loss", show_when="sra_enabled==true", advanced=True),
+    )
+    sra_normalize: bool = Field(
+        True,
+        description="【SRA v2】对 projected/target 各自做 per-sample z-score 标准化后再算 smooth-L1（幅度无关、只对齐结构）。视频 VAE latent 尺度不同 + LoRA 微调下，关闭会导致 align loss 比 denoise 高几个量级并很快崩坏。建议保持开启",
+        json_schema_extra=_meta("loss", show_when="sra_enabled==true", advanced=True),
+    )
+    sra_decay_type: Literal["none", "linear", "cosine", "jump"] = Field(
+        "linear",
+        description="【SRA v2】权重衰减方式：none 全程固定；linear 从起点线性降到 0；cosine 从起点余弦降到 0；jump 到起点直接关掉。实际权重 = sra_weight × 衰减系数",
+        json_schema_extra=_meta("loss", show_when="sra_enabled==true", advanced=True),
+    )
+    sra_decay_start_ratio: float = Field(
+        0.2, ge=0.0, le=1.0,
+        description="【SRA v2】衰减起点（训练总步数比例）。linear/cosine 在此之前保持满权重；jump 在此比例直接从 sra_weight 跳到 0",
+        json_schema_extra=_meta("loss", show_when="sra_enabled==true&&sra_decay_type!=none", advanced=True),
+    )
+    sra_decay_end_ratio: float = Field(
+        0.3, ge=0.0, le=1.0,
+        description="【SRA v2】衰减终点（训练总步数比例）。linear/cosine 到此比例降为 0；jump 不使用此字段",
+        json_schema_extra=_meta("loss", show_when="sra_enabled==true&&sra_decay_type!=none&&sra_decay_type!=jump", advanced=True),
     )
     grad_clip_max_norm: float = Field(
         1.0, ge=0.0,
@@ -725,6 +839,31 @@ class TrainingConfig(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
+    def _accept_upstream_aliases(cls, data: Any) -> Any:
+        """接受上游（WalkingMeatAxolotl/AnimaLoraStudio）配置的等价键，方便直接粘贴上游配置。
+
+        - ``resolution: [1024]``（上游 list[int] 多分辨率）→ 单元素取值；多元素报错
+          （本 fork 用 ARB 分桶 + bucket_* 显式配置，不做 per-resolution fan-out）。
+        - ``aspect_ratio_limit``（上游桶长宽比上限）→ 本 fork 的 ``bucket_max_ar``；
+          两者语义一致，显式给出 bucket_max_ar 时以后者为准。
+        """
+        if not isinstance(data, dict):
+            return data
+        r = data.get("resolution")
+        if isinstance(r, (list, tuple)):
+            if len(r) == 1:
+                data["resolution"] = r[0]
+            elif len(r) > 1:
+                raise ValueError(
+                    "resolution 多元素列表（上游 per-resolution fan-out）本 fork 不支持："
+                    "请取单个基准分辨率，并用 bucket_min_reso/bucket_max_reso 控制多分辨率范围。"
+                )
+        if data.get("aspect_ratio_limit") is not None and "bucket_max_ar" not in data:
+            data["bucket_max_ar"] = data["aspect_ratio_limit"]
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
     def _migrate_save_keys(cls, data: Any) -> Any:
         return migrate_legacy_save_keys(data)
 
@@ -732,6 +871,20 @@ class TrainingConfig(BaseModel):
     @classmethod
     def _migrate_noise_enhancement(cls, data: Any) -> Any:
         return migrate_noise_enhancement_type(data)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_navit_dependents(cls, data: Any) -> Any:
+        """navit_packing 关闭时自动放下依赖它的子开关，而不是报错。
+
+        UI 上 navit_native_resolution 的 show_when="navit_packing==true"：用户先开
+        navit+native、再关 navit_packing 时，native 字段从界面消失但值仍透传（PUT 不丢），
+        留下一个"看不见却让每次保存都报错"的孤儿 true。对这种「子开关悬空」场景，
+        配置层面静默收敛（跟随父开关关闭）比 fail-fast 更符合预期；真正矛盾的组合
+        （navit + InfoNoise/Leap/SRA 等）仍走 after-validator 报错。"""
+        if isinstance(data, dict) and not data.get("navit_packing") and data.get("navit_native_resolution"):
+            data["navit_native_resolution"] = False
+        return data
 
     @model_validator(mode="before")
     @classmethod
@@ -745,11 +898,14 @@ class TrainingConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_navit_exclusive(self) -> "TrainingConfig":
-        """NaViT / Patch-n-Pack 打包训练的配置校验与互斥（本 fork 裁剪版）。
+        """NaViT / Patch-n-Pack 打包训练的配置校验与互斥。
 
-        navit 改变了 batch 语义（一包异构图、逐图 t）。v1 fail-fast：与 InfoNoise
-        互斥（InfoNoise 的 I-MMSE record 需标准路径 per-sample MSE，navit 的 per-image
-        loss 语义不同，v1 未适配）。上游还互斥 leap/sra/tlora，本 fork 无这些特性。
+        navit 改变了 batch 语义（一包异构图、逐图 t）。v1 fail-fast：
+        - infonoise_enabled：InfoNoise 的 I-MMSE record 需标准路径 per-sample MSE，
+          navit 的 per-image loss 语义不同，v1 未适配。
+        - leap_enabled：leap 假设批量网格 + 共享 noise，与逐图打包不兼容。
+        - sra_enabled：SRA v2 表征对齐按批量网格中间特征 tap 对齐，navit 是 B=1
+          打包序列 + 逐图，per-image 适配 v1 未做。
         前置：cache_latents=true（按 latent token 数预算分包）、navit_token_budget>0。
         """
         if self.navit_native_resolution and not self.navit_packing:
@@ -759,10 +915,18 @@ class TrainingConfig(BaseModel):
             )
         if not self.navit_packing:
             return self
+        _conflicts = []
+        if self.leap_enabled:
+            _conflicts.append("leap_enabled")
         if self.infonoise_enabled:
+            _conflicts.append("infonoise_enabled")
+        if self.sra_enabled:
+            _conflicts.append("sra_enabled")
+        if _conflicts:
             raise ValueError(
-                "navit_packing(v1) 暂不支持与 InfoNoise 同时开启（infonoise_enabled）。"
-                "请关掉它，或暂不使用 NaViT 打包。"
+                "navit_packing(v1) 暂不支持与以下特性同时开启："
+                + ", ".join(_conflicts)
+                + "。请关掉它们，或暂不使用 NaViT 打包。"
             )
         if not self.cache_latents:
             raise ValueError(
@@ -772,6 +936,52 @@ class TrainingConfig(BaseModel):
         if self.navit_token_budget <= 0:
             raise ValueError(
                 "navit_packing 需要显式设置 navit_token_budget（>0，按显存定）。"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_leap_exclusive(self) -> "TrainingConfig":
+        """LeapAlign 自蒸馏的互斥校验（对全部四个 variant 一致成立）。
+
+        - InfoNoise：leap 每步沿代理轨迹采多个时刻积分，没有 InfoNoise 学 I-MMSE
+          所需的单一 t，且 leap 的 loss 是 x̂0 自蒸馏 MSE，不是 v 预测 MSE。
+        - loss_weighting：min_snr / detail_inv_t / cosmap 全都按单一 t 算 SNR 权重，
+          多 timestep 没有定义；leap 自带 traj_sim_weighting 做轨迹质量加权。
+        - loss_type=huber：leap.py 直接走 (x̂0-x0)**2 内联 MSE，绕过 ctx.loss_fn，开了
+          huber 会被静默无视。
+        leap 路径在 loop.py 里有意跳过这三个机制，这里强制配置层面关闭，避免用户
+        以为开了却被静默忽略。
+        """
+        if self.leap_enabled:
+            if self.infonoise_enabled:
+                raise ValueError(
+                    "leap_enabled=true 与 infonoise_enabled=true 互斥：leap 每步沿代理轨迹采"
+                    "多个时刻积分，没有 InfoNoise 学 I-MMSE 所需的单一 t，且 loss 是 x̂0 "
+                    "自蒸馏而非 v 预测 MSE。请二选一：(a) 关闭 leap 用 InfoNoise；"
+                    "或 (b) 设 infonoise_enabled=false 走 leap 自蒸馏。"
+                )
+            if self.loss_weighting != "none":
+                raise ValueError(
+                    f"leap_enabled=true 与 loss_weighting={self.loss_weighting!r} 互斥：loss 加权"
+                    "按单一 t 算 SNR 权重，leap 的多 timestep 无从定义；leap 用 "
+                    "leap_traj_sim_weighting 做轨迹质量加权。请二选一：(a) 关闭 leap；"
+                    "或 (b) 设 loss_weighting=none 走 leap 自蒸馏。"
+                )
+            if self.loss_type == "huber":
+                raise ValueError(
+                    "leap_enabled=true 与 loss_type=huber 互斥：leap.py 写死 MSE(x̂0, x0) "
+                    "内联自蒸馏目标，绕过 ctx.loss_fn 分发，huber 会被静默忽略。"
+                    "请二选一：(a) 关闭 leap；或 (b) 设 loss_type=mse 走 leap 自蒸馏。"
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_sra_decay_range(self) -> "TrainingConfig":
+        """SRA linear/cosine 衰减需要 start <= end；jump 只读 start。"""
+        if self.sra_decay_type in {"linear", "cosine"} and self.sra_decay_start_ratio > self.sra_decay_end_ratio:
+            raise ValueError(
+                f"sra_decay_start_ratio ({self.sra_decay_start_ratio}) 不能大于 "
+                f"sra_decay_end_ratio ({self.sra_decay_end_ratio})。"
             )
         return self
 

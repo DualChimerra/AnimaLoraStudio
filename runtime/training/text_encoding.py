@@ -162,3 +162,54 @@ def tokenize_t5_weighted(tokenizer, texts, max_length=512):
         attention_mask[i, :L] = 1
 
     return input_ids, attention_mask, token_w
+
+
+def _tokenizer_input_ids_without_eos(tokenizer, text: str, eos_id: int) -> list[int]:
+    tokenized = tokenizer(text, add_special_tokens=False)
+    ids = tokenized["input_ids"]
+    if torch.is_tensor(ids):
+        ids = ids.detach().cpu().tolist()
+    if ids and isinstance(ids[0], list):
+        ids = ids[0]
+    out = [int(tid) for tid in ids]
+    while out and out[-1] == int(eos_id):
+        out.pop()
+    return out
+
+
+def tokenize_t5_comfy_literal(tokenizer, texts, max_length=512):
+    """Comfy-style 字面 T5 tokenization（训练 caption 用，批量版）。
+
+    与 prompt 权重解析路径的差异：caption 是数据不是 prompt，
+    整段按字面文本分词——不做权重语法解析、不清洗。booru tag 的括号
+    （`ganyu (genshin impact)`）保持字面字符，等价于 ComfyUI 用户推理时
+    转义 `\\(...\\)` 后 T5 实际看到的 token 序列。
+
+    返回与 tokenize_t5_weighted 相同的约定：input_ids / attention_mask(1=有效) /
+    token_weights（有效位 1.0），padding 位权重 0.0（下游乘到 LLMAdapter 输出
+    上等于把 padding cross 清零）。
+    """
+    if isinstance(texts, str):
+        texts = [texts]
+
+    pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
+    eos_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else 1
+
+    seqs: list[list[int]] = []
+    for text in texts:
+        ids = _tokenizer_input_ids_without_eos(tokenizer, str(text), int(eos_id))
+        ids.append(int(eos_id))
+        if max_length and len(ids) > int(max_length):
+            ids = ids[: int(max_length)]
+            ids[-1] = int(eos_id)
+        seqs.append(ids)
+
+    max_len = max((len(s) for s in seqs), default=1)
+    input_ids = torch.full((len(seqs), max_len), int(pad_id), dtype=torch.long)
+    attention_mask = torch.zeros((len(seqs), max_len), dtype=torch.long)
+    token_w = torch.zeros((len(seqs), max_len), dtype=torch.float32)
+    for i, s in enumerate(seqs):
+        input_ids[i, : len(s)] = torch.tensor(s, dtype=torch.long)
+        attention_mask[i, : len(s)] = 1
+        token_w[i, : len(s)] = 1.0
+    return input_ids, attention_mask, token_w
