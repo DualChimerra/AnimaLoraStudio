@@ -18,6 +18,8 @@ import pytest
 
 from studio.server import app
 
+from ._route_helpers import iter_leaf_routes
+
 SNAPSHOT_PATH = Path(__file__).parent / "_snapshots" / "studio_routes.json"
 SNAPSHOT_VERSION = 1
 
@@ -33,7 +35,14 @@ def _route_entry(route: Any) -> dict[str, Any]:
 
 
 def _collect_routes() -> list[dict[str, Any]]:
-    entries = [_route_entry(r) for r in app.routes]
+    # FastAPI 0.137+ 把 include_router 包成 `_IncludedRouter` wrapper（详
+    # tests/_route_helpers.py），递归展开后才与 0.136 行为一致 —— snapshot
+    # 文件不需要因为 fastapi 升级重新生成。
+    entries = [_route_entry(r) for r in iter_leaf_routes(app.routes)]
+    # 根路径 SPA 静态 Mount 是条件挂载（server.py 仅在前端 dist/ 存在时挂，
+    # ADR 0012 起挂在 "/"，Starlette 把该 Mount 的 path 存成空串）——CI 不构建
+    # 前端，本地构建过；纳入 snapshot 会让结果依赖环境，按 name 排除。
+    entries = [e for e in entries if not (e["type"] == "Mount" and e["name"] == "studio")]
     entries.sort(key=lambda e: (e["path"], ",".join(e["methods"]), e["name"]))
     return entries
 

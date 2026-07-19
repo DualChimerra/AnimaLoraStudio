@@ -15,9 +15,10 @@ import {
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { LLMMessage } from '../api/client'
+import { useAutoGrowTextarea } from '../lib/useAutoGrowTextarea'
 
 interface Props {
   messages: LLMMessage[]
@@ -69,7 +70,15 @@ export default function LLMMessagesEditor({ messages, onChange, disabled }: Prop
   }
 
   const updateMsg = (i: number, patch: Partial<LLMMessage>) => {
-    onChange(messages.map((m, idx) => (idx === i ? { ...m, ...patch } : m)))
+    onChange(messages.map((m, idx) => {
+      if (idx !== i) return m
+      const updated = { ...m, ...patch }
+      // 不可变更新会换掉对象引用；把稳定 id 一并迁到新对象上，否则 idOf
+      // 会发新 id → key 变 → 整个 SortableMessage（含 textarea）重挂、输入失焦。
+      const id = idRefs.current.get(m)
+      if (id) idRefs.current.set(updated, id)
+      return updated
+    }))
   }
 
   const deleteMsg = (i: number) => {
@@ -137,6 +146,15 @@ function SortableMessage({
   t: ReturnType<typeof useTranslation>['t']
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id })
+  // 本地缓冲：逐字只更新本地，失焦(onBlur)才把 content 上抛父（instant-apply 下避免逐字 PUT）。
+  // 外部 message.content（落盘后回流）变化时同步本地。role 切换仍即时，不走缓冲。
+  const [draft, setDraft] = useState(message.content)
+  useEffect(() => {
+    setDraft(message.content)
+  }, [message.content])
+  // 与测试页 prompt 同款：随内容自动撑高，rows 定最小高度
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+  useAutoGrowTextarea(textareaRef, draft)
   const style: React.CSSProperties = {
     transform: CSS.Transform.toString(transform),
     transition,
@@ -259,15 +277,16 @@ function SortableMessage({
         </div>
       ) : (
         <textarea
-          value={message.content}
-          onChange={(e) => onChange({ content: e.target.value })}
+          ref={textareaRef}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={() => { if (draft !== message.content) onChange({ content: draft }) }}
           disabled={disabled}
           rows={3}
-          className="w-full bg-transparent border-0 outline-none text-sm text-fg-primary block"
+          className="w-full bg-transparent border-0 outline-none text-sm text-fg-primary block resize-none overflow-hidden"
           style={{
             padding: '12px 14px',
             fontFamily: 'var(--font-mono)',
-            resize: 'none',
             lineHeight: 1.55,
             minHeight: 80,
           }}

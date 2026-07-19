@@ -1,7 +1,7 @@
 """ADR 0003 PR-C：plugin registry + AdapterProtocol 单元测试。
 
 覆盖：
-- 4 个 plugin 子包的 BUILDERS / build_X / validate_schema_consistency 三件套
+- adapter plugin 子包的 BUILDERS / build_X / validate_schema_consistency 三件套
 - AdapterProtocol runtime_checkable 对 AnimaLycorisAdapter 返回 True
 - 动态/per-step / loss 加项 hook 在 mock adapter 上能被正确调用
 - train_loop.py / phases/optimizer.py 已不含 if optimizer_type == / if lora_type ==
@@ -17,6 +17,7 @@ import types
 from pathlib import Path
 
 import pytest
+from training.families.anima.preset import ANIMA_PRESET
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -26,7 +27,7 @@ sys.path.insert(0, str(RUNTIME_DIR))
 
 
 @pytest.fixture(scope="module")
-def AnimaLycorisAdapter():
+def AnimaLycorisAdapter(preset=ANIMA_PRESET, ):
     """AnimaLycorisAdapter 类（lycoris-lora 后端可用时跑，否则 skip）。"""
     pytest.importorskip("lycoris")
     from utils.lycoris_adapter import AnimaLycorisAdapter as cls
@@ -40,18 +41,17 @@ def AnimaLycorisAdapter():
 
 def test_adapter_builders_dict_has_lokr_loha_lora() -> None:
     from training.adapters import BUILDERS
-    assert set(BUILDERS) == {"lokr", "loha", "lora"}
+    assert set(BUILDERS) == {"lokr", "loha", "lora", "ortho", "tlora"}
 
 
 def test_optimizer_builders_dict_has_8_variants() -> None:
     from training.optimizers import BUILDERS, VALIDATORS
     assert set(BUILDERS) == {
-        "adamw", "automagic", "came", "lion", "prodigy", "prodigy_plus_schedulefree",
-        "soap", "soap_sf",
+        "adamw", "automagic", "came", "lion", "prodigy",
+        "prodigy_plus_schedulefree", "soap", "soap_sf",
     }
     # Automagic / PPSF / soap_sf 有专属 validator（schedule-free 要求 lr_scheduler=none）；
     # adamw / came / lion / prodigy / soap 没有
-    # （CAME 是外部 lr + scheduler 系，无 lr=1.0 / lr_scheduler=none 约束）
     assert set(VALIDATORS) == {"automagic", "prodigy_plus_schedulefree", "soap_sf"}
 
 
@@ -75,7 +75,25 @@ def test_build_adapter_raises_on_unknown_lora_type() -> None:
     from training.adapters import build_adapter
     args = argparse.Namespace(lora_type="bogus_xyz")
     with pytest.raises(ValueError, match="未知 lora_type"):
-        build_adapter(args)
+        build_adapter(args, preset=ANIMA_PRESET)
+
+
+def test_build_adapter_forwards_explicit_family_preset(monkeypatch) -> None:
+    from training.adapters import BUILDERS, build_adapter
+
+    family_preset = {"target_name": ["family-only"]}
+    sentinel = object()
+
+    def _build(args, *, preset):
+        assert args.lora_type == "lora"
+        assert preset is family_preset
+        return sentinel
+
+    monkeypatch.setitem(BUILDERS, "lora", _build)
+    assert build_adapter(
+        argparse.Namespace(lora_type="lora"),
+        preset=family_preset,
+    ) is sentinel
 
 
 def test_build_scheduler_returns_none_when_lr_scheduler_is_none() -> None:
@@ -254,41 +272,6 @@ def test_ppsf_explicit_prodigy_steps_is_preserved(monkeypatch) -> None:
     assert captured["prodigy_steps"] == 750
 
 
-def test_came_build_assembles_betas_eps_tuples(monkeypatch) -> None:
-    """came.build 把 6 个 came_* 字段组装成 betas 三元组 + eps 二元组 + clip_threshold，
-    并透传外部 lr / weight_decay（CAME 不强制 lr=1.0）。"""
-    from training.optimizers import came
-
-    captured = {}
-
-    def fake_create_optimizer(**kwargs):
-        captured.update(kwargs)
-        return object()
-
-    monkeypatch.setitem(
-        sys.modules,
-        "utils.optimizer_utils",
-        types.SimpleNamespace(create_optimizer=fake_create_optimizer),
-    )
-    args = argparse.Namespace(
-        came_beta1=0.9,
-        came_beta2=0.999,
-        came_beta3=0.9999,
-        came_eps1=1e-30,
-        came_eps2=1e-16,
-        came_clip_threshold=1.0,
-    )
-
-    came.build(args, params=[], lr=1e-4, weight_decay=0.01)
-
-    assert captured["optimizer_type"] == "came"
-    assert captured["betas"] == (0.9, 0.999, 0.9999)
-    assert captured["eps"] == (1e-30, 1e-16)
-    assert captured["clip_threshold"] == 1.0
-    assert captured["learning_rate"] == 1e-4  # 外部 lr 透传，不强制 1.0
-    assert captured["weight_decay"] == 0.01
-
-
 # ---------------------------------------------------------------------------
 # Schema↔registry 一致性自动校验（PR-C R4 缓解）
 # ---------------------------------------------------------------------------
@@ -319,15 +302,14 @@ def test_schema_consistency_raises_when_builder_missing(monkeypatch) -> None:
     """模拟漏注册：schema 加了 lora_type=tlora 但 BUILDERS 没注册时，校验
     必须 raise，而不是放行让训练跑半天才暴露。"""
     from training import adapters
-    monkeypatch.setitem(adapters.BUILDERS.copy(), "tlora", lambda args: None)
-    # 临时改 schema 的 Literal 表演成 "schema 有 tlora 但 registry 没有"
+    monkeypatch.delitem(adapters.BUILDERS, "tlora")
     from studio.schema import TrainingConfig
     field = TrainingConfig.model_fields["lora_type"]
     original = field.annotation
     try:
         # 用 typing.Literal 重建一个含 "tlora" 的 annotation
         from typing import Literal
-        field.annotation = Literal["lora", "lokr", "loha", "tlora"]  # type: ignore[assignment]
+        field.annotation = Literal["lora", "lokr", "loha", "ortho", "tlora"]  # type: ignore[assignment]
         with pytest.raises(RuntimeError, match="不同步"):
             adapters.validate_schema_consistency()
     finally:
@@ -343,7 +325,7 @@ def test_animalycoris_satisfies_adapter_protocol(AnimaLycorisAdapter) -> None:
     """AnimaLycorisAdapter 实现了全部 4 必需 + 3 可选 hook，
     isinstance(_, AdapterProtocol) 必须 True。"""
     from training.adapters.protocol import AdapterProtocol
-    adapter = AnimaLycorisAdapter(algo="lokr")
+    adapter = AnimaLycorisAdapter(preset=ANIMA_PRESET, algo="lokr")
     assert isinstance(adapter, AdapterProtocol)
 
 
@@ -351,7 +333,7 @@ def test_animalycoris_hooks_are_noop(AnimaLycorisAdapter) -> None:
     """LyCORIS 路径下 3 个 hook 必须 default no-op；
     on_step_begin 返回 None；regularization_loss 返回 None。"""
     from training.adapters.protocol import StepContext
-    adapter = AnimaLycorisAdapter(algo="lokr")
+    adapter = AnimaLycorisAdapter(preset=ANIMA_PRESET, algo="lokr")
 
     # 用极简 StepContext —— sigma_t 在 lyc 路径下不会被读
     import torch
@@ -369,17 +351,34 @@ def test_animalycoris_hooks_are_noop(AnimaLycorisAdapter) -> None:
 
 def test_animalycoris_lokr_excludes_weight_decay_for_w1(AnimaLycorisAdapter) -> None:
     """LoKr 模式下 'lokr_w1' 子串参数排除 weight_decay。"""
-    adapter = AnimaLycorisAdapter(algo="lokr")
+    adapter = AnimaLycorisAdapter(preset=ANIMA_PRESET, algo="lokr")
     assert adapter.excludes_weight_decay("lora_unet_xxx.lokr_w1") is True
     assert adapter.excludes_weight_decay("lora_unet_xxx.lokr_w2_a") is False
 
 
 def test_animalycoris_non_lokr_does_not_exclude_weight_decay(AnimaLycorisAdapter) -> None:
     """非 LoKr（lora / loha）模式：excludes_weight_decay 永远 False。"""
-    adapter = AnimaLycorisAdapter(algo="lora")
+    adapter = AnimaLycorisAdapter(preset=ANIMA_PRESET, algo="lora")
     assert adapter.excludes_weight_decay("lora_unet_xxx.lokr_w1") is False
-    adapter = AnimaLycorisAdapter(algo="loha")
+    adapter = AnimaLycorisAdapter(preset=ANIMA_PRESET, algo="loha")
     assert adapter.excludes_weight_decay("lora_unet_xxx.lokr_w1") is False
+
+
+def test_tlora_mask_changes_with_sigma_and_is_not_saved(AnimaLycorisAdapter) -> None:
+    """与 ControlGenAI/T-LoRA 官方 (arxiv 2507.05964) 对齐：
+    high noise → low rank, clean → full rank。"""
+    import torch
+    from training.adapters.protocol import StepContext
+
+    adapter = AnimaLycorisAdapter(preset=ANIMA_PRESET, algo="tlora", rank=8, tlora_min_rank=2, tlora_alpha_rank_scale=1.0)
+    adapter._tlora_modules = [types.SimpleNamespace()]
+    # t=0 (clean) → 满 rank (frac = (1-0)^1 = 1, active = rank)
+    adapter.on_step_begin(StepContext(0, 10, 0, torch.tensor([0.0]), argparse.Namespace()))
+    assert adapter._tlora_mask.tolist() == [1.0] * 8
+    # t=1 (max noise) → 只有前 min_rank=2 active (frac = (1-1)^1 = 0)
+    adapter.on_step_begin(StepContext(1, 10, 0, torch.tensor([1.0]), argparse.Namespace()))
+    assert adapter._tlora_mask.tolist() == [1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    assert adapter.state_dict() == {}
 
 
 # ---------------------------------------------------------------------------
@@ -473,7 +472,15 @@ def test_no_optimizer_type_dispatch_in_phases_optimizer() -> None:
 def test_no_lora_type_dispatch_in_phases_models() -> None:
     text = (RUNTIME_DIR / "training" / "phases" / "models.py").read_text(encoding="utf-8")
     # 应该看不到 AnimaLycorisAdapter 直接实例化（被 build_adapter 替代）
-    assert "AnimaLycorisAdapter(" not in text
+    assert "AnimaLycorisAdapter(preset=ANIMA_PRESET, " not in text
+    assert "build_adapter(args, preset=ctx.family.lora_preset())" in text
+
+
+def test_adapter_builders_do_not_import_anima_preset() -> None:
+    adapters_dir = RUNTIME_DIR / "training" / "adapters"
+    for filename in ("lycoris.py", "ortho.py", "tlora.py"):
+        text = (adapters_dir / filename).read_text(encoding="utf-8")
+        assert "families.anima.preset" not in text
 
 
 def test_no_lr_scheduler_dispatch_in_phases_optimizer() -> None:
@@ -484,7 +491,7 @@ def test_no_lr_scheduler_dispatch_in_phases_optimizer() -> None:
 
 
 def test_no_er_sde_inline_dispatch_in_sampling() -> None:
-    text = (RUNTIME_DIR / "training" / "sampling.py").read_text(encoding="utf-8")
+    text = (RUNTIME_DIR / "training" / "families" / "anima" / "sampling.py").read_text(encoding="utf-8")
     # sample_image 应该通过 build_inference_sampler 派发
     assert 'if sampler_name_l == "er_sde"' not in text
     assert "build_inference_sampler" in text

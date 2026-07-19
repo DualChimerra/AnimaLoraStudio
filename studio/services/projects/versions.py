@@ -1,7 +1,7 @@
 """Version 数据模型 + 物理目录 + fork 训练树 + activate。
 
 Version 是 Pipeline 的「实验单元」：每个 version 独立维护 train/ reg/
-output/ samples/ 与 monitor_state.json。label 由用户起（baseline /
+output/。label 由用户起（baseline /
 high-lr 这种语义名），同 project 内唯一，且不可改（路径锚点）。
 
 删除：直接 rmtree version 目录 + DELETE db 行。不可恢复。
@@ -91,13 +91,19 @@ def derive_status_from_tasks(
 ) -> str:
     """按 ADR §11.3-C 派生 version.status：
 
-    - 有 active task（pending / running / paused）→ training
+    - 有 active task（pending / running / paused / scheduled）→ training
     - 无 active 看最近终态 task → completed / failed / canceled
     - 从未有 task → preparing
+
+    0.17 P-B：scheduled（计划任务，还没到点）与 pending 同等对待 —— 版本已被
+    该任务占用（enqueue 端点会 409），状态必须体现出来。
+    R-5：台账合并后 tasks 表也装数据作业（tag/download/eval…），派生只看
+    GPU 任务类型 —— 否则一个 pending 打标作业会把 version 顶成「训练中」。
     """
     row = conn.execute(
         "SELECT 1 FROM tasks "
-        "WHERE version_id = ? AND status IN ('pending', 'running', 'paused') "
+        "WHERE version_id = ? AND status IN ('pending', 'running', 'paused', 'scheduled') "
+        "AND COALESCE(task_type, 'train') IN ('train', 'reg_ai', 'generate') "
         "LIMIT 1",
         (version_id,),
     ).fetchone()
@@ -107,6 +113,7 @@ def derive_status_from_tasks(
     row = conn.execute(
         "SELECT status FROM tasks "
         "WHERE version_id = ? AND status IN ('done', 'failed', 'canceled') "
+        "AND COALESCE(task_type, 'train') IN ('train', 'reg_ai', 'generate') "
         "ORDER BY created_at DESC LIMIT 1",
         (version_id,),
     ).fetchone()
@@ -149,8 +156,15 @@ def reconcile_version_status(
     update_version(conn, version_id, status=derived)
     return get_version(conn, version_id), True
 
-# label 必须是路径安全的：字母 / 数字 / 下划线 / 连字符 / 点
-_VALID_LABEL = re.compile(r"^[A-Za-z0-9_.-]+$")
+# label 必须是路径安全的：字母 / 数字 / 下划线 / 连字符 / 点。
+# 纯点 label（"." / ".."）会让 version_dir 解析到 versions/ 之外
+# （".." == project 根，delete_version 时 rmtree 整个项目），必须拒绝。
+_VALID_LABEL = re.compile(r"^(?!\.+$)[A-Za-z0-9_.-]+$")
+
+
+def is_valid_label(label: str) -> bool:
+    """version label 校验，给外部输入源（如 bundle manifest）复用。"""
+    return bool(_VALID_LABEL.fullmatch(label))
 
 
 from studio.domain.errors import DomainError
@@ -368,7 +382,9 @@ DEFAULT_TRAIN_FOLDER = "1_data"
 
 
 def _ensure_version_tree(vdir: Path) -> None:
-    for sub in ("train", "reg", "output", "samples"):
+    # samples/ 不再建：采样图是 task 档案（studio_data/tasks/<id>/samples/），
+    # version 树里只有老 task 的历史数据，读兼容由 samples.py 多候选解析负责
+    for sub in ("train", "reg", "output"):
         (vdir / sub).mkdir(parents=True, exist_ok=True)
     (vdir / "train" / DEFAULT_TRAIN_FOLDER).mkdir(parents=True, exist_ok=True)
 
@@ -394,7 +410,10 @@ def get_version(
 def _must_get(conn: sqlite3.Connection, version_id: int) -> dict[str, Any]:
     v = get_version(conn, version_id)
     if not v:
-        raise VersionError(f"版本不存在: id={version_id}")
+        raise VersionError(
+            "Version not found", code="version.not_found",
+            details={"id": version_id}, http_status=404,
+        )
     return v
 
 
@@ -431,24 +450,36 @@ def create_version(
     """
     p = projects.get_project(conn, project_id)
     if not p:
-        raise VersionError(f"项目不存在: id={project_id}")
+        raise VersionError(
+            "Project not found", code="project.not_found",
+            details={"id": project_id}, http_status=404,
+        )
     if not _VALID_LABEL.fullmatch(label):
         raise VersionError(
-            f"非法 label: {label!r}（仅允许字母/数字/下划线/连字符/点）"
+            f'Invalid version label "{label}"; use letters, digits, '
+            "underscore, hyphen, or dot",
+            code="version.label_invalid", details={"name": label},
+            http_status=400,
         )
     # 唯一性
     if conn.execute(
         "SELECT 1 FROM versions WHERE project_id = ? AND label = ?",
         (project_id, label),
     ).fetchone():
-        raise VersionError(f"label 已存在: {label!r}")
+        raise VersionError(
+            f'Version label "{label}" already exists',
+            code="version.label_exists", details={"name": label},
+            http_status=400,
+        )
 
     src_config_name: Optional[str] = None
     if fork_from_version_id is not None:
         src = get_version(conn, fork_from_version_id)
         if not src or src["project_id"] != project_id:
             raise VersionError(
-                f"fork 源不存在或不属于当前项目: id={fork_from_version_id}"
+                "The version to copy from was not found in this project",
+                code="version.fork_source_invalid",
+                details={"id": fork_from_version_id}, http_status=404,
             )
         src_config_name = src["config_name"]
 
@@ -586,15 +617,17 @@ def activate_version(
 # ---------------------------------------------------------------------------
 
 
-def stats_for_version(p: dict[str, Any], v: dict[str, Any]) -> dict[str, Any]:
-    """train 子文件夹与图片计数 / 已打标计数 / reg 计数 / output 是否存在。"""
-    vdir = version_dir(p["id"], p["slug"], v["label"])
-    train_dir = vdir / "train"
-    train_folders: list[dict[str, Any]] = []
-    train_total = 0
-    tagged_total = 0
-    if train_dir.exists():
-        for sub in sorted(train_dir.iterdir()):
+def _scan_caption_dataset(root: Path) -> tuple[list[dict[str, Any]], int, int]:
+    """扫 root/<folder>/ 的图片数与已打标数（.txt / .json sidecar）。
+
+    train/ 与 validation/ 同构（validation 镜像 train 的子文件夹布局），共用一套扫描。
+    返回 (folders, total, tagged)。
+    """
+    folders: list[dict[str, Any]] = []
+    total = 0
+    tagged = 0
+    if root.exists():
+        for sub in sorted(root.iterdir()):
             if sub.is_dir():
                 cnt = 0
                 for f in sub.iterdir():
@@ -602,9 +635,17 @@ def stats_for_version(p: dict[str, Any], v: dict[str, Any]) -> dict[str, Any]:
                         continue
                     cnt += 1
                     if f.with_suffix(".txt").exists() or f.with_suffix(".json").exists():
-                        tagged_total += 1
-                train_folders.append({"name": sub.name, "image_count": cnt})
-                train_total += cnt
+                        tagged += 1
+                folders.append({"name": sub.name, "image_count": cnt})
+                total += cnt
+    return folders, total, tagged
+
+
+def stats_for_version(p: dict[str, Any], v: dict[str, Any]) -> dict[str, Any]:
+    """train / validation 图片与已打标计数 / reg 计数 / output 是否存在。"""
+    vdir = version_dir(p["id"], p["slug"], v["label"])
+    train_folders, train_total, tagged_total = _scan_caption_dataset(vdir / "train")
+    _, val_total, val_tagged = _scan_caption_dataset(vdir / "validation")
     reg_dir = vdir / "reg"
     reg_total = 0
     reg_meta_exists = False
@@ -620,7 +661,85 @@ def stats_for_version(p: dict[str, Any], v: dict[str, Any]) -> dict[str, Any]:
         "train_image_count": train_total,
         "tagged_image_count": tagged_total,
         "train_folders": train_folders,
+        "validation_image_count": val_total,
+        "validation_tagged_count": val_tagged,
         "reg_image_count": reg_total,
         "reg_meta_exists": reg_meta_exists,
         "has_output": has_output,
     }
+
+
+def compute_bucket_histogram(
+    train_dir: Path,
+    resolutions: list[int],
+    aspect_ratio_limit: float = 2.0,
+    prefer_json: bool = True,
+) -> list[dict[str, Any]]:
+    """按**真正的** BucketManager 算训练集 ARB 桶分布（与实际训练逐桶一致）。
+
+    扫描规则镜像 trainer 的 ``ImageDataset._scan`` / ``_make_sample``，避免预览与实际
+    训练数量不符：
+    - 根目录散图按 repeat=1 + config 分辨率列表计入；
+    - 子文件夹**递归**（``rglob``）扫，按文件夹名 px 覆盖 / repeat 解析；
+    - **只计有 caption 的图**（无 ``.json``/``.txt``/``.caption`` 的会被 trainer 丢弃）。
+
+    每张图按其分辨率 fan-out 落桶，count = 有效样本数（含 repeat × 分辨率档数）。
+    复用 runtime 的 ``BucketManager`` + ``_parse_folder_meta``，不引入桶算法第三份拷贝。
+    返回 ``[{reso, buckets: [{w, h, count}]}]``，按分辨率升序、桶按 count 降序。
+    """
+    from runtime.training.dataset import BucketManager, ImageDataset
+    from PIL import Image
+
+    train_dir = Path(train_dir)
+    base_resos = [int(r) for r in resolutions]
+    mgrs: dict[int, Any] = {}
+
+    def mgr_for(reso: int):
+        if reso not in mgrs:
+            mgrs[reso] = BucketManager(int(reso), aspect_ratio_limit=aspect_ratio_limit)
+        return mgrs[reso]
+
+    def has_caption(img_path: Path) -> bool:
+        # 镜像 _make_sample：prefer_json 且 .json 存在 → json；否则要 .txt 或 .caption。
+        if prefer_json and img_path.with_suffix(".json").exists():
+            return True
+        return img_path.with_suffix(".txt").exists() or img_path.with_suffix(".caption").exists()
+
+    hist: dict[int, dict[tuple[int, int], int]] = {}
+
+    def add_image(img_path: Path, repeat: int, resos: list[int]) -> None:
+        if not has_caption(img_path):
+            return
+        try:
+            with Image.open(img_path) as im:
+                w, h = im.size
+        except Exception:
+            return
+        for target_reso in resos:
+            bw, bh = mgr_for(target_reso).get_bucket(w, h)
+            bmap = hist.setdefault(int(target_reso), {})
+            bmap[(bw, bh)] = bmap.get((bw, bh), 0) + repeat
+
+    if train_dir.exists():
+        # 根目录散图：repeat=1，无 px 前缀 → 用 config 分辨率列表
+        for p in sorted(train_dir.iterdir()):
+            if p.is_file() and p.suffix.lower() in IMAGE_EXTS:
+                add_image(p, 1, base_resos)
+        # 子文件夹：递归扫 + px 覆盖 / repeat 解析
+        for sub in sorted(train_dir.iterdir()):
+            if not sub.is_dir():
+                continue
+            reso_override, repeat, _label = ImageDataset._parse_folder_meta(sub.name)
+            resos = [reso_override] if reso_override else base_resos
+            for f in sorted(sub.rglob("*")):
+                if f.is_file() and f.suffix.lower() in IMAGE_EXTS:
+                    add_image(f, repeat, resos)
+
+    out: list[dict[str, Any]] = []
+    for reso in sorted(hist):
+        buckets = [
+            {"w": w, "h": h, "count": c}
+            for (w, h), c in sorted(hist[reso].items(), key=lambda kv: (-kv[1], kv[0][0], kv[0][1]))
+        ]
+        out.append({"reso": reso, "buckets": buckets})
+    return out

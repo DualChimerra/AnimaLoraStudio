@@ -18,10 +18,12 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, File, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 
 from ...errors import _data_export_path, _export_result, _unique_data_export_path
+from ....domain.errors import NotFoundError, ValidationError
 from ...schemas.exports import BundleImportBody, BundleOptionsBody
 from ._shared import (
     _project_payload,
@@ -53,7 +55,9 @@ def export_version_train_zip(
     with db.connection_for() as conn:
         v = versions.get_version(conn, vid)
         if not v or v["project_id"] != pid:
-            raise HTTPException(404, f"版本不存在: id={vid}")
+            raise NotFoundError(
+                "Version not found", code="version.not_found", details={"id": vid},
+            )
         p = projects.get_project(conn, pid)
         assert p is not None
 
@@ -70,7 +74,7 @@ def export_version_train_zip(
                 "version_id": vid,
                 "error": str(exc),
             })
-            raise HTTPException(400, str(exc)) from exc
+            raise
         except Exception as exc:
             tmp_path.unlink(missing_ok=True)
             bus.publish({
@@ -106,6 +110,9 @@ def export_version_bundle(
     reg: bool = False,
     reg_captions: bool = False,
     include_config: bool = False,
+    train_latent_cache: bool = False,
+    reg_latent_cache: bool = False,
+    train_masks: bool = False,
 ) -> FileResponse:
     """按选项临时打包 bundle.zip（schema_version 2）并交给浏览器下载。"""
     opts = train_io.BundleOptions(
@@ -114,12 +121,17 @@ def export_version_bundle(
         reg=reg,
         reg_captions=reg_captions,
         include_config=include_config,
+        train_latent_cache=train_latent_cache,
+        reg_latent_cache=reg_latent_cache,
+        train_masks=train_masks,
     )
 
     with db.connection_for() as conn:
         v = versions.get_version(conn, vid)
         if not v or v["project_id"] != pid:
-            raise HTTPException(404, f"版本不存在: id={vid}")
+            raise NotFoundError(
+                "Version not found", code="version.not_found", details={"id": vid},
+            )
         p = projects.get_project(conn, pid)
         assert p is not None
 
@@ -131,7 +143,7 @@ def export_version_bundle(
         except train_io.TrainIOError as exc:
             tmp_path.unlink(missing_ok=True)
             bus.publish({"type": "version_bundle_zip_failed", "project_id": pid, "version_id": vid, "error": str(exc)})
-            raise HTTPException(400, str(exc)) from exc
+            raise
         except Exception as exc:
             tmp_path.unlink(missing_ok=True)
             bus.publish({"type": "version_bundle_zip_failed", "project_id": pid, "version_id": vid, "error": str(exc)})
@@ -158,7 +170,9 @@ def export_version_bundle_to_data_exports(
     with db.connection_for() as conn:
         v = versions.get_version(conn, vid)
         if not v or v["project_id"] != pid:
-            raise HTTPException(404, f"版本不存在: id={vid}")
+            raise NotFoundError(
+                "Version not found", code="version.not_found", details={"id": vid},
+            )
         p = projects.get_project(conn, pid)
         assert p is not None
         DATA_EXPORTS.mkdir(parents=True, exist_ok=True)
@@ -168,7 +182,7 @@ def export_version_bundle_to_data_exports(
         except train_io.TrainIOError as exc:
             dest.unlink(missing_ok=True)
             bus.publish({"type": "version_bundle_zip_failed", "project_id": pid, "version_id": vid, "error": str(exc)})
-            raise HTTPException(400, str(exc)) from exc
+            raise
         except Exception as exc:
             dest.unlink(missing_ok=True)
             bus.publish({"type": "version_bundle_zip_failed", "project_id": pid, "version_id": vid, "error": str(exc)})
@@ -191,16 +205,22 @@ def _bundle_import_payload(result: dict[str, Any]) -> dict[str, Any]:
 
 def _import_bundle_from_path(dest: Path, original: str) -> dict[str, Any]:
     if not dest.exists():
-        raise HTTPException(404, f"文件不存在: {original}")
+        raise NotFoundError(
+            f"Path not found: {original}",
+            code="path.not_found", details={"path": original},
+        )
     if not dest.is_file():
-        raise HTTPException(400, "请选择 zip 文件")
+        raise ValidationError(
+            "Selected path is not a file",
+            code="path.not_a_file", http_status=400,
+        )
     if dest.suffix.lower() != ".zip":
-        raise HTTPException(400, "请选择 .zip 文件")
+        raise ValidationError(
+            "Select a .zip file",
+            code="file.ext_invalid", details={"types": ".zip"}, http_status=400,
+        )
     with db.connection_for() as conn:
-        try:
-            result = train_io.import_bundle(conn, dest, USER_PRESETS_DIR)
-        except train_io.TrainIOError as exc:
-            raise HTTPException(400, str(exc)) from exc
+        result = train_io.import_bundle(conn, dest, USER_PRESETS_DIR)
     return _bundle_import_payload(result)
 
 
@@ -220,11 +240,20 @@ def import_bundle_zip(body: BundleImportBody) -> dict[str, Any]:
 
 @router.post("/api/projects/import-bundle/upload")
 async def import_bundle_upload(file: UploadFile = File(...)) -> dict[str, Any]:
-    """上传 bundle zip → 新建 project + version。"""
+    """上传 bundle zip → 新建 project + version。
+
+    `_import_bundle_from_path` 是同步 zip 解压 + manifest 校验 + 落盘，必须挪进
+    run_in_threadpool 否则卡死 event loop（详见 ingestion.upload_local_files）。
+    """
     if not file.filename:
-        raise HTTPException(400, "缺少上传文件")
+        raise ValidationError(
+            "No files uploaded", code="dataset.no_files", http_status=400,
+        )
     if Path(file.filename).suffix.lower() != ".zip":
-        raise HTTPException(400, "请选择 .zip 文件")
+        raise ValidationError(
+            "Select a .zip file",
+            code="file.ext_invalid", details={"types": ".zip"}, http_status=400,
+        )
     tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
     try:
         while True:
@@ -233,7 +262,9 @@ async def import_bundle_upload(file: UploadFile = File(...)) -> dict[str, Any]:
                 break
             tmp.write(chunk)
         tmp.close()
-        return _import_bundle_from_path(Path(tmp.name), file.filename)
+        return await run_in_threadpool(
+            _import_bundle_from_path, Path(tmp.name), file.filename,
+        )
     finally:
         try:
             Path(tmp.name).unlink(missing_ok=True)
@@ -243,9 +274,15 @@ async def import_bundle_upload(file: UploadFile = File(...)) -> dict[str, Any]:
 
 @router.post("/api/projects/import-train")
 async def import_train_zip(file: UploadFile = File(...)) -> dict[str, Any]:
-    """上传训练集 zip → 新建 project + v1（stage=tagging），返回新项目。"""
+    """上传训练集 zip → 新建 project + v1（stage=tagging），返回新项目。
+
+    train_io.import_train() 是同步 zip 解压 + 写 db + 落图，挪进 run_in_threadpool
+    （详见 ingestion.upload_local_files 的根因说明）。
+    """
     if not file.filename:
-        raise HTTPException(400, "缺少上传文件")
+        raise ValidationError(
+            "No files uploaded", code="dataset.no_files", http_status=400,
+        )
     tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
     try:
         # UploadFile 内部本就是 SpooledTemporaryFile，大文件会落临时盘
@@ -256,11 +293,12 @@ async def import_train_zip(file: UploadFile = File(...)) -> dict[str, Any]:
             tmp.write(chunk)
         tmp.close()
         tmp_path = Path(tmp.name)
-        with db.connection_for() as conn:
-            try:
-                result = train_io.import_train(conn, tmp_path)
-            except train_io.TrainIOError as exc:
-                raise HTTPException(400, str(exc)) from exc
+
+        def _do_import() -> dict[str, Any]:
+            with db.connection_for() as conn:
+                return train_io.import_train(conn, tmp_path)
+
+        result = await run_in_threadpool(_do_import)
     finally:
         try:
             Path(tmp.name).unlink(missing_ok=True)

@@ -323,12 +323,14 @@ def test_default_cmd_builder_includes_monitor_flag() -> None:
 def test_popen_injects_wandb_env(env, tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = secrets.Secrets()
     cfg.wandb.enabled = True
-    cfg.wandb.api_key = "wandb-key"
-    cfg.wandb.project = "anima"
-    cfg.wandb.entity = "team"
-    cfg.wandb.base_url = "https://wandb.example"
-    cfg.wandb.mode = "offline"
-    cfg.wandb.log_samples = False
+    # 0.18 预设化：字段在当前选中的 preset 上
+    wb = cfg.wandb.active
+    wb.api_key = "wandb-key"
+    wb.project = "anima"
+    wb.entity = "team"
+    wb.base_url = "https://wandb.example"
+    wb.mode = "offline"
+    wb.log_samples = False
     monkeypatch.setattr("studio.supervisor._secrets.load", lambda: cfg)
     captured: dict[str, Any] = {}
 
@@ -361,6 +363,32 @@ def test_popen_injects_wandb_env(env, tmp_path, monkeypatch: pytest.MonkeyPatch)
     assert captured["env"]["WANDB_UPLOAD_STATE_MANUAL_POLICY"] == "last"
     assert captured["env"]["WANDB_UPLOAD_STATE_AUTO"] == "0"
     assert captured["env"]["WANDB_UPLOAD_STATE_AUTO_POLICY"] == "last"
+
+
+def test_popen_disables_triton_probe(env, tmp_path, monkeypatch) -> None:
+    """子进程注入 XFORMERS_FORCE_DISABLE_TRITON=1，xformers 不再往 task log
+    打无害的 triton ImportError traceback（否则会被 _tail_log_for_error_msg
+    误当失败原因）。"""
+    # os.environ.copy() 起点：本机若设过该 var 会干扰断言
+    monkeypatch.delenv("XFORMERS_FORCE_DISABLE_TRITON", raising=False)
+    captured: dict[str, Any] = {}
+
+    class FakePopen:
+        pid = 123
+
+    def fake_popen(cmd, **kwargs):  # noqa: ANN001
+        captured["env"] = kwargs["env"]
+        return FakePopen()
+
+    monkeypatch.setattr("studio.supervisor.subprocess.Popen", fake_popen)
+    sup = Supervisor(
+        db_path=env["db"], logs_dir=env["logs"], configs_dir=env["configs"],
+    )
+    log_path = tmp_path / "x.log"
+    with log_path.open("wb") as fp:
+        sup._popen([sys.executable, "-c", "pass"], fp)
+
+    assert captured["env"]["XFORMERS_FORCE_DISABLE_TRITON"] == "1"
 
 
 def test_config_path_takes_priority(env, tmp_path) -> None:
@@ -441,3 +469,49 @@ def _task_status(dbfile: Path, tid: int) -> str:
     with db.connection_for(dbfile) as conn:
         task = db.get_task(conn, tid)
     return task["status"] if task else "missing"
+
+
+# --- 0.17 item1：generate task 走 daemon → 落 run.log + emit task_log_appended ---
+
+def _make_sup(env, on_event):
+    return Supervisor(
+        on_event=on_event, cmd_builder=lambda t, c: [],
+        db_path=env["db"], logs_dir=env["logs"], configs_dir=env["configs"],
+        poll_interval=0.05,
+    )
+
+
+def test_daemon_log_line_writes_run_log_and_emits_appended(env) -> None:
+    """active generate task 期间的 daemon 日志落该 task run.log + emit task_log_appended。"""
+    events, on_event = _events_collector()
+    sup = _make_sup(env, on_event)
+    tid = 777
+    lp = env["tasks"] / str(tid) / "run.log"
+    lp.parent.mkdir(parents=True, exist_ok=True)
+    sup._daemon_active_task_id = tid
+    sup._daemon_log_fp = open(lp, "ab")
+    try:
+        sup._on_daemon_log_line({"line": "loading model", "ts": 1, "seq": 1})
+        sup._on_daemon_log_line({"line": "step 3/20", "ts": 2, "seq": 2})
+    finally:
+        sup._daemon_log_fp.close()
+
+    content = lp.read_text(encoding="utf-8")
+    assert "loading model" in content
+    assert "step 3/20" in content
+    appended = [
+        e for e in events
+        if e.get("type") == "task_log_appended" and e.get("task_id") == tid
+    ]
+    assert [e["text"] for e in appended] == ["loading model", "step 3/20"]
+    # 日志抽屉用的 daemon_log_line 仍然照发
+    assert any(e.get("type") == "daemon_log_line" for e in events)
+
+
+def test_daemon_log_line_no_active_task_no_appended(env) -> None:
+    """无 active daemon task（idle 噪声）时不 emit task_log_appended，只 daemon_log_line。"""
+    events, on_event = _events_collector()
+    sup = _make_sup(env, on_event)
+    sup._on_daemon_log_line({"line": "idle noise", "ts": 1, "seq": 1})
+    assert not any(e.get("type") == "task_log_appended" for e in events)
+    assert any(e.get("type") == "daemon_log_line" for e in events)

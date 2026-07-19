@@ -28,10 +28,12 @@ from PIL import Image
 logger = logging.getLogger(__name__)
 
 from studio import db
+from studio.domain.errors import DomainError
 from studio.services.preprocess import core as preprocess
 from studio.services.projects import jobs as project_jobs, projects, versions
 from studio.services import models as model_downloader
 from studio.services.preprocess import manifest as preprocess_manifest
+from studio.services.preprocess import masks as train_masks
 from studio.services.inference import upscaler
 
 
@@ -47,6 +49,16 @@ def _install_signal_handlers() -> None:
     signal.signal(signal.SIGTERM, _on_signal)
     if hasattr(signal, "SIGBREAK"):  # Windows
         signal.signal(signal.SIGBREAK, _on_signal)  # type: ignore[attr-defined]
+
+
+def _unlink_image_and_sidecars(path: Path, *, keep_sidecars: bool = False) -> None:
+    """Remove an image and caption sidecars that are no longer part of train/."""
+    if path.is_file():
+        path.unlink(missing_ok=True)
+    if keep_sidecars:
+        return
+    for ext in (".txt", ".json"):
+        path.with_suffix(ext).unlink(missing_ok=True)
 
 
 def run(job_id: int) -> int:  # noqa: PLR0912, PLR0915 - 主流程线性可读
@@ -148,7 +160,7 @@ def _run_upscale_train(
         sources = preprocess.resolve_targets_train(
             project, version["label"], mode=mode, names=names
         )
-    except preprocess.PreprocessError as exc:
+    except DomainError as exc:
         log(f"[error] 解析目标失败: {exc}")
         return 1
 
@@ -246,6 +258,12 @@ def _run_upscale_train(
             preprocess_manifest.train_add_processed(
                 project_dir, version["label"], src_rel, meta,
             )
+            # mask sidecar 跟随：NEAREST resize 到放大后尺寸（无 mask 时 no-op）
+            try:
+                with Image.open(dst_path) as up_img:
+                    train_masks.resize_mask_like(train_dir, src_rel, up_img.size)
+            except Exception as exc:  # noqa: BLE001
+                log(f"   ⚠ mask 跟随放大失败: {exc}")
             succeeded += 1
             emit_event(
                 "preprocess_progress",
@@ -277,9 +295,9 @@ def _run_crop_train(
     """ADR 0010 train-scope crop。
 
     `params['crops']` = `{rel_path: [rects]}`，rel_path 形如 `1_data/X.png`。
-    crop 产物输出到同 folder 内：N=1 覆盖源文件名（`folder/stem.png`），
-    N>1 fan-out 成 `folder/stem_c0.png` / `folder/stem_c1.png` / ...；
-    train_replace_with_crops 原子替换 manifest。
+    crop 产物输出到同 folder 内：N=1 产出 `folder/stem.png`，N>1 fan-out
+    成 `folder/stem_c0.png` / `folder/stem_c1.png` / ...；成功后清理不再
+    属于 outputs 的旧源图，再用 train_replace_with_crops 原子替换 manifest。
     """
     project_dir = projects.project_dir(project["id"], project["slug"])
     train_dir = preprocess.version_train_dir(project, version["label"])
@@ -314,7 +332,7 @@ def _run_crop_train(
         is_last = idx == total
         try:
             preprocess._validate_rel_name(src_rel)
-        except preprocess.PreprocessError as exc:
+        except DomainError as exc:
             log(f"[skip] {src_rel}: {exc}")
             skipped += 1
             emit_throttled(
@@ -362,6 +380,7 @@ def _run_crop_train(
                 src_img = raw.convert("RGB") if raw.mode != "RGB" else raw.copy()
             sw, sh = src_img.size
             outputs: list[dict[str, Any]] = []
+            crop_boxes: list[tuple[int, int, int, int]] = []
             for r, out_rel in zip(rects, out_rels):
                 left = int(round(r["x"] * sw))
                 top = int(round(r["y"] * sh))
@@ -369,6 +388,7 @@ def _run_crop_train(
                 bottom = int(round((r["y"] + r["h"]) * sh))
                 right = max(left + 1, right)
                 bottom = max(top + 1, bottom)
+                crop_boxes.append((left, top, right, bottom))
                 piece = src_img.crop((left, top, right, bottom))
                 out_path = train_dir / out_rel
                 out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -388,15 +408,35 @@ def _run_crop_train(
                     "mtime": mt,
                 })
 
-            # N>1：原 src 物理文件（如果不在 outputs 列表里）应当删
-            if n > 1:
-                stale_rel = f"{folder}/{src_stem}.png"
+            # 输出可能换成 .png 或 fan-out 成多张；源不再属于 outputs 时必须删，
+            # 否则从 bundle/版本复制来的 train-only 数据会同时保留原图 + 裁剪图。
+            # 已知边界（沿袭旧行为）：`{stem}.png` 进 stale 集是为了清掉历史
+            # N=1 crop 的产物；若 train 里恰好有同 stem 的两张独立图
+            # （X.jpg + X.png），对 X.jpg fan-out 会把无关的 X.png 一并删掉。
+            stale_rels = {src_rel, f"{folder}/{src_stem}.png"} - set(out_rels)
+            output_stems = {Path(rel).stem for rel in out_rels}
+            for stale_rel in sorted(stale_rels):
                 stale_path = train_dir / stale_rel
-                if stale_path.is_file() and stale_rel not in out_rels:
+                has_sidecar = (
+                    stale_path.with_suffix(".txt").exists()
+                    or stale_path.with_suffix(".json").exists()
+                )
+                if stale_path.exists() or has_sidecar:
                     try:
-                        stale_path.unlink()
+                        _unlink_image_and_sidecars(
+                            stale_path,
+                            keep_sidecars=Path(stale_rel).stem in output_stems,
+                        )
                     except OSError as exc:
                         log(f"   ⚠ 删旧 {stale_rel} 失败: {exc}")
+
+            # mask sidecar 跟随：同 box 裁剪 + fan-out（源无 mask 时 no-op）
+            try:
+                train_masks.crop_mask_like(
+                    train_dir, src_rel, crop_boxes, out_rels,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log(f"   ⚠ mask 跟随裁剪失败: {exc}")
 
             preprocess_manifest.train_replace_with_crops(
                 project_dir, version["label"],

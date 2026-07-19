@@ -51,7 +51,9 @@ def fork_preset_for_version_with_warnings(
     new_data = deepcopy(src)
     new_data.update(version_config.project_specific_overrides(project, version))
     if _auto_sync_paths():
-        new_data.update(model_downloader.default_paths_for_new_version())
+        # 按 preset 声明的族取路径——krea2 preset 覆成 anima 路径就是把 config 改坏
+        family = str(new_data.get("model_family") or "anima")
+        new_data.update(model_downloader.default_paths_for_new_version(family=family))
     version_config.write_version_config(
         project, version, new_data, force_project_overrides=True
     )
@@ -81,10 +83,16 @@ def save_version_config_as_preset(
     for f in version_config.PROJECT_SPECIFIC_FIELDS:
         cleaned[f] = defaults.get(f)
     if _auto_sync_paths():
-        cleaned.update(model_downloader.default_paths_for_new_version())
+        family = str(cleaned.get("model_family") or "anima")
+        cleaned.update(model_downloader.default_paths_for_new_version(family=family))
 
     target_path = presets_io._preset_path(target_preset_name)  # 校验名字合法
     if target_path.exists() and not overwrite:
-        raise presets_io.PresetError(f"预设已存在: {target_preset_name}")
+        raise presets_io.PresetError(
+            f'Preset "{target_preset_name}" already exists',
+            code="preset.exists",
+            details={"name": target_preset_name},
+            http_status=409,
+        )
     presets_io.write_preset(target_preset_name, cleaned)
     return presets_io.read_preset(target_preset_name)

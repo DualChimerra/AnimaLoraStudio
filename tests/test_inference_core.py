@@ -112,6 +112,37 @@ def test_read_lora_meta_invalid_fields(tmp_path: Path) -> None:
     assert meta.algo == "lokr"
 
 
+# ── 跨族 LoRA fail-fast（A5，多模型 P4-4）───────────────────────────────────
+
+
+def test_read_lora_meta_model_family_grandfather(tmp_path: Path) -> None:
+    """ss_network_args.model_family 有标记读标记；无标记存量产物 = anima（D13）。"""
+    marked = tmp_path / "k2.safetensors"
+    save_file({"x": torch.zeros(1)}, str(marked), metadata={
+        "ss_network_args": json.dumps({"algo": "lokr", "model_family": "krea2"}),
+    })
+    assert read_lora_meta(str(marked)).model_family == "krea2"
+
+    legacy = tmp_path / "legacy.safetensors"
+    _write_lora_safetensors(legacy, rank=32, alpha=16.0, algo="lokr", factor=8)
+    assert read_lora_meta(str(legacy)).model_family == "anima"
+
+
+def test_apply_loras_rejects_cross_family(tmp_path: Path) -> None:
+    """krea2 LoRA 配 anima 底模（或反之）→ 报错含可操作文案，不静默注错 preset。"""
+    import pytest
+
+    from studio.services.inference.core import LoRASpec, apply_loras
+
+    p = tmp_path / "k2_style.safetensors"
+    save_file({"x": torch.zeros(1)}, str(p), metadata={
+        "ss_network_args": json.dumps({"algo": "lokr", "model_family": "krea2"}),
+    })
+    with pytest.raises(ValueError, match="krea2"):
+        apply_loras(object(), [LoRASpec(path=str(p), scale=1.0)],
+                    "cpu", torch.float32, family_id="anima")
+
+
 def test_read_lora_meta_dora_and_rs_lora(tmp_path: Path) -> None:
     """DoRA / RS-LoRA 训练标志必须从 ss_network_args 读回。
 
@@ -212,6 +243,45 @@ def test_apply_loras_each_lora_injects_separately(tmp_path: Path) -> None:
     # multiplier 设为 spec.scale
     assert created[0].network.multiplier == 1.0
     assert created[1].network.multiplier == 0.5
+    created[0].network.to.assert_called_with(device="cpu", dtype=torch.float32)
+    created[1].network.to.assert_called_with(device="cpu", dtype=torch.float32)
+
+
+@pytest.mark.parametrize("algo", ["lora", "loha"])
+def test_apply_loras_uses_fp32_for_lora_and_loha_algos(tmp_path: Path, algo: str) -> None:
+    """Comfy parity dtype handling is per LycorisNetwork, not only LoKr.
+
+    LoRA and LoHa are represented by the same AnimaLycorisAdapter with different
+    metadata `algo` values, so fp32 network/tensor loading must apply to them too.
+    """
+    p = tmp_path / f"{algo}.safetensors"
+    _write_lora_safetensors(p, rank=8, alpha=4.0, algo=algo, factor=8)
+
+    created: list[MagicMock] = []
+    loaded_dtypes: list[torch.dtype] = []
+
+    def _fake_adapter(*args: object, **kwargs: object) -> MagicMock:
+        m = MagicMock()
+        m.init_kwargs = dict(kwargs)
+        m.network = MagicMock()
+        m.network.loras = []
+
+        def _load(sd, *_args, **_kwargs):
+            loaded_dtypes.extend(t.dtype for t in sd.values())
+            return MagicMock(missing_keys=[], unexpected_keys=[])
+
+        m.load_state_dict.side_effect = _load
+        created.append(m)
+        return m
+
+    model = MagicMock()
+    with _patched_adapter(_fake_adapter):
+        apply_loras(model, [LoRASpec(path=str(p), scale=1.0)], device="cpu", dtype=torch.float32)
+
+    assert created[0].init_kwargs["algo"] == algo
+    created[0].network.to.assert_called_once_with(device="cpu", dtype=torch.float32)
+    assert loaded_dtypes
+    assert all(dtype == torch.float32 for dtype in loaded_dtypes)
 
 
 def test_apply_loras_skips_missing_path(tmp_path: Path) -> None:
@@ -251,12 +321,18 @@ def test_model_cache_hot_reloads_same_topology_lora_ckpt(tmp_path: Path) -> None
     _write_lora_safetensors(p2, rank=16, alpha=8.0, algo="lokr", factor=8)
 
     created: list[MagicMock] = []
+    loaded_dtypes: list[torch.dtype] = []
 
     def _fake_adapter(*args: object, **kwargs: object) -> MagicMock:
         m = MagicMock()
         m.network = MagicMock()
         m.network.loras = []
-        m.load_state_dict.return_value = MagicMock(missing_keys=[], unexpected_keys=[])
+
+        def _load(sd, *_args, **_kwargs):
+            loaded_dtypes.extend(t.dtype for t in sd.values())
+            return MagicMock(missing_keys=[], unexpected_keys=[])
+
+        m.load_state_dict.side_effect = _load
         created.append(m)
         return m
 
@@ -265,7 +341,7 @@ def test_model_cache_hot_reloads_same_topology_lora_ckpt(tmp_path: Path) -> None
     cache = ModelCache()
     cache.model = MagicMock()
     cache.device = "cpu"
-    cache.dtype = torch.float32
+    cache.dtype = torch.bfloat16
 
     with _patched_adapter(_fake_adapter):
         first = cache.apply_loras([{"path": str(p1), "scale": 1.0}])
@@ -278,6 +354,53 @@ def test_model_cache_hot_reloads_same_topology_lora_ckpt(tmp_path: Path) -> None
     assert created[0].load_state_dict.call_count == 2
     assert created[0].network.multiplier == 0.5
     assert cache.last_lora_specs == [LoRASpec(path=str(p2), scale=0.5)]
+    assert loaded_dtypes
+    assert all(dtype == torch.float32 for dtype in loaded_dtypes)
+
+
+def test_model_cache_moves_offloaded_model_before_injecting_lora(tmp_path: Path, monkeypatch) -> None:
+    """VAE decode offloads the base model to CPU; adding LoRA next must move it back first."""
+    p = tmp_path / "a.safetensors"
+    _write_lora_safetensors(p, rank=16, alpha=8.0, algo="lokr", factor=8)
+
+    from runtime import anima_daemon as mod
+
+    events: list[str] = []
+
+    class FakeModel:
+        def to(self, device=None, **_kwargs):
+            events.append(f"model.to:{device}")
+            return self
+
+        def eval(self):
+            events.append("model.eval")
+            return self
+
+    class FakeAdapter:
+        def __init__(self) -> None:
+            self.network = MagicMock()
+
+        def load_state_dict(self, *_args, **_kwargs):
+            return MagicMock(missing_keys=[], unexpected_keys=[])
+
+    def fake_apply_loras(model, specs, device, dtype, family_id="anima"):
+        events.append("apply_loras")
+        assert "model.to:cuda" in events
+        assert dtype == torch.float32
+        return [FakeAdapter()]
+
+    cache = mod.ModelCache()
+    cache.model = FakeModel()
+    cache.qwen_model = None
+    cache.device = "cuda"
+    cache.dtype = torch.bfloat16
+
+    monkeypatch.setattr(mod, "apply_loras", fake_apply_loras)
+
+    adapters = cache.apply_loras([{"path": str(p), "scale": 1.0}])
+
+    assert len(adapters) == 1
+    assert events[:2] == ["model.to:cuda", "apply_loras"]
 
 
 def test_model_cache_reinjects_when_lora_topology_changes(tmp_path: Path) -> None:
@@ -382,3 +505,108 @@ def test_cleanup_stale_generate_tempdirs(tmp_path: Path, monkeypatch: pytest.Mon
     assert not leak2.exists()
     assert keep.exists()  # 不带前缀的不动
     assert (keep / "important.txt").exists()
+
+
+# ---------------------------------------------------------------------------
+# 外部生态 PEFT 键格式（civitai）→ bf16 底模 lycoris 注入
+# ---------------------------------------------------------------------------
+
+
+def _peft_sd(layers: dict[str, int], *, with_alpha: bool = False, seed: int = 7) -> dict:
+    """构造 PEFT 形态 sd：{点分层名: rank}。"""
+    torch.manual_seed(seed)
+    sd: dict = {}
+    for layer, rank in layers.items():
+        sd[f"diffusion_model.{layer}.lora_A.weight"] = torch.randn(rank, 8, dtype=torch.float16)
+        sd[f"diffusion_model.{layer}.lora_B.weight"] = torch.randn(8, rank, dtype=torch.float16)
+        if with_alpha:
+            sd[f"diffusion_model.{layer}.alpha"] = torch.tensor(float(rank) / 2)
+    return sd
+
+
+def test_normalize_peft_lora_sd_converts_keys_and_infers_rank():
+    from studio.services.inference.core import _normalize_peft_lora_sd
+
+    sd = _peft_sd({"blocks.0.q": 4, "blocks.1.k": 2})
+    normalized, max_rank, reg_dims = _normalize_peft_lora_sd(sd)
+
+    assert max_rank == 4
+    assert reg_dims == {"lora_unet_blocks_1_k": 2}
+    assert set(normalized) == {
+        "lora_unet_blocks_0_q.lora_down.weight",
+        "lora_unet_blocks_0_q.lora_up.weight",
+        "lora_unet_blocks_0_q.alpha",
+        "lora_unet_blocks_1_k.lora_down.weight",
+        "lora_unet_blocks_1_k.lora_up.weight",
+        "lora_unet_blocks_1_k.alpha",
+    }
+    # 无 alpha 键 → 补 alpha=rank（comfy 缩放 1.0 语义）
+    assert float(normalized["lora_unet_blocks_0_q.alpha"]) == 4.0
+    assert float(normalized["lora_unet_blocks_1_k.alpha"]) == 2.0
+    # lora_A=down / lora_B=up 方向
+    assert normalized["lora_unet_blocks_0_q.lora_down.weight"].shape == (4, 8)
+    assert normalized["lora_unet_blocks_0_q.lora_up.weight"].shape == (8, 4)
+
+
+def test_normalize_peft_lora_sd_passthrough_and_rejects():
+    import pytest
+
+    from studio.services.inference.core import _normalize_peft_lora_sd
+
+    kohya = {"lora_unet_blocks_0_q.lora_down.weight": torch.zeros(2, 4)}
+    assert _normalize_peft_lora_sd(kohya) is None
+    assert _normalize_peft_lora_sd({}) is None
+
+    with_alpha = _peft_sd({"blocks.0.q": 2}, with_alpha=True)
+    normalized, _, _ = _normalize_peft_lora_sd(with_alpha)
+    assert float(normalized["lora_unet_blocks_0_q.alpha"]) == 1.0  # 保留原 alpha
+
+    dora = _peft_sd({"blocks.0.q": 2})
+    dora["diffusion_model.blocks.0.q.dora_scale"] = torch.ones(8, 1)
+    with pytest.raises(ValueError, match="DoRA"):
+        _normalize_peft_lora_sd(dora)
+
+    with pytest.raises(ValueError, match="无法识别"):
+        _normalize_peft_lora_sd({"diffusion_model.blocks.0.q.mystery": torch.zeros(1)})
+
+
+def test_apply_loras_bf16_model_accepts_peft_file(tmp_path: Path):
+    """用户场景：civitai PEFT 文件（零 metadata）挂 bf16 krea2 底模——
+    归一后 lycoris 正常注入，forward delta = scale × 1.0 × up@down。"""
+    import torch.nn as nn
+
+    from studio.services.inference.core import LoRASpec, apply_loras
+
+    class _Block(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.q = nn.Linear(8, 8, bias=False)
+
+    class _Tiny(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.blocks = nn.ModuleList([_Block()])
+
+        def forward(self, x):
+            return self.blocks[0].q(x)
+
+    torch.manual_seed(0)
+    model = _Tiny()
+    sd = _peft_sd({"blocks.0.q": 2})
+    path = tmp_path / "civit_peft.safetensors"
+    save_file(sd, str(path))  # 无任何 metadata
+
+    x = torch.randn(3, 8)
+    base = model(x).detach().clone()
+
+    adapters = apply_loras(
+        model, [LoRASpec(path=str(path), scale=0.7)], "cpu", torch.float32,
+        family_id="krea2",
+    )
+
+    assert len(adapters) == 1
+    out = model(x).detach()
+    up = sd["diffusion_model.blocks.0.q.lora_B.weight"].float()
+    down = sd["diffusion_model.blocks.0.q.lora_A.weight"].float()
+    expected = base + 0.7 * (x @ down.T @ up.T)   # scale=alpha/rank=1.0
+    assert torch.allclose(out, expected, atol=1e-5)

@@ -2,47 +2,72 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
   api,
+  TERMINAL_TASK_STATUSES,
   type GenerateRequest,
   type LoraEntry,
   type Task,
   type XYMatrixSpec,
 } from '../../api/client'
+import BaseModelSelect, { useBaseModelOptions, useKrea2TeOptions } from '../../components/BaseModelSelect'
 import PageHeader from '../../components/PageHeader'
 import { useToast } from '../../components/Toast'
+import { schemaEnumLabel } from '../../lib/schema'
 import { useEventStream } from '../../lib/useEventStream'
 import { useMonitorProgress } from '../../lib/useMonitorProgress'
 import { useLocalStorageState } from '../../lib/useLocalStorageState'
+import AspectChips, { aspectFromDimensions, type AspectName } from './generate/AspectChips'
 import DaemonControls from './generate/DaemonControls'
 import DaemonLogDrawer from './generate/DaemonLogDrawer'
-import GenerateProgressBar, { type GenerateProgress } from './generate/GenerateProgress'
+import GenerateProgressBar, { type GenerateProgress, type GeneratePhase } from './generate/GenerateProgress'
 import NumField from './generate/NumField'
 import PreviewCompare from './generate/PreviewCompare'
-import PreviewHistoryRail from './generate/PreviewHistoryRail'
+import ZoomableImage from '../../components/ZoomableImage'
+import PreviewHistoryRail, { type TimelineItem } from './generate/PreviewHistoryRail'
 import PromptFromDatasetPicker, { type DatasetPick } from './generate/PromptFromDatasetPicker'
-import { makeThumbnail, useGenerateHistory, type HistoryEntry } from './generate/useGenerateHistory'
+import {
+  PARAMS_SNAPSHOT_VERSION, applySnapshot, loraBasename, resolveLoraFromCkpts,
+  transformAxisRawForSnapshot,
+  type GenerateParamsSnapshot, type SnapshotLora,
+} from './generate/paramsSnapshot'
+import { saveSingleSamples, saveXYMatrix } from './generate/saveTestImages'
+import { useGenerateHistory } from './generate/useGenerateHistory'
+import {
+  entryImageUrl,
+  entryTaskId,
+  type HistoryEntry,
+} from './generate/entryAdapter'
 import PreviewXYGrid from './generate/PreviewXYGrid'
 import PromptList from './generate/PromptList'
 import NegPromptInput from './generate/NegPromptInput'
 import SampleGallery from './generate/SampleGallery'
 import SidebarLoras from './generate/SidebarLoras'
+import SidebarSectionTabs, { type SidebarTab } from './generate/SidebarSectionTabs'
 import SidebarXYAxes from './generate/SidebarXYAxes'
 import StatusBadge from './generate/StatusBadge'
 import ViewModeTabs, { type ViewMode } from './generate/ViewModeTabs'
-import { DEFAULT_NEG } from './generate/types'
-import { useProjectLoras } from './generate/useProjectLoras'
+import {
+  DEFAULT_NEG, DEFAULT_SAMPLER, DEFAULT_SCHEDULER,
+  DISTILLED_GENERATE_DEFAULTS, FAMILY_GENERATE_DEFAULTS,
+  SAMPLER_OPTIONS_BY_FAMILY, SCHEDULER_OPTIONS_BY_FAMILY,
+  type GenerateFamily, type SamplerName, type SchedulerName,
+} from './generate/types'
+import { useLoraCatalog } from './generate/useLoraCatalog'
 import { buildXYMatrix, cellCount, parseAxisValues, type XYAxisDraft } from './generate/xy'
 
 const GENERATE_PREFS_KEY = 'studio:generate:params:v1'
 
 const DEFAULT_GENERATE_PREFS = {
   mode: 'single' as ViewMode,
+  modelFamily: 'anima' as GenerateFamily,
   prompts: ['newest, safe, 1girl, masterpiece, best quality'],
   negPrompt: DEFAULT_NEG,
+  aspect: '1:1' as AspectName,
   width: 1024,
   height: 1024,
   steps: 25,
   cfgScale: 4.0,
-  count: 1,
+  samplerName: DEFAULT_SAMPLER as SamplerName,
+  scheduler: DEFAULT_SCHEDULER as SchedulerName,
   seed: 0,
   // single / xy 的 LoRA 列表完全独立（用户决策 2026-05-29）：切 mode 互不影响。
   // compare 是 xy 的子视图，跟 xy 共用 xyLoras。
@@ -51,6 +76,10 @@ const DEFAULT_GENERATE_PREFS = {
   xDraft: { axis: 'steps', raw: '20, 25, 30', loraIndex: null } as XYAxisDraft,
   yDraft: null as XYAxisDraft | null,
   datasetPick: null as DatasetPick | null,
+  // 底模 / TE 的显式覆盖也持久化（用户反馈：切页面被重置回全局默认太烦）。
+  // null = 跟随设置页 selected / selected_te（仍是默认行为）。
+  baseModel: null as string | null,
+  textEncoder: null as 'bf16' | 'fp8' | null,
 }
 
 type GeneratePrefs = typeof DEFAULT_GENERATE_PREFS
@@ -63,7 +92,7 @@ type GeneratePrefs = typeof DEFAULT_GENERATE_PREFS
  *    xyLoras；越界会让 submit 抛 axisLoraMissing）。
  */
 function normalizePrefs(p: GeneratePrefs): GeneratePrefs {
-  const anyP = p as Partial<GeneratePrefs> & { loras?: LoraEntry[] }
+  const anyP = p as Partial<GeneratePrefs> & { loras?: LoraEntry[]; count?: number }
   const legacy = Array.isArray(anyP.loras) ? anyP.loras : []
   const singleLoras = Array.isArray(anyP.singleLoras) ? anyP.singleLoras : legacy
   const xyLoras = Array.isArray(anyP.xyLoras) ? anyP.xyLoras : legacy
@@ -71,14 +100,30 @@ function normalizePrefs(p: GeneratePrefs): GeneratePrefs {
     if (!d || d.loraIndex == null || d.loraIndex < xyLoras.length) return d
     return { ...d, loraIndex: xyLoras.length > 0 ? 0 : null }
   }
-  const { loras: _legacy, ...rest } = anyP
-  return {
+  const { loras: _legacy, count: _count, ...rest } = anyP  // count 已改瞬态，丢弃老持久值
+  const merged = {
     ...DEFAULT_GENERATE_PREFS,
     ...rest,
     singleLoras,
     xyLoras,
     xDraft: clampIdx(rest.xDraft ?? DEFAULT_GENERATE_PREFS.xDraft) ?? DEFAULT_GENERATE_PREFS.xDraft,
     yDraft: clampIdx(rest.yDraft ?? null),
+  }
+  // 族与 sampler 一致性（多模型 P4-4）：老 prefs 无 modelFamily / 持久化的
+  // sampler 与当前族白名单不符时（越族值后端 422），落回族默认（首项）。
+  const family: GenerateFamily =
+    merged.modelFamily === 'krea2' ? 'krea2' : 'anima'
+  const samplers = SAMPLER_OPTIONS_BY_FAMILY[family] as readonly string[]
+  const schedulers = SCHEDULER_OPTIONS_BY_FAMILY[family] as readonly string[]
+  return {
+    ...merged,
+    modelFamily: family,
+    samplerName: (samplers.includes(merged.samplerName)
+      ? merged.samplerName : samplers[0]) as SamplerName,
+    scheduler: (schedulers.includes(merged.scheduler)
+      ? merged.scheduler : schedulers[0]) as SchedulerName,
+    textEncoder: (merged.textEncoder === 'bf16' || merged.textEncoder === 'fp8')
+      ? merged.textEncoder : null,
   }
 }
 
@@ -109,7 +154,7 @@ export default function GeneratePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const { mode, prompts, negPrompt, width, height, steps, cfgScale, count, seed, xDraft, yDraft, datasetPick } = prefs
+  const { mode, modelFamily, prompts, negPrompt, aspect, width, height, steps, cfgScale, samplerName, scheduler, seed, xDraft, yDraft, datasetPick } = prefs
   // LoRA 列表按 mode 完全独立：single 用 singleLoras，xy（含 compare 子视图）用
   // xyLoras。读写都按当前 mode 路由，切 mode 互不影响。
   const loras = mode === 'single' ? prefs.singleLoras : prefs.xyLoras
@@ -118,12 +163,31 @@ export default function GeneratePage() {
   const setMode = (mode: ViewMode) => setPrefs((p) => ({ ...p, mode }))
   const setPrompts = (prompts: string[]) => setPrefs((p) => ({ ...p, prompts }))
   const setNegPrompt = (negPrompt: string) => setPrefs((p) => ({ ...p, negPrompt }))
+  const setAspect = (aspect: AspectName) => setPrefs((p) => ({ ...p, aspect }))
   const setWidth = (width: number) => setPrefs((p) => ({ ...p, width }))
   const setHeight = (height: number) => setPrefs((p) => ({ ...p, height }))
   const setSteps = (steps: number) => setPrefs((p) => ({ ...p, steps }))
   const setCfgScale = (cfgScale: number) => setPrefs((p) => ({ ...p, cfgScale }))
-  const setCount = (count: number) => setPrefs((p) => ({ ...p, count }))
+  const setSamplerName = (samplerName: SamplerName) => setPrefs((p) => ({ ...p, samplerName }))
+  const setScheduler = (scheduler: SchedulerName) => setPrefs((p) => ({ ...p, scheduler }))
   const setSeed = (seed: number) => setPrefs((p) => ({ ...p, seed }))
+  /** 切模型族：sampler/scheduler/steps/cfg 落回目标族默认（越族值后端 422），
+   *  底模临时覆盖清空（variant key 是族内值）。 */
+  const setModelFamily = (family: GenerateFamily) => {
+    setBaseModel(null)
+    setTextEncoder(null)
+    setPrefs((p) => ({
+      ...p,
+      modelFamily: family,
+      samplerName: SAMPLER_OPTIONS_BY_FAMILY[family][0] as SamplerName,
+      scheduler: SCHEDULER_OPTIONS_BY_FAMILY[family][0] as SchedulerName,
+      steps: FAMILY_GENERATE_DEFAULTS[family].steps,
+      cfgScale: FAMILY_GENERATE_DEFAULTS[family].cfgScale,
+    }))
+  }
+  // 0.17 P-I：batch size（每次入队 task 数）是**瞬态** UI 值——不进 prefs、不持久化、
+  // 不随点历史图回填（用户用 2 就一直 2）；刷新页面重置回 1。
+  const [batchSize, setBatchSize] = useState(1)
 
   // LoRA 预填 via URL query (?lora=<path>&projectId=N&versionId=N)
   // Overview StatusBanner "在测试中加载" CTA 跳进来时，URL 是显式 "测这条 LoRA"
@@ -145,15 +209,14 @@ export default function GeneratePage() {
       }]
       return { ...p, mode: 'single', singleLoras: newLoras }
     })
-    setUrlConsumedKey((k) => k + 1)
     const url = new URL(window.location.href)
     url.searchParams.delete('lora')
     url.searchParams.delete('projectId')
     url.searchParams.delete('versionId')
     window.history.replaceState({}, '', url.toString())
   }, [setPrefs])
-  // commit C: attention backend 已从 Generate 页移到 Settings；server 端
-  // enqueue_generate 会自动从 secrets.generate.attention_backend 注入。
+  // Test generation omits attention_backend here; the server applies the
+  // Comfy-style runtime and reads the configured generate backend there.
 
   const setXDraft = (xDraft: XYAxisDraft) => setPrefs((p) => ({ ...p, xDraft }))
   const setYDraft = (yDraft: XYAxisDraft | null) => setPrefs((p) => ({ ...p, yDraft }))
@@ -167,12 +230,44 @@ export default function GeneratePage() {
   // 之前用 useState 时遇过 SSE 漏事件 / race 后 busy=true 卡住，按钮 disabled
   // 没法重试也没法取消（status=failed 时 cancelable=false）
   const [submitting, setSubmitting] = useState(false)
+  // 0.17 P-I：currentTask = **显示目标**（daemon 正在跑 / 最近一张），不再是「最后
+  // 提交」。提交只入队，显示跟着 running 走（refreshLiveGenerates）。
   const [currentTask, setCurrentTask] = useState<Task | null>(null)
-  // URL ?lora= 消费计数：bump 一次让 SidebarLoras 整块 remount，强制内部
-  // InlineLoraPicker 用新 value 重新初始化 pid/vid（picker 内 useState 只
-  // 一次性从 props.value 取 projectId/versionId，后续 props 变化不会同步，
-  // 不 remount 就会看到下拉 / chip 还卡在旧缓存项目）。
-  const [urlConsumedKey, setUrlConsumedKey] = useState(0)
+  // 0.17 P-I：本会话提交的 generate 里 running + pending（含自己），驱动「排队中 N 张」
+  // 列表 + running 检测。来自 listQueueLive(undefined,'generate')。
+  const [liveGenerates, setLiveGenerates] = useState<Task[]>([])
+  const prevGenIdsRef = useRef<Set<number>>(new Set())
+  // #1：每条 task 的「运行态」定格（XY 轴 + 完整参数快照），dispatch 时存。活动结果
+  // 网格 / 双图对比 / 入库读它而非 live prefs，任务开始后改 sidebar 不串改已出结果。
+  // 0.17 P-I：单值 → 按 taskId 存 Map，多任务各取各的。
+  const runsRef = useRef<Map<number, {
+    xDraft: XYAxisDraft
+    yDraft: XYAxisDraft | null
+    snapshot: GenerateParamsSnapshot
+  }>>(new Map())
+  // 本次出图选用的底模 / TE（null = 跟随设置页 selected / selected_te）。
+  // 显式覆盖持久化在 prefs（用户反馈：瞬态设计切页面即被重置太烦）。
+  const baseModel = prefs.baseModel
+  const setBaseModel = (v: string | null) => setPrefs((p) => ({ ...p, baseModel: v }))
+  const textEncoder = prefs.textEncoder
+  const setTextEncoder = (v: 'bf16' | 'fp8' | null) =>
+    setPrefs((p) => ({ ...p, textEncoder: v }))
+  const teOptions = useKrea2TeOptions()
+  const effectiveTe = textEncoder ?? teOptions.selected
+  // 当前族的底模选项（含 purpose 元数据）——选中蒸馏推理 variant（Krea2
+  // Turbo）时应用 8 步 / 无 CFG 的默认参数（可再改，A1 不加限制）
+  const { options: baseModelOptions } = useBaseModelOptions(modelFamily)
+  const onBaseModelChange = (v: string) => {
+    setBaseModel(v)
+    const picked = baseModelOptions.find((o) => o.value === v)
+    if (picked?.purpose === 'inference') {
+      setPrefs((p) => ({
+        ...p,
+        steps: DISTILLED_GENERATE_DEFAULTS.steps,
+        cfgScale: DISTILLED_GENERATE_DEFAULTS.cfgScale,
+      }))
+    }
+  }
   // monitor 走 useMonitorProgress hook (PR #37 增量协议)：currentTask 变 →
   // hook 自动重拉快照 + 订阅 SSE delta 合并；本组件只用 samples 字段，其余
   // 字段在这页生成场景下不需要。
@@ -181,9 +276,11 @@ export default function GeneratePage() {
   const [previewStep, setPreviewStep] = useState<{ step: number; total: number; dataUrl: string } | null>(null)
   // 生成进度（image_started + preview_step 聚合）
   const [progress, setProgress] = useState<GenerateProgress>({
-    batchIdx: null, batchTotal: null, currentStep: null, totalSteps: null,
+    phase: null, batchIdx: null, batchTotal: null, currentStep: null, totalSteps: null,
   })
   const [datasetPickerOpen, setDatasetPickerOpen] = useState(false)
+  // 左侧配置区当前分页（LoRA/XY · 提示词 · 配置）。跨 session 记忆用户停留的页。
+  const [sidebarTab, setSidebarTab] = useLocalStorageState<SidebarTab>('studio:generate:sidebarTab', 'lora')
   const [logOpen, setLogOpen] = useState(false)
   // 训练 / reg-ai / 打标等 GPU 任务在跑时，禁用生成防 VRAM 竞争（driver 抢
   // 3D / Copy engine 触发图像渲染卡顿，甚至训练进程 OOM）。listQueue 默认
@@ -191,10 +288,18 @@ export default function GeneratePage() {
   const [activeBlockingTask, setActiveBlockingTask] = useState<Task | null>(null)
   // commit 16：图片历史栏。点击历史项 → 主预览替换为该项封面
   const history = useGenerateHistory()
+  // 0.17 P-I：useGenerateHistory 每渲染返回新对象（refresh/refreshCache 非 memoized）。
+  // 用 ref 取最新，让 ingestGenerateTask/refreshLiveGenerates deps 稳定，避免 mount
+  // effect 因它们 identity 每渲染变而无限重跑（fetch 风暴）。
+  const historyRef = useRef(history)
+  historyRef.current = history
   const [historyOverride, setHistoryOverride] = useState<HistoryEntry | null>(null)
   const taskIdRef = useRef<number | null>(null)
   taskIdRef.current = currentTask?.id ?? null
-  const lastSnapshotRef = useRef<{ taskId: number; mode: ViewMode } | null>(null)
+  const currentTaskRef = useRef<Task | null>(null)
+  currentTaskRef.current = currentTask
+  // 0.17 P-I：已入库的 taskId（去重，替代旧 lastSnapshotRef）。
+  const ingestedRef = useRef<Set<number>>(new Set())
 
   // 切到 single 时清掉 XY 选择（与 XY 结果绑定，单图模式无意义）
   useEffect(() => {
@@ -216,10 +321,40 @@ export default function GeneratePage() {
   // xy mode 内部 selectedIndices=2 时切 compare sub-view
   const showCompareView = mode === 'xy' && selectedIndices.length === 2
 
-  const projectLoras = useProjectLoras()
+  const catalog = useLoraCatalog()
   // 用 useMemo 稳定引用：monitorState 不变时 samples 引用不变，避免下方
   // useEffect 把 samples 当依赖触发不必要的重跑
   const samples = useMemo(() => monitorState?.samples ?? [], [monitorState])
+  const samplesRef = useRef(samples)
+  samplesRef.current = samples
+
+  // #1：活动结果网格用「dispatch 时定格的轴」而非 live xDraft/yDraft。
+  // 显示任务有定格 run（runsRef）时取冻结值（任务开始后改 sidebar 不串改右侧）；否则
+  // 回退 live。runsRef 是 ref，但 currentTask 变会 re-render → 这里随之重算，够 reactive。
+  const frozenRun = currentTask ? runsRef.current.get(currentTask.id) ?? null : null
+  const gridXDraft = frozenRun ? frozenRun.xDraft : xDraft
+  const gridYDraft = frozenRun ? frozenRun.yDraft : yDraft
+
+  // 0.17 P-I：统一出图时间线 = live 队列(pending/running) ∪ done 历史(cache/disk 扫盘)，
+  // 按 taskId 去重（running→done 过渡窗口）。live 恒在最上（最新提交），done 往下。喂右栏。
+  // 未来换后端 D 端点只改这一处派生（前端其余不动）。
+  const timelineItems = useMemo<TimelineItem[]>(() => {
+    const doneIds = new Set(
+      history.entries.map(entryTaskId).filter((x): x is number => x != null),
+    )
+    const done: TimelineItem[] = [...history.entries]
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .map((entry) => ({ kind: 'done', entry }))
+    const live: TimelineItem[] = [...liveGenerates]
+      .filter((task) => !doneIds.has(task.id))
+      .sort((a, b) => b.created_at - a.created_at)
+      .map((task) => ({
+        kind: 'live',
+        task,
+        mode: runsRef.current.get(task.id)?.snapshot.mode ?? 'single',
+      }))
+    return [...live, ...done]
+  }, [liveGenerates, history.entries])
 
   // XY mode 时，按钮显示「生成 N×M=K 张」
   const xyCellCount = useMemo(() => {
@@ -242,23 +377,106 @@ export default function GeneratePage() {
     }
   }, [])
 
+  // 0.17 P-I：入库某条 generate。**每条 done 时各入各的，跟「当前显示哪张」解耦**
+  // （多任务下 currentTask 跟着 running 走，不会在每条 done 停留）。
+  // temp（默认 save_test_images=off）：server 在 image_done 已把图 + 参数写进加密 cache
+  //   → 只 refreshCache 拉新 index。
+  // disk（on）：用该 task 的定格 run（runsRef）+ samples 落盘。samplesOverride：显示
+  //   任务已有 live samples 时直接传，省一次 getMonitorState。
+  const ingestGenerateTask = useCallback(async (taskId: number, samplesOverride?: typeof samples) => {
+    if (ingestedRef.current.has(taskId)) return
+    const sec = await api.getSecrets().catch(() => null)
+    const saveToDisk = !!sec?.generate?.save_test_images
+    if (!saveToDisk) {
+      ingestedRef.current.add(taskId)
+      await historyRef.current.refreshCache()
+      return
+    }
+    const runSnap = runsRef.current.get(taskId)
+    const snapMode = runSnap?.snapshot.mode
+    if (snapMode !== 'single' && snapMode !== 'xy') return  // compare / 缺 run → 无法重建，不标记（留后重试）
+    let s = samplesOverride ?? []
+    if (s.length === 0) {
+      const st = await api.getMonitorState(taskId).catch(() => null)
+      s = (st?.samples as typeof samples | undefined) ?? []
+    }
+    if (s.length === 0) return
+    ingestedRef.current.add(taskId)
+    const params = runSnap!.snapshot
+    const filenames = s.map((x) => x.path.split(/[\\/]/).pop() ?? '').filter(Boolean)
+    if (snapMode === 'single') {
+      await saveSingleSamples(taskId, filenames, params)
+    } else {
+      const xd = runSnap!.xDraft
+      const yd = runSnap!.yDraft
+      const xValues = xd.raw.split(',').map((v) => v.trim()).filter(Boolean)
+      const yValues = yd ? yd.raw.split(',').map((v) => v.trim()).filter(Boolean) : [null as string | null]
+      const xySamples = s
+        .filter((x): x is typeof x & { xy: NonNullable<typeof x.xy> } => x.xy != null)
+        .map((x) => ({ path: x.path, xy: { xi: x.xy.xi, yi: x.xy.yi } }))
+      await saveXYMatrix({
+        samples: xySamples,
+        taskId,
+        xAxis: xd.axis as Parameters<typeof saveXYMatrix>[0]['xAxis'],
+        yAxis: (yd?.axis ?? null) as Parameters<typeof saveXYMatrix>[0]['yAxis'],
+        xValues,
+        yValues,
+      }, params)
+    }
+    await historyRef.current.refresh()
+  }, [])
+
+  // 0.17 P-I：拉本类型 running+pending generate（listQueueLive 的 type 参数），驱动排队
+  // 列表 + 显示跟 running 走 + 对刚离开列表（done/failed/canceled）的每条各自入库。
+  const refreshLiveGenerates = useCallback(async () => {
+    let items: Task[]
+    try { items = await api.listQueueLive(undefined, 'generate') } catch { return }
+    setLiveGenerates(items)
+    const newIds = new Set(items.map((t) => t.id))
+    // finished = 上次在 live、这次不在 = 刚跑完/取消。
+    const finished = [...prevGenIdsRef.current].filter((id) => !newIds.has(id))
+    prevGenIdsRef.current = newIds
+    const cur = currentTaskRef.current
+    const running = items.find((t) => t.status === 'running') ?? null
+    if (running) {
+      // 显示跟着正在跑的那张走
+      if (!cur || cur.id !== running.id) setCurrentTask(running)
+    } else if (cur && finished.includes(cur.id)) {
+      // 无 running 且当前显示那张刚跑完 → 拉终态定格状态徽章（图 samples 已在盘/cache）
+      void api.getGenerateTask(cur.id).then(setCurrentTask).catch(() => {})
+    }
+    // 每条刚完成的各自入库（显示那张用 live samples，省一次 getMonitorState）
+    for (const id of finished) {
+      void ingestGenerateTask(id, id === cur?.id ? samplesRef.current : undefined)
+    }
+  }, [ingestGenerateTask])
+
   useEffect(() => {
     void refreshBlockingTask()
-  }, [refreshBlockingTask])
+    void refreshLiveGenerates()
+  }, [refreshBlockingTask, refreshLiveGenerates])
 
   // SSE：task_state_changed 触发 task refresh；monitor_state_updated 推 sample 列表。
   useEventStream((evt) => {
-    if (evt.type === 'task_state_changed') void refreshBlockingTask()
+    if (evt.type === 'task_state_changed') {
+      void refreshBlockingTask()
+      // 0.17 P-I：显示态 + 排队列表 + 逐条入库统一由 refreshLiveGenerates 推进。
+      void refreshLiveGenerates()
+    }
     const tid = taskIdRef.current
     if (tid == null) return
     if (evt.type === 'task_state_changed' && evt.task_id === tid) {
-      void api.getGenerateTask(tid).then((t) => {
-        setCurrentTask(t)
-        if (t.status === 'done' || t.status === 'failed' || t.status === 'canceled') {
-          // busy 已是派生自 status，无需 setBusy；只清进度防残留
-          setProgress({ batchIdx: null, batchTotal: null, currentStep: null, totalSteps: null })
-        }
-      }).catch(() => { /* task 已清也走这里 */ })
+      // currentTask 的推进交给 refreshLiveGenerates；这里只在显示任务终态时清进度。
+      if (evt.status === 'done' || evt.status === 'failed' || evt.status === 'canceled') {
+        setProgress({ phase: null, batchIdx: null, batchTotal: null, currentStep: null, totalSteps: null })
+      }
+    } else if (
+      evt.type === 'generate_phase'
+      && String(evt.task_id) === String(tid)
+    ) {
+      // 阶段推进（load/clip/sample/vae）→ 进度条覆盖非采样阶段
+      const name = typeof evt.name === 'string' ? (evt.name as GeneratePhase) : null
+      setProgress((p) => ({ ...p, phase: name }))
     } else if (
       evt.type === 'generate_preview_step'
       && String(evt.task_id) === String(tid)
@@ -278,8 +496,9 @@ export default function GeneratePage() {
       evt.type === 'generate_image_started'
       && String(evt.task_id) === String(tid)
     ) {
-      // 新 batch 开始 → 重置 step 进度，更新 batch 计数
+      // 新 batch 开始 → 重置 step 进度，更新 batch 计数（phase 由后续 generate_phase 驱动）
       setProgress({
+        phase: null,
         batchIdx: typeof evt.batch_idx === 'number' ? evt.batch_idx : null,
         batchTotal: typeof evt.batch_total === 'number' ? evt.batch_total : null,
         currentStep: 0,
@@ -293,80 +512,108 @@ export default function GeneratePage() {
     setPreviewStep(null)
   }, [currentTask?.id, mode, samples.length])
 
-  // 切 task / 切 mode 时清掉历史回看 override（让主预览跟着走当前 task）
+  // 0.17 P-I：**不再**随 currentTask.id 变自动清 override。多任务下 currentTask 跟着
+  // running 自动走，若在此清 override 会把用户正回看的 done 项踢回实时视图。改为只在
+  // 用户显式操作时清：点 running 时间线项（rail onSelect）→ 清；或切 mode（下面）→ 清。
+  // 切 mode 时只清「属于别的 mode」的 override：手动切 mode 仍清（rail 按 mode 分桶，
+  // override.mode 恒等于旧 mode ≠ 新 mode → 清）；但 ?task= 深链到异 mode 的 task 时
+  // handleHistorySelect 会把 mode 对齐到 entry.mode，此时 override.mode===新 mode → 保留。
   useEffect(() => {
-    setHistoryOverride(null)
-  }, [currentTask?.id, mode])
+    setHistoryOverride((cur) => (cur && cur.mode !== mode ? null : cur))
+  }, [mode])
 
-  // task done + 有样本 → 入库历史。lastSnapshotRef 防同 task 多次触发
-  // 之前 dedup 还比 mode → 用户切 mode 时同 task 反复入库（"历史克隆"bug）。
-  // 修：只 dedup taskId；entry.mode 记当时生成时的 mode，不被切 mode 影响。
-  useEffect(() => {
-    if (!currentTask || currentTask.status !== 'done') return
-    if (samples.length === 0) return
-    const snap = lastSnapshotRef.current
-    if (snap?.taskId === currentTask.id) return
-    lastSnapshotRef.current = { taskId: currentTask.id, mode }
-    const taskId = currentTask.id
-    // 选封面 sample
-    let coverIdx = 0
-    // XY：找 (xi=0, yi=0) 那张；找不到 fallback 0
-    if (mode === 'xy') {
-      const found = samples.findIndex(
-        (s) => s.xy && s.xy.xi === 0 && s.xy.yi === 0
-      )
-      if (found >= 0) coverIdx = found
-    }
-    const cover = samples[coverIdx]
-    if (!cover) return
-    const filename = (cover.path.split(/[\\/]/).pop() ?? '')
-    if (!filename) return
-    // badge
-    let badge = ''
-    if (mode === 'xy') {
-      const xs = new Set(samples.map((s) => s.xy?.xi).filter((x) => x !== undefined))
-      const ys = new Set(samples.map((s) => s.xy?.yi).filter((x) => x !== undefined))
-      badge = `XY ${xs.size}×${ys.size || 1}`
-    }
-    const filenames = samples
-      .map((s) => s.path.split(/[\\/]/).pop() ?? '')
-      .filter(Boolean)
-    // commit: xy 历史回看用 PreviewXYGrid 重建网格 → 入库时收集 axis + sample 元数据
-    let xyMeta: import('./generate/useGenerateHistory').HistoryXYMeta | undefined
-    if (mode === 'xy') {
-      const xValues = xDraft.raw.split(',').map((s) => s.trim()).filter(Boolean)
-      const yValues = yDraft
-        ? yDraft.raw.split(',').map((s) => s.trim()).filter(Boolean)
-        : [null as string | null]
-      const xySamples = samples
-        .filter((s): s is typeof s & { xy: NonNullable<typeof s.xy> } => s.xy != null)
-        .map((s) => ({
-          path: s.path,
-          xy: {
-            xi: s.xy.xi, yi: s.xy.yi,
-            xv: s.xy.xv ?? '', yv: s.xy.yv ?? null,
-          },
-        }))
-      xyMeta = {
-        xAxis: xDraft.axis, yAxis: yDraft?.axis ?? null,
-        xValues, yValues, samples: xySamples,
-      }
-    }
-    void makeThumbnail(api.generateSampleUrl(taskId, filename), 256)
-      .then((dataUrl) => history.add({
-        mode,
-        taskId,
-        thumbnailDataUrl: dataUrl,
-        filenames,
-        badge: badge || undefined,
-        xy: xyMeta,
-      }))
-      .catch(() => { /* thumbnail 失败 — 不入库（避免无封面 entry） */ })
-  }, [currentTask, samples, mode, selectedIndices, history, xDraft, yDraft])
 
   const handleHistorySelect = (entry: HistoryEntry) => {
-    setHistoryOverride(entry)
+    setHistoryOverride(entry)  // 先切图（同步），sidebar 回填随 ckpts 解析异步补上
+    // applySnapshot 统一所有"应用快照"入口（决策 #8 / Step 3）；现在 async：
+    // LoRA 解析按需拉对应版本 ckpts（懒级联），不依赖 mount 全量列表。老 entry
+    // 缺 params 会走 catch 兜底（snap.loras 等访问报错 → 不回填，仅切图）。
+    void (async () => {
+    let applied
+    try {
+      const projects = await catalog.loadProjects()
+      const projIds = new Set(projects.map((p) => p.id))
+      applied = await applySnapshot(
+        entry.params,
+        async (snap) => {
+          if (snap.project_id == null || snap.version_id == null) {
+            return resolveLoraFromCkpts(snap, [])
+          }
+          const ckpts = await catalog
+            .fetchCkpts(snap.project_id, snap.version_id)
+            .catch(() => [])
+          return resolveLoraFromCkpts(snap, ckpts)
+        },
+        (pid) => projIds.has(pid),
+      )
+    } catch {
+      return
+    }
+    if (applied.unresolvedLoraCount > 0) {
+      toast(t('generate.historyLorasMissing', { n: applied.unresolvedLoraCount }), 'info')
+    }
+    // datasetPick 非空 → 自动展开 picker 让用户看到选中行 + tags 文本（picker
+    // 是 closed by default，不展开的话 prompts[0] 经常是 ""（用户全靠 dataset
+    // tags 当 prompt 的常见场景），UI 表面看就像"啥都没回填"）。fallback 路径
+    // 已经把 tags 灌到 prompts[0] + datasetPick=null，所以这里只看 applied 即可。
+    if (applied.datasetPick) {
+      setDatasetPickerOpen(true)
+    }
+    // 底模不在 prefs 里（独立 ephemeral state）→ 单独回填。
+    setBaseModel(applied.baseModel)
+    setPrefs((prev) => {
+      const base: GeneratePrefs = {
+        ...prev,
+        mode: applied.mode,
+        modelFamily: applied.modelFamily,
+        prompts: applied.prompts.length > 0 ? applied.prompts : prev.prompts,
+        negPrompt: applied.negPrompt,
+        width: applied.width,
+        height: applied.height,
+        aspect: aspectFromDimensions(applied.width, applied.height),
+        steps: applied.steps,
+        cfgScale: applied.cfgScale,
+        samplerName: applied.samplerName,
+        scheduler: applied.scheduler,
+        seed: applied.seed,
+        datasetPick: applied.datasetPick,
+        // 0.17 P-I：batch size 是瞬态值，点历史图**不回填**（用户设的值保持不变）。
+      }
+      if (applied.mode === 'single') {
+        return { ...base, singleLoras: applied.loras }
+      }
+      return {
+        ...base,
+        xyLoras: applied.loras,
+        xDraft: applied.xDraft ?? prev.xDraft,
+        yDraft: applied.yDraft ?? null,
+      }
+    })
+    })()
   }
+
+  // 0.17 P-H 深链回看：队列详情「查看出图结果」→ /tools/generate?task=<id>。Task 不带
+  // mode/params，只有出图历史条目自带 → 等历史加载后按 task_id 命中条目，走现成的
+  // historyOverride 回看路径（handleHistorySelect 会对齐 mode + 回填 sidebar）。
+  const deepLinkTaskId = useMemo(() => {
+    const v = new URLSearchParams(window.location.search).get('task')
+    const n = v ? Number(v) : NaN
+    return Number.isFinite(n) ? n : null
+  }, [])
+  const deepLinkConsumedRef = useRef(false)
+  useEffect(() => {
+    if (deepLinkTaskId == null || deepLinkConsumedRef.current || history.loading) return
+    deepLinkConsumedRef.current = true
+    // 清 query 避免刷新重触发（同 ?lora= 范式）
+    const url = new URL(window.location.href)
+    url.searchParams.delete('task')
+    window.history.replaceState({}, '', url.toString())
+    const entry = history.entries.find((e) => entryTaskId(e) === deepLinkTaskId)
+    if (entry) handleHistorySelect(entry)
+    // 图源（cache 同 session 未淘汰 / disk save 开着）都没了 = 物理上回看不了，兜底提示。
+    else toast(t('generate.taskResultUnavailable', { id: deepLinkTaskId }), 'info')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deepLinkTaskId, history.loading, history.entries])
 
   const handleGenerate = async () => {
     const datasetSuffix = datasetPick && datasetPick.tags.length > 0
@@ -398,11 +645,10 @@ export default function GeneratePage() {
       }
     }
 
+    // 0.17 P-I：提交只入队，**不清空/不劫持显示**——显示跟着正在跑的那张走，新提交的
+    // 排到队尾（daemon 逐个跑）。旧的 setCurrentTask(null)/setRun(null)/清 selection/progress
+    // 会打断正在出图那张，已移除。
     setSubmitting(true)
-    setCurrentTask(null)
-    // monitorState 由 useMonitorProgress hook 自动随 currentTask 切 null → 清空
-    setSelectedIndices([])  // 新一轮生成 — 旧选择已失效
-    setProgress({ batchIdx: null, batchTotal: null, currentStep: null, totalSteps: null })
     try {
       // 拼接顺序：手写正向在前，dataset tags 在后（与产品约定一致）
       const baseTrimmed = prompts.map((p) => p.trim()).filter((p) => p)
@@ -411,24 +657,89 @@ export default function GeneratePage() {
             ? baseTrimmed.map((p) => `${p}, ${datasetSuffix}`)
             : [datasetSuffix])
         : baseTrimmed
-      const body: GenerateRequest = {
-        prompts: mergedPrompts,
+      // 跟 dispatch 一起送 snapshot 给 server：image_done 时塞进加密 cache
+      // payload header（save=false）+ list_index 时返还回填用。落盘 save=true
+      // 分支仍用各自 saveSingleSamples/saveXYMatrix 自己构造；两边字段对齐。
+      const snapshotLoras: SnapshotLora[] = loras.map((l) => ({
+        name: loraBasename(l.path),
+        scale: l.scale,
+        project_id: l.project_id ?? null,
+        version_id: l.version_id ?? null,
+      }))
+      const baseSnapshot: GenerateParamsSnapshot = {
+        schema_version: PARAMS_SNAPSHOT_VERSION,
+        mode,
+        model_family: modelFamily,
+        prompts,
         negative_prompt: negPrompt,
         width, height, steps,
-        count: mode === 'xy' ? 1 : count,
-        seed,
         cfg_scale: cfgScale,
-        lora_configs: loraConfigs,
-        // attention_backend 不带：server 自动从 secrets.generate.attention_backend 读
-        xy_matrix,
+        sampler_name: samplerName,
+        scheduler,
+        count: 1,  // 0.17 P-I：每个 task 出 1 张；batch 拆成多 task（下面循环）
+        seed,
+        base_model: baseModel,
+        text_encoder: modelFamily === 'krea2' ? effectiveTe : undefined,
+        loras: snapshotLoras,
+        xy_draft: mode === 'xy'
+          ? {
+              x: transformAxisRawForSnapshot(xDraft),
+              y: yDraft ? transformAxisRawForSnapshot(yDraft) : null,
+            }
+          : null,
+        dataset_pick: datasetPick,
       }
-      const task = await api.enqueueGenerate(body)
-      // 立即同步 ref，避免 supervisor 在 enqueue 返回 → setCurrentTask 渲染
-      // 之间已经处理完任务并发了 task_state_changed 事件（config 缺失这种
-      // 早期失败会马上发 SSE，handler 拿 taskIdRef 还是 null → 漏事件）
-      taskIdRef.current = task.id
-      setCurrentTask(task)
-      toast(t('generate.taskEnqueued', { id: task.id }), 'success')
+      // 0.17 P-I：count 现在 = **batch size**（每次入队的 task 数）。single 拆成 batch 个
+      // task（各出 1 张、seed 递增区分）→ 在右栏时间线逐个排队；xy 一次一个矩阵（batch 忽略）。
+      const batch = mode === 'xy' ? 1 : Math.max(1, batchSize)
+      let firstId: number | null = null
+      for (let i = 0; i < batch; i++) {
+        const taskSeed = seed + i
+        const snap: GenerateParamsSnapshot = { ...baseSnapshot, seed: taskSeed }
+        const body: GenerateRequest = {
+          prompts: mergedPrompts,
+          model_family: modelFamily,
+          base_model: baseModel ?? undefined,
+          text_encoder: modelFamily === 'krea2' ? effectiveTe : undefined,
+          negative_prompt: negPrompt,
+          width, height, steps,
+          count: 1,
+          seed: taskSeed,
+          cfg_scale: cfgScale,
+          sampler_name: samplerName,
+          scheduler,
+          lora_configs: loraConfigs,
+          // attention_backend 不带：server 端套 Comfy-style runtime 并读取 generate backend。
+          xy_matrix,
+          params_snapshot: snap as unknown as Record<string, unknown>,
+        }
+        const task = await api.enqueueGenerate(body)
+        // #1 + P-I：每 task 的运行态定格存进 Map（xDraft/yDraft 纯原始对象浅拷贝隔离后续
+        // 编辑；snapshot 各带自己的 seed）。显示/入库各按 taskId 取。
+        runsRef.current.set(task.id, {
+          xDraft: { ...xDraft }, yDraft: yDraft ? { ...yDraft } : null, snapshot: snap,
+        })
+        if (firstId === null) {
+          firstId = task.id
+          // 点「开始生成」= 明确要看这次出图 → 回到实时视图：清掉正在回看的历史
+          // override（否则结果区停留在老图，看不到新入队/正在跑的这次，XY 尤甚 ——
+          // 出图慢，用户常停在回看态点生成）。P-I 删掉了「currentTask.id 变自动清
+          // override」的 effect（多任务下会把回看中的 done 项踢回实时），这里改成只在
+          // 用户显式提交时清，兼顾两者。
+          setHistoryOverride(null)
+          // 首次生成（当前无显示）乐观置为第一个 task，立刻看到「排队/开始」而非空屏。
+          if (!currentTaskRef.current || TERMINAL_TASK_STATUSES.includes(currentTaskRef.current.status)) {
+            setCurrentTask(task)
+          }
+        }
+      }
+      void refreshLiveGenerates()
+      toast(
+        batch > 1
+          ? t('generate.batchEnqueued', { n: batch })
+          : t('generate.taskEnqueued', { id: firstId ?? 0 }),
+        'success',
+      )
     } catch (e) {
       toast(String(e), 'error')
     } finally {
@@ -446,6 +757,29 @@ export default function GeneratePage() {
     }
   }
 
+  // 0.17 P-I：取消某条排队中的 generate（时间线 live 项单条 ✕）。
+  const cancelQueued = async (id: number) => {
+    try {
+      await api.cancelTask(id)
+      toast(t('generate.cancelRequested', { id }), 'info')
+      void refreshLiveGenerates()
+    } catch (e) {
+      toast(String(e), 'error')
+    }
+  }
+
+  // 0.17 P-I：清空队列——取消所有等待中（pending）的 generate（不动正在跑的那张）。
+  const pendingGenerateIds = useMemo(
+    () => liveGenerates.filter((t) => t.status === 'pending').map((t) => t.id),
+    [liveGenerates],
+  )
+  const clearQueue = async () => {
+    if (pendingGenerateIds.length === 0) return
+    await Promise.allSettled(pendingGenerateIds.map((id) => api.cancelTask(id)))
+    toast(t('generate.queueCleared', { n: pendingGenerateIds.length }), 'info')
+    void refreshLiveGenerates()
+  }
+
   const cancelable = currentTask
     && (currentTask.status === 'pending' || currentTask.status === 'running')
 
@@ -453,7 +787,9 @@ export default function GeneratePage() {
   //（done/failed/canceled）一律 busy=false，让 button 立刻可点重试
   const busy: boolean = submitting || Boolean(cancelable)
 
-  const generateLabel = busy
+  // 0.17 P-I：按钮现在正在出图时也可点（提交新任务入队），所以 label 只在本次入队
+  // HTTP 窗口（submitting）显示「生成中」，其余显示动作 label。
+  const generateLabel = submitting
     ? t('generate.generating')
     : mode === 'xy' && xyCellCount > 0
       ? t('generate.startGenerateCount', { n: xyCellCount })
@@ -463,48 +799,85 @@ export default function GeneratePage() {
     <div className="fade-in flex flex-col" style={{ height: '100%', overflow: 'hidden' }}>
       <PageHeader
         title={t('generate.title')}
-        eyebrow="Generate"
-        tabs={<ViewModeTabs mode={mode} onModeChange={setMode} />}
-        actions={<DaemonControls onToggleLog={() => setLogOpen((v) => !v)} />}
+        subtitle={t('generate.subtitle')}
+        actions={
+          <div className="flex items-center gap-2">
+            {/* 0.17 P-I：取消（当前显示 task）+ 清空队列（所有 pending）始终在位，不可用时
+                disabled，放「清理显存」（DaemonControls）左边。 */}
+            <button
+              className="btn btn-ghost"
+              onClick={handleCancel}
+              disabled={!cancelable}
+              title={t('generate.cancelCurrentTitle')}
+            >
+              {t('common.cancel')}
+            </button>
+            <button
+              className="btn btn-ghost"
+              onClick={() => void clearQueue()}
+              disabled={pendingGenerateIds.length === 0}
+              title={t('generate.clearQueueTitle')}
+              data-testid="generate-clear-queue"
+            >
+              {pendingGenerateIds.length > 0
+                ? t('generate.clearQueue', { n: pendingGenerateIds.length })
+                : t('generate.clearQueueEmpty')}
+            </button>
+            <DaemonControls onToggleLog={() => setLogOpen((v) => !v)} />
+          </div>
+        }
       />
 
-      {/* 三列各自独立滚动，整页固定高度 = viewport */}
-      <div className="p-6 flex gap-4 items-stretch flex-wrap xl:flex-nowrap flex-1 min-h-0">
+      {/* 三列各自独立滚动，整页固定高度 = viewport。relative：进度条 absolute 叠在顶部
+          p-6 既有 gap 上、不占布局，出现/消失不推动内容（防页面抖动）。 */}
+      <div className="relative p-6 flex gap-4 items-stretch flex-wrap xl:flex-nowrap flex-1 min-h-0">
+        {/* 出图进度条：全宽细线（浏览器加载条式）+ 小相位文字，绝对定位叠在 header 与内容间
+            的既有 gap 上；覆盖 load/clip/sample/vae 全阶段，切历史图也照常显示当前进度。 */}
+        {(busy || progress.currentStep != null || progress.phase != null) && (
+          <div className="absolute top-0 inset-x-0 z-10 pointer-events-none">
+            <GenerateProgressBar busy={busy} progress={progress} />
+          </div>
+        )}
 
-          {/* 左：sidebar — 上半部分独立 scroll，Generate bar 固定底部始终可见 */}
-          <div className="flex flex-col gap-4 w-full xl:w-[420px] shrink-0 self-stretch min-h-0">
-          <div className="flex flex-col gap-4 flex-1 min-h-0 overflow-y-auto pr-2">
+          {/* 左：sidebar — 单卡片包裹；内容区独立 scroll，底部 footer 固定 tab + 生成按钮 */}
+          <div className="card flex flex-col w-full xl:w-[420px] shrink-0 self-stretch min-h-0 overflow-hidden">
+            {/* 内容区：三个 section 都常驻 DOM、用 display 切换（不卸载）—— 切 tab 不重渲不闪烁。
+                scrollbar-gutter: stable both-edges —— 两侧都常驻预留滚动条槽（槽在 padding 外侧、
+                靠 border），所以左右 18px 内边距恒对称，且滚动条出现时只占右槽、不挤压/不位移内容。 */}
+            <div
+              className="flex flex-col flex-1 min-h-0 overflow-y-auto"
+              style={{ padding: 18, scrollbarGutter: 'stable both-edges' }}
+            >
 
-            {/* mode=single：独立 LoRA 卡片；mode=xy：LoRA 选择合并到 XY 卡片顶部 */}
-            {mode === 'single' && (
-              <div className="card" style={{ padding: 18 }}>
-                <div className="flex items-baseline justify-between gap-4 mb-3">
-                  <h3 className="m-0 text-md font-semibold shrink-0">LoRA</h3>
-                  <span className="text-xs text-fg-tertiary text-right">{t('generate.loraHint')}</span>
-                </div>
-                <SidebarLoras
-                  key={`single-${urlConsumedKey}`}
+            {/* tab=lora：mode=single → LoRA 选择；mode=xy → XY 轴（顶部合并 LoRA 选择） */}
+            <div style={{ display: sidebarTab === 'lora' ? undefined : 'none' }}>
+              {mode === 'single' ? (
+                <>
+                  <div className="flex items-baseline justify-between mb-3">
+                    <h3 className="m-0 text-md font-semibold">LoRA</h3>
+                    <span className="text-xs text-fg-tertiary">{t('generate.loraHint')}</span>
+                  </div>
+                  <SidebarLoras
+                    loras={loras}
+                    onChange={setLoras}
+                    catalog={catalog}
+                  />
+                </>
+              ) : (
+                <SidebarXYAxes
+                  xDraft={xDraft}
+                  yDraft={yDraft}
+                  onXChange={setXDraft}
+                  onYChange={setYDraft}
                   loras={loras}
-                  onChange={setLoras}
-                  projectLoras={projectLoras}
+                  onLorasChange={setLoras}
+                  catalog={catalog}
                 />
-              </div>
-            )}
+              )}
+            </div>
 
-            {mode === 'xy' && (
-              <SidebarXYAxes
-                key={`xy-${urlConsumedKey}`}
-                xDraft={xDraft}
-                yDraft={yDraft}
-                onXChange={setXDraft}
-                onYChange={setYDraft}
-                loras={loras}
-                onLorasChange={setLoras}
-                projectLoras={projectLoras}
-              />
-            )}
-
-            <div className="card" style={{ padding: 18 }}>
+            {/* tab=prompts */}
+            <div style={{ display: sidebarTab === 'prompts' ? undefined : 'none' }}>
               <div className="flex items-baseline justify-between mb-3">
                 <h3 className="m-0 text-md font-semibold">{t('generate.prompts')}</h3>
                 {!datasetPickerOpen && (
@@ -530,22 +903,34 @@ export default function GeneratePage() {
                 </div>
               )}
               <label className="caption block mb-1">{t('generate.positive')}</label>
-              <PromptList prompts={prompts} onChange={setPrompts} />
+              <PromptList prompts={prompts} onChange={setPrompts} modelFamily={modelFamily} />
               <label className="caption block mb-1 mt-3">{t('generate.negative')}</label>
-              <NegPromptInput value={negPrompt} onChange={setNegPrompt} />
+              <NegPromptInput value={negPrompt} onChange={setNegPrompt} modelFamily={modelFamily} />
             </div>
 
-            <div className="card" style={{ padding: 18 }}>
+            {/* tab=config */}
+            <div style={{ display: sidebarTab === 'config' ? undefined : 'none' }}>
               <h3 className="m-0 text-md font-semibold mb-3">{t('generate.samplingParams')}</h3>
               <div className="flex flex-col gap-3">
+                <div>
+                  <label className="caption block mb-1.5">{t('generate.aspect')}</label>
+                  <AspectChips
+                    aspect={aspect}
+                    onPick={(a, w, h) => {
+                      setAspect(a)
+                      if (w && h) { setWidth(w); setHeight(h) }
+                    }}
+                  />
+                </div>
                 <div className="flex gap-2 items-end">
-                  <NumField label={t('generate.width')} value={width} onChange={setWidth} min={256} max={4096} step={64} />
-                  <NumField label={t('generate.height')} value={height} onChange={setHeight} min={256} max={4096} step={64} />
+                  <NumField label={t('generate.width')} value={width} onChange={(v) => { setWidth(v); setAspect(aspectFromDimensions(v, height)) }} min={256} max={4096} step={64} />
+                  <NumField label={t('generate.height')} value={height} onChange={(v) => { setHeight(v); setAspect(aspectFromDimensions(width, v)) }} min={256} max={4096} step={64} />
                   <button
                     type="button"
                     onClick={() => {
                       const newW = height, newH = width
                       setWidth(newW); setHeight(newH)
+                      setAspect(aspectFromDimensions(newW, newH))
                     }}
                     title={t('generate.swapSizeTitle')}
                     className="font-mono inline-flex items-center gap-1.5 shrink-0"
@@ -572,9 +957,36 @@ export default function GeneratePage() {
                 <div className="flex gap-2">
                   <NumField label={t('generate.steps')} value={steps} onChange={setSteps} min={1} max={150} />
                   <NumField label="CFG" value={cfgScale} onChange={setCfgScale} min={0} max={20} step={0.5} />
-                  {mode !== 'xy' && (
-                    <NumField label={t('generate.perPrompt')} value={count} onChange={setCount} min={1} max={32} />
-                  )}
+                  {/* 0.17 P-I：count 移到「开始生成」旁改为 batch size（每次入队 task 数）。 */}
+                </div>
+                <div className="flex gap-2">
+                  <div className="flex-1 min-w-0">
+                    <label className="caption block mb-1">{t('generate.sampler')}</label>
+                    <select
+                      className="input text-xs w-full"
+                      value={samplerName}
+                      onChange={(e) => setSamplerName(e.target.value as SamplerName)}
+                      aria-label={t('generate.sampler')}
+                    >
+                      {/* 文案与训练配置页共用 schema.enums.* 映射；选项按族白名单 */}
+                      {SAMPLER_OPTIONS_BY_FAMILY[modelFamily].map((s) => (
+                        <option key={s} value={s}>{schemaEnumLabel('sample_sampler_name', s, t)}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <label className="caption block mb-1">{t('generate.scheduler')}</label>
+                    <select
+                      className="input text-xs w-full"
+                      value={scheduler}
+                      onChange={(e) => setScheduler(e.target.value as SchedulerName)}
+                      aria-label={t('generate.scheduler')}
+                    >
+                      {SCHEDULER_OPTIONS_BY_FAMILY[modelFamily].map((s) => (
+                        <option key={s} value={s}>{schemaEnumLabel('sample_scheduler', s, t)}</option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
                 <NumField
                   label={t('generate.seed')}
@@ -585,165 +997,169 @@ export default function GeneratePage() {
                 <div className="text-2xs text-fg-tertiary font-mono" style={{ marginTop: -4 }}>
                   {t('generate.seedHint')}
                 </div>
-              </div>
-            </div>
-
-          </div>
-            {/* Generate bar：固定 sidebar 底部（在 scroll 区外），橙色大按钮 + 右侧 meta */}
-            <div
-              className="flex items-center gap-3 shrink-0"
-              style={{
-                padding: '10px 12px',
-                borderRadius: 'var(--r-lg)',
-                border: '1px solid var(--border-subtle)',
-                background: 'var(--bg-elevated)',
-                marginRight: 8, // 跟内层 pr-2 对齐，按钮区不被 scrollbar 占地
-              }}
-            >
-              <button
-                className="btn btn-primary flex-1"
-                style={{ padding: 12, fontWeight: 600, justifyContent: 'center' }}
-                onClick={handleGenerate}
-                disabled={busy || activeBlockingTask !== null}
-                title={
-                  activeBlockingTask
-                    ? t('generate.blockedByActiveTask', { id: activeBlockingTask.id })
-                    : undefined
-                }
-              >
-                {generateLabel}
-              </button>
-              {cancelable && (
-                <button className="btn btn-ghost" onClick={handleCancel} title={t('generate.cancelCurrentTitle')}>
-                  {t('common.cancel')}
-                </button>
-              )}
-              {!cancelable && (
-                <div className="font-mono text-xs text-fg-tertiary text-right" style={{ lineHeight: 1.3 }}>
-                  <div>{width}×{height}</div>
-                  <div>
-                    {busy
-                      ? t('generate.generating')
-                      : activeBlockingTask
-                        ? t('generate.blockedByActiveTaskHint', { id: activeBlockingTask.id })
-                        : t('generate.sharedGpu')}
+                <div>
+                  <label className="caption block mb-1">{t('generate.modelFamily')}</label>
+                  <select
+                    className="input text-xs w-full"
+                    value={modelFamily}
+                    onChange={(e) => setModelFamily(e.target.value as GenerateFamily)}
+                    aria-label={t('generate.modelFamily')}
+                  >
+                    <option value="anima">{schemaEnumLabel('model_family', 'anima', t)}</option>
+                    <option value="krea2">{schemaEnumLabel('model_family', 'krea2', t)}</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="caption block mb-1">{t('generate.baseModel')}</label>
+                  <BaseModelSelect
+                    value={baseModel}
+                    onChange={onBaseModelChange}
+                    family={modelFamily}
+                    className="input text-xs w-full"
+                    ariaLabel={t('generate.baseModel')}
+                  />
+                  <div className="text-2xs text-fg-tertiary font-mono mt-1">
+                    {t('generate.baseModelHint')}
                   </div>
                 </div>
-              )}
+                {modelFamily === 'krea2' && (
+                  <div>
+                    <label className="caption block mb-1">{t('generate.textEncoder')}</label>
+                    <select
+                      className="input text-xs w-full"
+                      value={effectiveTe}
+                      onChange={(e) => setTextEncoder(e.target.value as 'bf16' | 'fp8')}
+                      aria-label={t('generate.textEncoder')}
+                    >
+                      <option value="bf16">{t('generate.textEncoderBf16')}</option>
+                      <option value="fp8" disabled={!teOptions.fp8Ready}>
+                        {teOptions.fp8Ready
+                          ? t('generate.textEncoderFp8')
+                          : t('generate.textEncoderFp8NotDownloaded')}
+                      </option>
+                    </select>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            </div>
+
+            {/* footer：分页 tab（segmented）+「开始生成」同处一个 footer、跟内容区共卡片，
+                border-top 分隔。tab 选中态用 sunken 轨道而非橙色，跟下方生成按钮区分开。 */}
+            <div
+              className="shrink-0 flex flex-col gap-2.5"
+              style={{ borderTop: '1px solid var(--border-subtle)', padding: 12 }}
+            >
+              <SidebarSectionTabs tab={sidebarTab} onTabChange={setSidebarTab} mode={mode} />
+              {/* items-stretch：batch 框跟「开始生成」按钮等高（按钮 padding:12 定高度）。 */}
+              <div className="flex items-stretch gap-3">
+                {/* R-5：GPU 任务运行时不再硬禁用——后端准入（R-1）保证互斥，
+                    提交只是入队排队（锚点 §4-5）。按钮 title 提示会排队。 */}
+                <button
+                  className="btn btn-primary flex-1"
+                  style={{ padding: 12, fontWeight: 600, justifyContent: 'center' }}
+                  onClick={handleGenerate}
+                  disabled={submitting}
+                  title={
+                    activeBlockingTask
+                      ? t('generate.queuedBehindActiveTask', { id: activeBlockingTask.id })
+                      : undefined
+                  }
+                >
+                  {generateLabel}
+                </button>
+                {/* 0.17 P-I：batch size（每次入队 task 数），固定宽不抖动、无 label，hover
+                    显示「批次数量」。取消已移右上。xy 一次一个矩阵、不适用。 */}
+                {mode !== 'xy' && (
+                  <input
+                    type="number"
+                    className="input shrink-0"
+                    style={{ width: 64, textAlign: 'center' }}
+                    min={1} max={32}
+                    value={batchSize}
+                    onChange={(e) => setBatchSize(Number(e.target.value))}
+                    title={t('generate.batchSizeTitle')}
+                    aria-label={t('generate.batchSizeTitle')}
+                  />
+                )}
+              </div>
             </div>
           </div>
 
-          {/* 中：PREVIEW 卡片（占满高、内部 scroll）+ 下方 HISTORY 横排卡片（原型布局） */}
-          <div className="flex-1 min-w-0 flex flex-col gap-4 self-stretch min-h-0">
-            <div className="flex-1 min-h-0 overflow-y-auto">
-            <div className="card flex flex-col" style={{ padding: 18, minHeight: '100%' }}>
-              <div className="flex items-center gap-2 mb-4 flex-wrap">
-                <span className="caption">{t('generate.previewLabel')}</span>
-                {currentTask && (
-                  <>
-                    <span className="caption">#{currentTask.id}</span>
-                    <StatusBadge status={currentTask.status} />
-                  </>
-                )}
-                {currentTask?.error_msg && (
-                  <span className="text-xs text-err ml-1">{currentTask.error_msg}</span>
-                )}
+          {/* 中：card flex-1 占满列高。overflow-hidden（非 auto）——内容本就 fit（预览区
+              flex-1 min-h-0，XY 网格自带滚动），auto 会因一点点溢出触发幻影滚动条、吃掉
+              10px 宽把 card 挤窄 → 结果卡与右栏之间凭空多出 10px margin（#2 根因）。 */}
+          <div className="flex-1 min-w-0 flex flex-col overflow-hidden self-stretch">
+            <div className="card flex-1 flex flex-col" style={{ padding: 18, minHeight: 0 }}>
+              <div className="flex items-center justify-between gap-2 mb-4 flex-wrap">
+                <div className="flex items-center gap-2">
+                  <span className="text-md font-semibold">{t('generate.results')}</span>
+                  {currentTask && (
+                    <>
+                      <span className="caption">#{currentTask.id}</span>
+                      <StatusBadge status={currentTask.status} />
+                    </>
+                  )}
+                  {currentTask?.error_msg && (
+                    <span className="text-xs text-err ml-1">{currentTask.error_msg}</span>
+                  )}
+                </div>
+                <ViewModeTabs mode={mode} onModeChange={setMode} />
               </div>
 
-              <GenerateProgressBar busy={busy} progress={progress} />
-
+              {/* 进度条已上移到页面 header 下（全宽细线），不再在结果卡内。 */}
               {historyOverride ? (
                 <div className="flex-1 min-h-0 flex flex-col gap-2">
-                  {historyOverride.mode === 'xy' && historyOverride.xy ? (
-                    /* xy 历史回看：用 PreviewXYGrid 重建（带轴标签 + 双击全屏） */
+                  {historyOverride.mode === 'xy' && historyOverride.xyMeta ? (
+                    /* XY 回看 (cache / disk 共用)：per-cell 信息齐 → PreviewXYGrid
+                       cache 时 taskId 是真 task id（GridCell fallback 走 cache URL）；
+                       disk 时 server 已给 imageUrl，taskId 走 -1 sentinel（不会被用到）。
+                       disk 时多传 compositeUrl → 导出 PNG 走文件下载，不再 re-compose */
                     <PreviewXYGrid
-                      samples={historyOverride.xy.samples.map((s) => ({
+                      samples={historyOverride.xyMeta.samples.map((s) => ({
                         path: s.path,
                         xy: {
                           xi: s.xy.xi, yi: s.xy.yi,
                           xv: s.xy.xv as never, yv: s.xy.yv as never,
                         },
+                        imageUrl: s.imageUrl,
                       }))}
-                      taskId={historyOverride.taskId}
+                      taskId={historyOverride.source === 'cache' ? historyOverride.taskId : -1}
                       xDraft={{
-                        axis: historyOverride.xy.xAxis as never,
-                        raw: historyOverride.xy.xValues.join(', '),
+                        axis: historyOverride.xyMeta.xAxis as never,
+                        raw: historyOverride.xyMeta.xValues.join(', '),
                         loraIndex: null,
                       }}
-                      yDraft={historyOverride.xy.yAxis ? {
-                        axis: historyOverride.xy.yAxis as never,
-                        raw: (historyOverride.xy.yValues as string[]).filter(Boolean).join(', '),
+                      yDraft={historyOverride.xyMeta.yAxis ? {
+                        axis: historyOverride.xyMeta.yAxis as never,
+                        raw: (historyOverride.xyMeta.yValues as string[]).filter(Boolean).join(', '),
                         loraIndex: null,
                       } : null}
                       onCellClick={undefined /* 历史回看不允许选 cell 进 compare */}
                       selectedIndices={[]}
+                      compositeUrl={historyOverride.source === 'disk' ? historyOverride.imageUrl : undefined}
                     />
-                  ) : historyOverride.mode === 'xy' && historyOverride.filenames.length > 1 ? (
-                    /* legacy: 旧 entry 没 xy meta，回退到 grid auto-fit 平铺 */
-                    <div className="flex-1 min-h-0 overflow-auto">
-                      <div
-                        style={{
-                          display: 'grid',
-                          gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))',
-                          gap: 2,
-                        }}
-                      >
-                        {historyOverride.filenames.map((fn) => {
-                          const url = api.generateSampleUrl(historyOverride.taskId, fn)
-                          return (
-                            <a
-                              key={fn} href={url} target="_blank" rel="noreferrer"
-                              className="block bg-sunken rounded-sm overflow-hidden"
-                            >
-                              <img
-                                src={url}
-                                onError={(e) => {
-                                  (e.currentTarget as HTMLImageElement).src = historyOverride.thumbnailDataUrl
-                                  ;(e.currentTarget as HTMLImageElement).title = t('generate.originalReleasedCoverOnly')
-                                }}
-                                alt={fn}
-                                className="block w-full h-auto"
-                                loading="lazy"
-                              />
-                            </a>
-                          )
-                        })}
-                      </div>
-                    </div>
                   ) : (
-                    /* 单图回看（single / compare 历史 / 单张 xy） */
-                    <a
-                      className="flex-1 min-h-0 flex items-center justify-center w-full"
-                      href={api.generateSampleUrl(historyOverride.taskId, historyOverride.filenames[0] ?? '')}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      <img
+                    /* DiskEntry single / legacy XY（无 xyMeta） / CacheEntry single
+                       → 单图视图（内嵌缩放平移；ZoomableImage 自带视口样式 + readout） */
+                    <div className="flex-1 min-h-0 w-full">
+                      <ZoomableImage
                         key={historyOverride.id}
-                        src={api.generateSampleUrl(historyOverride.taskId, historyOverride.filenames[0] ?? '')}
-                        onError={(e) => {
-                          (e.currentTarget as HTMLImageElement).src = historyOverride.thumbnailDataUrl
-                          ;(e.currentTarget as HTMLImageElement).title = t('generate.originalReleasedThumbOnly')
-                        }}
-                        alt={`history #${historyOverride.taskId}`}
-                        className="rounded-md object-contain"
-                        style={{ maxWidth: '100%', maxHeight: '100%' }}
+                        src={entryImageUrl(historyOverride, 0)}
+                        alt=""
                       />
-                    </a>
+                    </div>
                   )}
-                  <div className="text-xs text-fg-tertiary shrink-0">
-                    {t('generate.historyTask', { id: historyOverride.taskId })}
-                    {historyOverride.badge ? ` · ${historyOverride.badge}` : ''}
-                    {historyOverride.mode === 'xy' && historyOverride.filenames.length > 1
-                      ? ` · ${t('generate.imageCount', { n: historyOverride.filenames.length })}` : ''}
-                    <button
-                      className="btn btn-ghost text-xs ml-2"
-                      style={{ padding: '2px 8px' }}
-                      onClick={() => setHistoryOverride(null)}
-                    >
-                      {t('generate.backToCurrent')}
-                    </button>
-                  </div>
+                  {/* 单图视图不再显示 filename footer（"single image N" 与
+                      ZoomableImage readout 重复）；XY 网格保留 folder / 任务号
+                      作批次标识。0.17 P-I：删「返回当前」——统一时间线后回到
+                      实时点右栏 running 项即可。 */}
+                  {historyOverride.source === 'disk' && historyOverride.xyMeta && (
+                    <div className="text-xs text-fg-tertiary shrink-0">
+                      {historyOverride.folder ?? (historyOverride.filename ?? '').replace(/\.png$/i, '')}
+                    </div>
+                  )}
                 </div>
               ) : !currentTask ? (
                 <div className="flex-1 grid place-items-center rounded-md border border-subtle bg-sunken text-fg-tertiary text-sm">
@@ -755,27 +1171,30 @@ export default function GeneratePage() {
                   samples={samples}
                   taskId={currentTask.id}
                   selectedIndices={selectedIndices as [number, number]}
-                  xDraft={xDraft}
-                  yDraft={yDraft}
+                  xDraft={gridXDraft}
+                  yDraft={gridYDraft}
                   onBack={() => setSelectedIndices([])}
                 />
               ) : mode === 'xy' ? (
                 <PreviewXYGrid
                   samples={samples}
                   taskId={currentTask.id}
-                  xDraft={xDraft}
-                  yDraft={yDraft}
+                  xDraft={gridXDraft}
+                  yDraft={gridYDraft}
                   onCellClick={handleCellClick}
                   selectedIndices={selectedIndices}
                 />
               ) : samples.length === 0 && previewStep ? (
                 <div className="flex-1 min-h-0 flex flex-col items-center gap-2">
                   <div className="flex-1 min-h-0 w-full flex items-center justify-center">
+                    {/* 中间步预览是低分辨率 latent2rgb 图（模糊但能看出大致图）：铺满结果区
+                        —— width/height:100% + object-contain 会放大小图并保持比例；旧的
+                        maxWidth/maxHeight 只限上限，小图不放大 → 显示成中间一小块。 */}
                     <img
                       src={previewStep.dataUrl}
                       alt={`step ${previewStep.step}/${previewStep.total}`}
-                      className="rounded-md object-contain"
-                      style={{ maxWidth: '100%', maxHeight: '100%' }}
+                      className="rounded-md"
+                      style={{ width: '100%', height: '100%', objectFit: 'contain' }}
                     />
                   </div>
                   <div className="text-xs text-fg-tertiary shrink-0">
@@ -790,19 +1209,22 @@ export default function GeneratePage() {
                 <SampleGallery samples={samples} taskId={currentTask.id} />
               )}
             </div>
-            </div>
-
-            {/* 下：图片历史（原型 HISTORY 卡片，横排，按当前 mode 分桶） */}
-            <PreviewHistoryRail
-              entries={history.entries}
-              mode={mode}
-              orientation="horizontal"
-              onSelect={handleHistorySelect}
-              onRemove={(id) => { void history.remove(id) }}
-              onClear={() => { void history.clearByMode(mode) }}
-              onPruneStale={history.pruneStale}
-            />
           </div>
+
+          {/* 右：出图时间线（live 队列 + done 历史，按当前 mode 分桶） */}
+          <PreviewHistoryRail
+            items={timelineItems}
+            mode={mode}
+            onSelect={(it) => {
+              if (it.kind === 'done') handleHistorySelect(it.entry)
+              // running 项：清 override 回到实时视图（currentTask 已跟着 running 走）。
+              else if (it.task.status === 'running') setHistoryOverride(null)
+              // pending 项：无内容，不选中（只可取消）。
+            }}
+            onCancel={cancelQueued}
+            onRefresh={history.refresh}
+            loading={history.loading}
+          />
       </div>
 
       {/* daemon log 抽屉（fixed 定位 + translateY，隐藏时完全不可见，不占 layout） */}

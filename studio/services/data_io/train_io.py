@@ -26,11 +26,13 @@ zip 结构（schema_version 2，bundle.zip）：
     └── presets/         # 可选：预设
         └── {name}.yaml
 
-导入语义：永远新建 project + v1（不合并到现有），slug 冲突自动加 -imported-{ts}。
+导入语义：永远新建 project + source.version_label（缺失/非法时 v1，不合并到现有），
+slug 冲突自动加 -imported-{ts}。
 """
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import time
 import zipfile
@@ -49,6 +51,16 @@ TRAIN_PREFIX = "train/"
 REG_PREFIX = "reg/"
 PRESETS_PREFIX = "presets/"
 CAPTION_EXTS = {".txt"}
+# VAE latent 缓存（CachedLatentDataset 的 {名}.npz / {名}.r{reso}.npz，紧挨图片）
+LATENT_CACHE_EXT = ".npz"
+# Phase 2 文本缓存：随图 sidecar。prompt 聚合缓存归 task 档案
+# （tasks/<id>/.text-cache/），不在 version 树里，bundle 不打包。
+# 继续复用现有 train_latent_cache / reg_latent_cache bundle 选项：两者表达的
+# 是“携带可重建训练缓存”，不改变默认导出体积。
+TEXT_CACHE_SIDECAR_SUFFIX = ".text.safetensors"
+# 训练 mask sidecar（train/{folder}/{stem}.mask，与图同目录，详
+# services/preprocess/masks.py）。arcname 两段与图片同构。
+MASK_SUFFIX = ".mask"
 
 
 VERSION_CONFIG_ARC = "presets/config.yaml"
@@ -62,9 +74,14 @@ class BundleOptions:
     reg_captions: bool = False
     # True = 导出本 version 的私有 config.yaml（去掉路径字段后）作为可移植训练配置
     include_config: bool = False
+    # True = 一并打包对应目录里的 VAE latent 缓存（*.npz），导入后免重新 encode
+    train_latent_cache: bool = False
+    reg_latent_cache: bool = False
+    # True = 一并打包训练 mask sidecar（train/{folder}/{stem}.mask，masked loss 数据面）
+    train_masks: bool = False
 
 
-from studio.domain.errors import DomainError
+from studio.domain.errors import DomainError, NotFoundError
 
 
 class TrainIOError(DomainError):
@@ -90,14 +107,22 @@ def export_train(
     """
     v = versions.get_version(conn, version_id)
     if not v:
-        raise TrainIOError(f"版本不存在: id={version_id}")
+        raise NotFoundError(
+            "Version not found", code="version.not_found",
+            details={"id": version_id},
+        )
     p = projects.get_project(conn, v["project_id"])
     if not p:
-        raise TrainIOError(f"项目不存在: id={v['project_id']}")
+        raise NotFoundError(
+            "Project not found", code="project.not_found",
+            details={"id": v["project_id"]},
+        )
 
     train_dir = versions.version_dir(p["id"], p["slug"], v["label"]) / "train"
     if not train_dir.exists():
-        raise TrainIOError("train/ 目录不存在")
+        raise TrainIOError(
+            "No images to export", code="dataset.export_empty", http_status=400,
+        )
 
     concepts: list[dict[str, Any]] = []
     image_count = 0
@@ -126,7 +151,9 @@ def export_train(
             image_count += cnt
 
     if image_count == 0:
-        raise TrainIOError("train/ 下无图片，无可导出内容")
+        raise TrainIOError(
+            "No images to export", code="dataset.export_empty", http_status=400,
+        )
 
     manifest = {
         "schema_version": SCHEMA_VERSION,
@@ -185,9 +212,16 @@ def _read_manifest(zf: zipfile.ZipFile) -> dict[str, Any]:
         with zf.open(MANIFEST_NAME) as fh:
             return json.loads(fh.read().decode("utf-8"))
     except KeyError as exc:
-        raise TrainIOError("zip 缺少 manifest.json") from exc
+        raise TrainIOError(
+            "Import file is invalid: missing manifest",
+            code="dataset.import_invalid", http_status=400,
+        ) from exc
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise TrainIOError(f"manifest.json 解析失败: {exc}") from exc
+        raise TrainIOError(
+            f"Import file is invalid: {exc}",
+            code="dataset.import_invalid",
+            details={"reason": str(exc)}, http_status=400,
+        ) from exc
 
 
 def _resolve_slug_conflict(
@@ -217,7 +251,9 @@ def import_train(
     返回 {"project": {...}, "version": {...}, "stats": {...}}。
     """
     if not zip_path.exists():
-        raise TrainIOError(f"zip 不存在: {zip_path}")
+        raise NotFoundError(
+            "File not found", code="file.not_found", http_status=404,
+        )
 
     try:
         with zipfile.ZipFile(zip_path, "r") as zf:
@@ -236,12 +272,16 @@ def import_train(
                 inner = _safe_arc(info.filename)
                 if inner is None:
                     raise TrainIOError(
-                        f"非法路径: {info.filename!r}（仅允许 train/{{folder}}/{{file}}）"
+                        "Import file contains an invalid path",
+                        code="dataset.import_invalid", http_status=400,
                     )
                 entries.append((info, inner))
 
             if not entries:
-                raise TrainIOError("zip 中无可导入内容")
+                raise TrainIOError(
+                    "Import file contains nothing to import",
+                    code="dataset.import_empty", http_status=400,
+                )
 
             # 建 project + v1（用 DAO，自动建目录树）
             slug = _resolve_slug_conflict(conn, base_slug)
@@ -259,11 +299,18 @@ def import_train(
                 folder, filename = inner.split("/", 1)
                 # 文件名再保险一层 + containment check
                 if filename.startswith("."):
-                    raise TrainIOError(f"非法文件名: {filename!r}")
+                    raise TrainIOError(
+                        "Import file contains an invalid filename",
+                        code="dataset.import_invalid", http_status=400,
+                    )
                 try:
                     target = safe_join(train_dir, folder, filename)
                 except ValueError as exc:
-                    raise TrainIOError(f"非法文件名: {filename!r} ({exc})") from exc
+                    raise TrainIOError(
+                        "Import file contains an invalid filename",
+                        code="dataset.import_invalid",
+                        details={"reason": str(exc)}, http_status=400,
+                    ) from exc
                 target.parent.mkdir(parents=True, exist_ok=True)
                 seen_folders.add(folder)
                 with zf.open(info) as src, target.open("wb") as dst:
@@ -292,7 +339,10 @@ def import_train(
             assert v is not None and p is not None
 
     except zipfile.BadZipFile as exc:
-        raise TrainIOError(f"zip 损坏: {exc}") from exc
+        raise TrainIOError(
+            "Import file is corrupt", code="dataset.import_corrupt",
+            http_status=400,
+        ) from exc
 
     stats = {
         "image_count": image_count,
@@ -309,16 +359,26 @@ def import_train(
 
 
 def _collect_train(
-    train_dir: Path, include_captions: bool
+    train_dir: Path, include_captions: bool, include_latent_cache: bool = False,
+    include_masks: bool = False,
 ) -> tuple[list[tuple[Path, str]], dict[str, Any]]:
-    """扫 train/ 目录，返回 (payload, stats_dict)。"""
+    """扫 train/ 目录，返回 (payload, stats_dict)。
+
+    include_masks 时收集与图同目录的 `{stem}.mask` sidecar。
+    """
     payload: list[tuple[Path, str]] = []
     concepts: list[dict[str, Any]] = []
     image_count = 0
     tagged_count = 0
+    latent_cache_count = 0
+    text_cache_count = 0
+    mask_count = 0
 
     if not train_dir.exists():
-        return payload, {"image_count": 0, "tagged_count": 0, "concepts": []}
+        return payload, {
+            "image_count": 0, "tagged_count": 0, "concepts": [],
+            "latent_cache_count": 0, "text_cache_count": 0, "mask_count": 0,
+        }
 
     for sub in sorted(train_dir.iterdir()):
         if not sub.is_dir():
@@ -336,6 +396,17 @@ def _collect_train(
                     if include_captions:
                         txt = f.with_suffix(".txt")
                         payload.append((txt, f"{TRAIN_PREFIX}{sub.name}/{txt.name}"))
+            elif ext == LATENT_CACHE_EXT and include_latent_cache:
+                latent_cache_count += 1
+                payload.append((f, f"{TRAIN_PREFIX}{sub.name}/{f.name}"))
+            elif include_latent_cache and f.name.endswith(
+                TEXT_CACHE_SIDECAR_SUFFIX
+            ):
+                text_cache_count += 1
+                payload.append((f, f"{TRAIN_PREFIX}{sub.name}/{f.name}"))
+            elif ext == MASK_SUFFIX and include_masks:
+                mask_count += 1
+                payload.append((f, f"{TRAIN_PREFIX}{sub.name}/{f.name}"))
             elif ext in CAPTION_EXTS and include_captions:
                 # .txt 先由图片那侧 include，这里跳过避免重复
                 pass
@@ -347,18 +418,25 @@ def _collect_train(
         "image_count": image_count,
         "tagged_count": tagged_count,
         "concepts": concepts,
+        "latent_cache_count": latent_cache_count,
+        "text_cache_count": text_cache_count,
+        "mask_count": mask_count,
     }
 
 
 def _collect_reg(
-    reg_dir: Path, include_captions: bool
+    reg_dir: Path, include_captions: bool, include_latent_cache: bool = False
 ) -> tuple[list[tuple[Path, str]], dict[str, Any]]:
     """扫 reg/ 目录，返回 (payload, stats_dict)。"""
     payload: list[tuple[Path, str]] = []
     image_count = 0
+    latent_cache_count = 0
+    text_cache_count = 0
 
     if not reg_dir.exists():
-        return payload, {"image_count": 0}
+        return payload, {
+            "image_count": 0, "latent_cache_count": 0, "text_cache_count": 0,
+        }
 
     # meta.json
     meta = reg_dir / "meta.json"
@@ -379,14 +457,28 @@ def _collect_reg(
                     if include_captions and f.with_suffix(".txt").exists():
                         txt = f.with_suffix(".txt")
                         payload.append((txt, f"{REG_PREFIX}{item.name}/{txt.name}"))
+                elif ext == LATENT_CACHE_EXT and include_latent_cache:
+                    latent_cache_count += 1
+                    payload.append((f, f"{REG_PREFIX}{item.name}/{f.name}"))
+                elif (
+                    include_latent_cache
+                    and f.name.endswith(TEXT_CACHE_SIDECAR_SUFFIX)
+                ):
+                    text_cache_count += 1
+                    payload.append((f, f"{REG_PREFIX}{item.name}/{f.name}"))
                 elif ext in CAPTION_EXTS and include_captions:
                     pass  # 由图片侧 include
         elif item.is_file() and item.suffix.lower() in IMAGE_EXTS:
-            # reg/ 根目录直接放的图（非标准但兼容）
+            # reg/ 根目录直接放的图（非标准但兼容）。旁边的 npz 不收：
+            # 单层 reg/{file} 在 _safe_arc_bundle 里本就只放行 meta.json。
             image_count += 1
             payload.append((item, f"{REG_PREFIX}{item.name}"))
 
-    return payload, {"image_count": image_count}
+    return payload, {
+        "image_count": image_count,
+        "latent_cache_count": latent_cache_count,
+        "text_cache_count": text_cache_count,
+    }
 
 
 def export_bundle(
@@ -401,14 +493,24 @@ def export_bundle(
     返回 {"manifest": {...}, "size_bytes": int}。
     """
     if not opts.train and not opts.reg and not opts.include_config:
-        raise TrainIOError("至少选择一项导出内容（训练集 / 正则集 / 训练配置）")
+        raise TrainIOError(
+            "Select at least one item to export (training set, regularization "
+            "set, or training configuration)",
+            code="dataset.export_nothing_selected", http_status=400,
+        )
 
     v = versions.get_version(conn, version_id)
     if not v:
-        raise TrainIOError(f"版本不存在: id={version_id}")
+        raise NotFoundError(
+            "Version not found", code="version.not_found",
+            details={"id": version_id},
+        )
     p = projects.get_project(conn, v["project_id"])
     if not p:
-        raise TrainIOError(f"项目不存在: id={v['project_id']}")
+        raise NotFoundError(
+            "Project not found", code="project.not_found",
+            details={"id": v["project_id"]},
+        )
 
     vdir = versions.version_dir(p["id"], p["slug"], v["label"])
     payload: list[tuple[Path, str]] = []
@@ -417,15 +519,23 @@ def export_bundle(
     # --- train section ---
     train_stats: dict[str, Any] = {}
     if opts.train:
-        tp, train_stats = _collect_train(vdir / "train", opts.train_captions)
+        tp, train_stats = _collect_train(
+            vdir / "train", opts.train_captions, opts.train_latent_cache,
+            include_masks=opts.train_masks,
+        )
         if not tp:
-            raise TrainIOError("train/ 下无图片，无可导出内容")
+            raise TrainIOError(
+                "No images to export", code="dataset.export_empty",
+                http_status=400,
+            )
         payload.extend(tp)
 
     # --- reg section ---
     reg_stats: dict[str, Any] = {}
     if opts.reg:
-        rp, reg_stats = _collect_reg(vdir / "reg", opts.reg_captions)
+        rp, reg_stats = _collect_reg(
+            vdir / "reg", opts.reg_captions, opts.reg_latent_cache
+        )
         payload.extend(rp)
 
     # --- version 私有训练配置 ---
@@ -435,10 +545,15 @@ def export_bundle(
     config_included = False
     if opts.include_config:
         from .. import version_config as _vc
+        from ...domain.config_prune import prune_inactive_fields
         import yaml as _yaml
         try:
+            # read_version_config 经 pydantic 补回了全部默认字段，bundle 里的
+            # config 和落盘 yaml 一样只带生效字段，这里再裁一遍。
             cfg = _vc.read_version_config(p, v)
-            portable = {k: v_ for k, v_ in cfg.items() if k not in _vc.PROJECT_SPECIFIC_FIELDS}
+            portable = prune_inactive_fields(
+                {k: v_ for k, v_ in cfg.items() if k not in _vc.PROJECT_SPECIFIC_FIELDS}
+            )
             in_memory.append((
                 _yaml.safe_dump(portable, allow_unicode=True, sort_keys=False, default_flow_style=False),
                 VERSION_CONFIG_ARC,
@@ -455,6 +570,7 @@ def export_bundle(
             "title": p["title"],
             "version_label": v["label"],
             "slug": p["slug"],
+            "preset_name": v.get("config_name"),
         },
         "includes": {
             "train": opts.train,
@@ -462,12 +578,24 @@ def export_bundle(
             "reg": opts.reg,
             "reg_captions": opts.reg_captions,
             "config": config_included,
+            "train_latent_cache": opts.train_latent_cache,
+            "reg_latent_cache": opts.reg_latent_cache,
+            "train_masks": opts.train_masks,
         },
         "stats": {
             "train_image_count": train_stats.get("image_count", 0),
             "train_tagged_count": train_stats.get("tagged_count", 0),
             "reg_image_count": reg_stats.get("image_count", 0),
             "config_included": config_included,
+            "latent_cache_count": (
+                train_stats.get("latent_cache_count", 0)
+                + reg_stats.get("latent_cache_count", 0)
+            ),
+            "text_cache_count": (
+                train_stats.get("text_cache_count", 0)
+                + reg_stats.get("text_cache_count", 0)
+            ),
+            "train_mask_count": train_stats.get("mask_count", 0),
         },
     }
 
@@ -521,19 +649,56 @@ def _safe_arc_bundle(name: str) -> Optional[tuple[str, str]]:
     return None
 
 
+def _bundle_source_version_label(source: dict[str, Any]) -> str:
+    """manifest 是不可信输入 — 校验走 versions 同一套规则（含拒绝 "." / ".."），
+    不合法回退 v1 而不是报错，保证老 / 手改 bundle 仍可导入。"""
+    raw = str(source.get("version_label") or "v1").strip()
+    return raw if versions.is_valid_label(raw) else "v1"
+
+
+def _bundle_source_preset_name(source: dict[str, Any]) -> Optional[str]:
+    raw = source.get("preset_name") or source.get("config_name")
+    if raw is None:
+        return None
+    name = str(raw).strip()
+    return name or None
+
+
+def _restore_preset_name(
+    conn: sqlite3.Connection,
+    version_id: int,
+    preset_name: Optional[str],
+    presets_base: Path,
+) -> Optional[dict[str, Any]]:
+    """preset 真实存在（本机原有，或刚从 bundle 解出）才回填 config_name，
+    避免 version 指向不存在的预设；preset_path 自带名字校验，非法名
+    （路径分隔符等）按不存在处理。返回更新后的 version；没动返回 None。"""
+    if not preset_name:
+        return None
+    from ..presets import io as _presets_io
+    try:
+        if not _presets_io.preset_path(preset_name, presets_base).exists():
+            return None
+    except _presets_io.PresetError:
+        return None
+    return versions.update_version(conn, version_id, config_name=preset_name)
+
+
 def import_bundle(
     conn: sqlite3.Connection,
     zip_path: Path,
     presets_base: Path,
 ) -> dict[str, Any]:
-    """从 bundle.zip（schema_version 1 或 2）导入，新建 project + v1。
+    """从 bundle.zip（schema_version 1 或 2）导入，新建 project + source version。
 
     v1（旧 train.zip）：等同于 import_train。
     v2：按 manifest.includes 分别处理 train / reg / presets。
     返回 {"project": {...}, "version": {...}, "stats": {...}}。
     """
     if not zip_path.exists():
-        raise TrainIOError(f"zip 不存在: {zip_path}")
+        raise NotFoundError(
+            "File not found", code="file.not_found", http_status=404,
+        )
 
     try:
         with zipfile.ZipFile(zip_path, "r") as zf:
@@ -547,6 +712,8 @@ def import_bundle(
             source = manifest.get("source") or {}
             title = (source.get("title") or "imported").strip() or "imported"
             base_slug = projects.slugify(source.get("slug") or title)
+            version_label = _bundle_source_version_label(source)
+            preset_name = _bundle_source_preset_name(source)
 
             if schema_ver == 1:
                 # v1：仅 train/ entries，用原有安全检查
@@ -557,23 +724,31 @@ def import_bundle(
                     inner = _safe_arc(info.filename)
                     if inner is None:
                         raise TrainIOError(
-                            f"非法路径: {info.filename!r}（仅允许 train/{{folder}}/{{file}}）"
+                            "Import file contains an invalid path",
+                            code="dataset.import_invalid", http_status=400,
                         )
                     entries_v1.append((info, inner))
                 if not entries_v1:
-                    raise TrainIOError("zip 中无可导入内容")
+                    raise TrainIOError(
+                        "Import file contains nothing to import",
+                        code="dataset.import_empty", http_status=400,
+                    )
 
                 slug = _resolve_slug_conflict(conn, base_slug)
                 p = projects.create_project(conn, title=title, slug=slug,
                                              note=f"imported from {title!r}")
-                v = versions.create_version(conn, project_id=p["id"], label="v1")
+                v = versions.create_version(conn, project_id=p["id"], label=version_label)
+                v = _restore_preset_name(conn, v["id"], preset_name, presets_base) or v
                 vdir = versions.version_dir(p["id"], p["slug"], v["label"])
                 train_dir = vdir / "train"
                 seen_folders: set[str] = set()
                 for info, inner in entries_v1:
                     folder, filename = inner.split("/", 1)
                     if filename.startswith("."):
-                        raise TrainIOError(f"非法文件名: {filename!r}")
+                        raise TrainIOError(
+                            "Import file contains an invalid filename",
+                            code="dataset.import_invalid", http_status=400,
+                        )
                     target = safe_join(train_dir, folder, filename)
                     target.parent.mkdir(parents=True, exist_ok=True)
                     seen_folders.add(folder)
@@ -607,7 +782,10 @@ def import_bundle(
                     continue
                 result = _safe_arc_bundle(info.filename)
                 if result is None:
-                    raise TrainIOError(f"非法路径: {info.filename!r}")
+                    raise TrainIOError(
+                        "Import file contains an invalid path",
+                        code="dataset.import_invalid", http_status=400,
+                    )
                 section, inner = result
                 if section == "train":
                     train_entries.append((info, inner))
@@ -617,27 +795,36 @@ def import_bundle(
                     preset_entries.append((info, inner))
 
             if not train_entries and not reg_entries and not preset_entries:
-                raise TrainIOError("bundle 中无可导入内容")
+                raise TrainIOError(
+                    "Import file contains nothing to import",
+                    code="dataset.import_empty", http_status=400,
+                )
 
             slug = _resolve_slug_conflict(conn, base_slug)
             p = projects.create_project(conn, title=title, slug=slug,
                                          note=f"imported from {title!r}")
-            v = versions.create_version(conn, project_id=p["id"], label="v1")
+            v = versions.create_version(conn, project_id=p["id"], label=version_label)
             vdir = versions.version_dir(p["id"], p["slug"], v["label"])
 
             # --- 写入 train ---
             seen_train: set[str] = set()
+            npz_targets: list[Path] = []
             if train_entries:
                 train_dir = vdir / "train"
                 for info, inner in train_entries:
                     folder, filename = inner.split("/", 1)
                     if filename.startswith("."):
-                        raise TrainIOError(f"非法文件名: {filename!r}")
+                        raise TrainIOError(
+                            "Import file contains an invalid filename",
+                            code="dataset.import_invalid", http_status=400,
+                        )
                     target = safe_join(train_dir, folder, filename)
                     target.parent.mkdir(parents=True, exist_ok=True)
                     seen_train.add(folder)
                     with zf.open(info) as src, target.open("wb") as dst:
                         _copy_chunks(src, dst)
+                    if target.suffix.lower() == LATENT_CACHE_EXT:
+                        npz_targets.append(target)
 
             # --- 写入 reg ---
             reg_image_count = 0
@@ -650,16 +837,30 @@ def import_bundle(
                     else:
                         parts = inner.split("/", 1)
                         if len(parts) != 2:
-                            raise TrainIOError(f"非法 reg 路径: {inner!r}")
+                            raise TrainIOError(
+                                "Import file contains an invalid path",
+                                code="dataset.import_invalid", http_status=400,
+                            )
                         folder, filename = parts
                         if filename.startswith("."):
-                            raise TrainIOError(f"非法文件名: {filename!r}")
+                            raise TrainIOError(
+                                "Import file contains an invalid filename",
+                                code="dataset.import_invalid", http_status=400,
+                            )
                         target = safe_join(reg_dir, folder, filename)
                         target.parent.mkdir(parents=True, exist_ok=True)
                         if target.suffix.lower() in IMAGE_EXTS:
                             reg_image_count += 1
+                        elif target.suffix.lower() == LATENT_CACHE_EXT:
+                            npz_targets.append(target)
                     with zf.open(info) as src, target.open("wb") as dst:
                         _copy_chunks(src, dst)
+
+            # latent 缓存 mtime 修正：训练侧 _is_cache_valid 要求 npz mtime ≥
+            # 图片 mtime，而逐条解包按字典序 npz 常先于同名图片落盘（.npz < .png）
+            # → 缓存会被判失效重 encode。解包完统一 touch 到当前时间。
+            for t in npz_targets:
+                os.utime(t, None)
 
             # --- 写入 version 训练配置 / 其他预设 ---
             # presets/config.yaml → 应用到新 version（force_project_overrides 自动填路径）
@@ -691,7 +892,14 @@ def import_bundle(
                             from .. import presets as _presets_svc
                             from .. import models as _md
                             if _presets_svc._auto_sync_paths():
-                                raw.update(_md.default_paths_for_new_version())
+                                family = str(raw.get("model_family") or "anima")
+                                try:
+                                    raw.update(_md.default_paths_for_new_version(
+                                        family=family))
+                                except ValueError:
+                                    # 未知族的 bundle：不覆路径，交给下面
+                                    # write_version_config 的 schema 校验拒绝
+                                    pass
                             try:
                                 _vc.write_version_config(p, v, raw, force_project_overrides=True)
                                 config_imported = True
@@ -718,6 +926,10 @@ def import_bundle(
                         _presets_io.write_preset(target_name, config, presets_base)
                         preset_count += 1
 
+            # preset 解包完成后再回填 config_name：本机真的有这个预设
+            # （原本就有，或刚从 bundle 解出）才记，避免悬空引用。
+            v = _restore_preset_name(conn, v["id"], preset_name, presets_base) or v
+
             img_cnt, tag_cnt = _count_train(vdir / "train", seen_train) if train_entries else (0, 0)
 
             # ADR-0007 PR-5: 不再推 stage
@@ -726,7 +938,10 @@ def import_bundle(
             assert v is not None and p is not None
 
     except zipfile.BadZipFile as exc:
-        raise TrainIOError(f"zip 损坏: {exc}") from exc
+        raise TrainIOError(
+            "Import file is corrupt", code="dataset.import_corrupt",
+            http_status=400,
+        ) from exc
 
     return {
         "project": p,

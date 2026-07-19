@@ -38,6 +38,24 @@ def _ms_wd14_repo_id(hf_repo_id: str) -> Optional[str]:
     return None
 
 
+# CLIP / DINO eval 指标模型的 ModelScope 镜像映射。社区镜像组织 AI-ModelScope
+# 同步了 HF 上常见的视觉/多模态模型，repo 名一般一致。没有映射的返回 None →
+# 回退 HuggingFace（与 wd14 非 SmilingWolf 前缀同样的优雅回退）。MS 源仅在用户
+# 主动把 eval 源切到 modelscope 时才走到；默认 HF。具体 repo 是否存在以
+# ModelScope 实际为准，缺失时该模型下载失败、用户可切回 HF 源。
+_MS_EVAL_REPO_IDS = {
+    "openai/clip-vit-base-patch32": "AI-ModelScope/clip-vit-base-patch32",
+    "openai/clip-vit-large-patch14": "AI-ModelScope/clip-vit-large-patch14",
+    "facebook/dinov2-small": "AI-ModelScope/dinov2-small",
+    "facebook/dinov2-base": "AI-ModelScope/dinov2-base",
+}
+
+
+def _ms_eval_repo_id(hf_repo_id: str) -> Optional[str]:
+    """CLIP / DINO 模型的 ModelScope 镜像 id；无映射返回 None（回退 HF）。"""
+    return _MS_EVAL_REPO_IDS.get(hf_repo_id)
+
+
 # ---------------------------------------------------------------------------
 # 同步下载 helper
 # ---------------------------------------------------------------------------
@@ -88,6 +106,23 @@ def _get_download_source() -> str:
         return "huggingface"
 
 
+def _source_for(type_key: str) -> str:
+    """某下载类型（training / wd14 / upscaler）当前选的源。
+
+    MODELSCOPE_SOURCE env 仍作全局强制覆盖（CLI flag / CI）；否则读
+    secrets.download_sources[type_key]，缺省 / 非法值回落 huggingface。
+    固定 HF 的类型（cltagger / t5 / taeflux）不走这里。
+    """
+    env = os.environ.get("MODELSCOPE_SOURCE", "").strip().lower()
+    if env in ("huggingface", "modelscope"):
+        return env
+    try:
+        src = secrets.load().download_sources.get(type_key, "huggingface")
+    except Exception:  # noqa: BLE001
+        return "huggingface"
+    return src if src in ("huggingface", "modelscope") else "huggingface"
+
+
 def _ms_token() -> Optional[str]:
     """读 ModelScope token：环境变量优先，其次 secrets。"""
     env = os.environ.get("MODELSCOPE_API_TOKEN", "").strip()
@@ -98,6 +133,38 @@ def _ms_token() -> Optional[str]:
         return t or None
     except Exception:  # noqa: BLE001
         return None
+
+
+def _hf_token() -> Optional[str]:
+    """读 HF token：环境变量优先，其次 secrets.huggingface.token。
+
+    gated / private 仓库（如 cl_tagger_v2）下载需要；公开仓库不填也能下。
+    """
+    for var in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_TOKEN"):
+        env = os.environ.get(var, "").strip()
+        if env:
+            return env
+    try:
+        t = secrets.load().huggingface.token
+        return t or None
+    except Exception:  # noqa: BLE001  secrets 损坏不应阻断下载
+        return None
+
+
+def _is_gated_auth_error(exc: BaseException) -> bool:
+    """粗判下载异常是否源于 gated/private 授权失败，用于追加可操作提示。"""
+    name = type(exc).__name__.lower()
+    msg = str(exc).lower()
+    return (
+        "gated" in name
+        or "gated" in msg
+        or "401" in msg
+        or "403" in msg
+        or "unauthorized" in msg
+        or "private or gated" in msg
+        or "authentication" in msg
+    )
+
 
 def download_flat_ms(
     ms_repo_id: str,
@@ -181,6 +248,7 @@ def download_flat(
         return False
     target.parent.mkdir(parents=True, exist_ok=True)
     endpoint = _resolve_endpoint()
+    token = _hf_token()
     try:
         kwargs = dict(
             repo_id=repo_id,
@@ -190,9 +258,17 @@ def download_flat(
         )
         if endpoint:
             kwargs["endpoint"] = endpoint
+        if token:
+            kwargs["token"] = token
         hf_hub_download(**kwargs)
     except Exception as exc:
         on_log(f"   ✗ {target.name}: {exc}")
+        if _is_gated_auth_error(exc):
+            on_log(
+                "   ↳ 该仓库可能是 gated/private：请先到 huggingface.co 申请并接受"
+                "模型授权，再到 设置→密钥 填 HuggingFace token（或设 HF_TOKEN 环境"
+                "变量）后重试。"
+            )
         return False
     src = target.parent / repo_subpath
     if src != target:
@@ -213,6 +289,82 @@ def download_flat(
                 break
             parent = parent.parent
     on_log(f"   ✓ {target.name}")
+    return True
+
+
+def download_snapshot(
+    repo_id: str,
+    target_dir: Path,
+    *,
+    allow_patterns: Optional[list[str]] = None,
+    on_log: Callable[[str], None] = print,
+) -> bool:
+    """从 HF 把整个 repo 下到 target_dir（多文件 transformers 模型用）。
+
+    与 download_flat（单文件 + 扁平 rename）不同，这里保留 repo 目录结构整目录
+    落地，from_pretrained 直接指向 target_dir。已就绪（有 config.json）则跳过。
+    """
+    if (target_dir / "config.json").exists():
+        on_log(f"   ✓ {target_dir.name} 已存在，跳过")
+        return True
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError:
+        on_log("   ✗ 缺 huggingface_hub")
+        return False
+    target_dir.mkdir(parents=True, exist_ok=True)
+    endpoint = _resolve_endpoint()
+    token = _hf_token()
+    try:
+        kwargs: dict = dict(repo_id=repo_id, local_dir=str(target_dir))
+        if allow_patterns:
+            kwargs["allow_patterns"] = allow_patterns
+        if endpoint:
+            kwargs["endpoint"] = endpoint
+        if token:
+            kwargs["token"] = token
+        snapshot_download(**kwargs)
+    except Exception as exc:
+        on_log(f"   ✗ {target_dir.name}: {exc}")
+        if _is_gated_auth_error(exc):
+            on_log(
+                "   ↳ 该仓库可能是 gated/private：请先到 huggingface.co 申请并接受"
+                "模型授权，再到 设置→密钥 填 HuggingFace token 后重试。"
+            )
+        return False
+    on_log(f"   ✓ {target_dir.name}")
+    return True
+
+
+def download_snapshot_ms(
+    ms_repo_id: str,
+    target_dir: Path,
+    *,
+    on_log: Callable[[str], None] = print,
+) -> bool:
+    """从 ModelScope 把整个 repo 下到 target_dir（多文件模型用）。
+
+    需要 ``pip install modelscope``；未安装返回 False。已就绪则跳过。
+    """
+    if (target_dir / "config.json").exists():
+        on_log(f"   ✓ {target_dir.name} 已存在，跳过")
+        return True
+    try:
+        from modelscope import snapshot_download as ms_snapshot
+    except ImportError:
+        on_log("   ✗ 缺 modelscope（pip install modelscope）")
+        return False
+    target_dir.mkdir(parents=True, exist_ok=True)
+    token = _ms_token()
+    try:
+        kwargs: dict = dict(model_id=ms_repo_id, local_dir=str(target_dir))
+        if token:
+            kwargs["token"] = token
+        ms_snapshot(**kwargs)
+    except Exception as exc:
+        on_log(f"   ✗ {target_dir.name} (ModelScope): {exc}")
+        return False
+    on_log(f"   ✓ {target_dir.name} (via ModelScope)")
     return True
 
 

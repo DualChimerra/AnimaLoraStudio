@@ -6,6 +6,76 @@ from typing import Any, Optional
 from pydantic import BaseModel
 
 
+class Wd14Overrides(BaseModel):
+    """打标页对 wd14 设置的「本次任务覆盖」—— 仅在 worker 进程内生效，
+    不写回 secrets.json。"""
+    threshold_general: Optional[float] = None
+    threshold_character: Optional[float] = None
+    model_id: Optional[str] = None
+    blacklist_tags: Optional[list[str]] = None
+
+
+class CLTaggerOverrides(BaseModel):
+    """打标页对 CLTagger 设置的「本次任务覆盖」—— 仅在 worker 进程内生效。"""
+    threshold_general: Optional[float] = None
+    threshold_character: Optional[float] = None
+    model_id: Optional[str] = None
+    model_path: Optional[str] = None
+    tag_mapping_path: Optional[str] = None
+    add_copyright_tag: Optional[bool] = None
+    add_artist_tag: Optional[bool] = None
+    add_meta_tag: Optional[bool] = None
+    add_model_tag: Optional[bool] = None
+    add_rating_tag: Optional[bool] = None
+    add_quality_tag: Optional[bool] = None
+    blacklist_tags: Optional[list[str]] = None
+
+
+class LLMTaggerOverrides(BaseModel):
+    """打标页对 LLM tagger 设置的「本次任务覆盖」—— 仅在 worker 进程内生效。
+
+    - `current_preset`：切换 active preset id
+    - 其余字段：覆盖 active preset 的同名字段
+    - `api_key` 不允许 override（避免出现在 task params/日志）
+    """
+    current_preset: Optional[str] = None
+    base_url: Optional[str] = None
+    model: Optional[str] = None
+    endpoint: Optional[str] = None
+    prompt: Optional[str] = None
+    output_format: Optional[str] = None
+    temperature: Optional[float] = None
+    max_tokens: Optional[int] = None
+    timeout: Optional[int] = None
+    max_retries: Optional[int] = None
+    concurrency: Optional[int] = None
+    requests_per_second: Optional[float] = None
+    max_requests_per_minute: Optional[int] = None
+    max_side: Optional[int] = None
+    jpeg_quality: Optional[int] = None
+    max_image_mb: Optional[float] = None
+
+
+class TagJobRequest(BaseModel):
+    tagger: str = "wd14"
+    # 落盘格式跟着产物走，不再由请求指定（老客户端传 output_format 会被忽略）：
+    # LLM json preset 产出结构化 caption_json → .json；其余（本地打标 tag list /
+    # LLM text preset）→ .txt。已存在的 .json 仍按 .json 更新。
+    # 已有 caption 文件时的策略："overwrite"（默认，覆盖）| "skip"（保留原文件）
+    # | "append"（tag 级 merge + dedupe，写回原格式）。
+    on_existing: str = "overwrite"
+    wd14_overrides: Optional[Wd14Overrides] = None
+    cltagger_overrides: Optional[CLTaggerOverrides] = None
+    llm_overrides: Optional[LLMTaggerOverrides] = None
+    # 触发词；空串 / None = 不启用。打标时作为第一个 tag prepend 到 caption；
+    # 同时持久化到 version.trigger_word，后续 train 阶段从私有 yaml 读出。
+    trigger_word: Optional[str] = None
+    # 打标范围："all"（默认，train 全部文件夹 + validation）| "validation"（只打
+    # held-out 验证集）|  某个 train 子文件夹名（如 "1_data"，只打那一个）。
+    # 手动加入的验证图原本没 caption，靠这个把验证集纳入打标。
+    scope: str = "all"
+
+
 class CaptionEdit(BaseModel):
     tags: list[str]
 
@@ -83,13 +153,18 @@ class RegRenameFolderRequest(BaseModel):
 class RegAiRequest(BaseModel):
     """先验生成请求 —— 不含 lora_configs，先验生成不带 LoRA。"""
     excluded_tags: list[str] = []
+    # 本次先验生成临时选用的底模（官方 variant key 或注册的本地 custom 路径）；
+    # None → 用 Settings 里 selected_anima。只换 transformer 权重。
+    base_model: Optional[str] = None
     negative_prompt: str = ""
     width: int = 1024
     height: int = 1024
     steps: int = 25
     cfg_scale: float = 4.0
-    sampler_name: str = "er_sde"
-    scheduler: str = "simple"
+    # None = 未指定 → 端点按 version 的模型族解析默认（anima er_sde/simple，
+    # krea2 euler/simple）。显式给值则按族白名单严格校验
+    sampler_name: Optional[str] = None
+    scheduler: Optional[str] = None
     seed: int = 0
     incremental: bool = False
     repeat: int = 1  # reg 子文件夹 repeat 前缀（N_label）；1 = DreamBooth 标准

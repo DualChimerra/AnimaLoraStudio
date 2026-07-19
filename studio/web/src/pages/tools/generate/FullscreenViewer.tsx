@@ -1,16 +1,17 @@
 import { useEffect, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
+import ZoomableImage from '../../../components/ZoomableImage'
 
 /** 全屏图片 modal：双击 grid cell / cell action 触发。
  *
- * - 背景半透明遮罩，居中显示原图（object-contain）
+ * - 背景半透明遮罩，视口内滚轮缩放 / 拖拽平移 / 双击 fit↔100% 切换（useZoomPan）
  * - ESC / 点击遮罩关闭
  * - 不开新窗口（之前是 window.open，频繁评测时切换 tab 麻烦）
  * - 方向键 + 屏上箭头切换邻居（PR #64 + P1-G）：caller 喂 hasX / onX；
  *   shortcutHint 不传时按当前可用方向动态拼接（避免在单行 / 单列 / 角落格上撒谎）
  */
 export default function FullscreenViewer({
-  src, alt, caption, onClose,
+  src, alt, caption, index, total, onClose,
   hasPrev, hasNext, hasUp, hasDown,
   onPrev, onNext, onUp, onDown,
   shortcutHint,
@@ -18,6 +19,9 @@ export default function FullscreenViewer({
   src: string
   alt?: string
   caption?: string
+  /** 列表中的 0-based 位置；与 total 同传时底部显示 "index+1 / total" 计数。 */
+  index?: number
+  total?: number
   onClose: () => void
   hasPrev?: boolean
   hasNext?: boolean
@@ -70,6 +74,8 @@ export default function FullscreenViewer({
     const nav = dirs.length > 0 ? t('generate.fullscreenNavPrefix', { dirs: dirs.join(' / ') }) : ''
     return `${nav}${t('generate.fullscreenCloseHint')}`
   }, [shortcutHint, hasPrev, hasNext, hasUp, hasDown, t])
+
+  const counter = index != null && total != null ? `${index + 1} / ${total}` : null
 
   return (
     <div
@@ -128,19 +134,22 @@ export default function FullscreenViewer({
             ↓
           </button>
         )}
-        <img
+        <ZoomableImage
           src={src}
           alt={alt}
           style={{
-            maxWidth: 'calc(100vw - 80px)',
-            maxHeight: 'calc(100vh - 100px)',
-            objectFit: 'contain',
-            borderRadius: 6,
+            width: 'calc(100vw - 80px)',
+            height: 'calc(100vh - 160px)',
           }}
         />
         {caption && (
           <div className="text-xs text-fg-secondary font-mono text-center">
             {caption}
+          </div>
+        )}
+        {counter && (
+          <div className="text-xs text-fg-secondary font-mono text-center">
+            {counter}
           </div>
         )}
         <div className="text-2xs text-fg-tertiary">

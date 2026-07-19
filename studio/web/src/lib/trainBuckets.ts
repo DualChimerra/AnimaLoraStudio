@@ -23,17 +23,18 @@ export interface TrainBucket {
 /** BucketManager parameters. Defaults mirror Python `BucketManager(...)`. */
 export interface BucketParams {
   baseReso?: number       // 1024 — target area ≈ base²
-  minReso?: number        // 512  — each side min
-  maxReso?: number        // 2048 — each side max
+  minReso?: number        // edge-length min; derived from (baseReso, maxArRatio) when omitted
+  maxReso?: number        // edge-length max; derived from (baseReso, maxArRatio) when omitted
   step?: number           // 64   — w / h granularity
   areaTolerance?: number  // 0.10 — ±10% deviation from base² allowed
-  maxArRatio?: number     // 2.0  — max(w/h, h/w) cap
+  maxArRatio?: number     // 2.0  — R: symmetric max(w/h, h/w) cap
 }
 
-const DEFAULTS: Required<BucketParams> = {
+// min/max are NOT defaults — they derive from (baseReso, maxArRatio) in
+// generateBuckets so small base values keep AR variety (a hard-wired 512/2048
+// collapses base=512 to the square bucket only). Mirrors the Python derivation.
+const DEFAULTS = {
   baseReso: 1024,
-  minReso: 512,
-  maxReso: 2048,
   step: 64,
   areaTolerance: 0.10,
   maxArRatio: 2.0,
@@ -50,9 +51,17 @@ const DEFAULTS: Required<BucketParams> = {
  *  here for stable consumer-side ordering — does NOT change the bucket set).
  */
 export function generateBuckets(p: BucketParams = {}): TrainBucket[] {
-  const { baseReso, minReso, maxReso, step, areaTolerance, maxArRatio } = {
-    ...DEFAULTS, ...p,
-  }
+  const baseReso = p.baseReso ?? DEFAULTS.baseReso
+  const step = p.step ?? DEFAULTS.step
+  const areaTolerance = p.areaTolerance ?? DEFAULTS.areaTolerance
+  const maxArRatio = p.maxArRatio ?? DEFAULTS.maxArRatio
+  // Edge-length search bounds derived from (baseReso, R) — at constant area
+  // base² the most extreme bucket has edges base·√R × base/√R, so round outward
+  // to ≈ base/√R and ≈ base·√R with one step of margin. Mirrors
+  // BucketManager.__init__ in runtime/training/dataset.py exactly.
+  const span = Math.sqrt(maxArRatio)
+  const minReso = p.minReso ?? Math.max(step, Math.floor(baseReso / span / step) * step - step)
+  const maxReso = p.maxReso ?? Math.ceil(baseReso * span / step) * step + step
   const baseArea = baseReso * baseReso
   const out: TrainBucket[] = []
   for (let w = minReso; w <= maxReso; w += step) {
@@ -70,8 +79,11 @@ export function generateBuckets(p: BucketParams = {}): TrainBucket[] {
  *
  *  Mirrors `BucketManager.get_bucket` in `runtime/training/dataset.py:42-51`:
  *  argmin over buckets of **absolute** AR distance |aspect - bucket.aspect|.
- *  NOT relative distance — must match Python exactly so the frontend's
- *  predicted bucket equals what the trainer will choose.
+ *  NOT relative distance. When multiple buckets have identical AR distance,
+ *  prefer the one whose area is closest to baseReso² (e.g. exact-square inputs
+ *  at base=1536 choose 1536×1536 instead of the first smaller square bucket).
+ *  This must match Python exactly so the frontend's predicted bucket equals
+ *  what the trainer will choose.
  *
  *  Returns the (baseReso, baseReso) square bucket if `buckets` is empty.
  */
@@ -83,14 +95,18 @@ export function snapToBucket(
   if (buckets.length === 0) {
     return { w: baseReso, h: baseReso, aspect: 1 }
   }
+  const baseArea = baseReso * baseReso
   let best = buckets[0]
-  let bestDiff = Math.abs(aspect - best.aspect)
+  let bestArDiff = Math.abs(aspect - best.aspect)
+  let bestAreaDiff = Math.abs(best.w * best.h - baseArea)
   for (let i = 1; i < buckets.length; i++) {
     const b = buckets[i]
-    const d = Math.abs(aspect - b.aspect)
-    if (d < bestDiff) {
+    const arDiff = Math.abs(aspect - b.aspect)
+    const areaDiff = Math.abs(b.w * b.h - baseArea)
+    if (arDiff < bestArDiff || (arDiff === bestArDiff && areaDiff < bestAreaDiff)) {
       best = b
-      bestDiff = d
+      bestArDiff = arDiff
+      bestAreaDiff = areaDiff
     }
   }
   return best

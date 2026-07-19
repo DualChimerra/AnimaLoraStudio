@@ -1,5 +1,8 @@
 """Studio 内部使用的路径常量与目录初始化。"""
 from __future__ import annotations
+
+import json
+import logging
 import os
 from pathlib import Path
 
@@ -7,22 +10,6 @@ from pathlib import Path
 # REPO_ROOT 要再上跳一层（__file__ → infrastructure/ → studio/ → repo root）。
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
-
-def _resolve_studio_data() -> Path:
-    """studio_data 根目录。
-
-    优先读环境变量 `ALS_STUDIO_DATA`（绝对路径），否则回退到 `REPO_ROOT/studio_data`。
-
-    云端（Colab / Kaggle 等）部署时强烈建议把工作目录放在**本机快速盘**，
-    再单独把它同步到 Google Drive —— 直接把 studio_data 软链到 Google Drive
-    FUSE 挂载点会让 SQLite（WAL/锁）和大量小文件写入不可靠：项目 / 预设
-    丢失、第二个项目目录不落盘、下载的 zip 损坏等问题几乎都源于此。
-    详见 docs / Colab notebook 注释。
-    """
-    env = os.environ.get("ALS_STUDIO_DATA", "").strip()
-    if env:
-        return Path(env).expanduser()
-    return REPO_ROOT / "studio_data"
 
 # 训练侧已有。`OUTPUT_DIR` 仅给 `/samples/{name}` 端点（无 task_id 时）兜底用，
 # CLI 用户用 `./output/samples/...`；Studio 模式样本落到
@@ -34,8 +21,50 @@ OUTPUT_DIR = REPO_ROOT / "output"
 DATA_EXPORTS = REPO_ROOT / "data_exports"
 
 
-# Studio 持久化（SQLite + 用户保存的 preset + 任务日志）
-STUDIO_DATA = _resolve_studio_data()
+# Studio 持久化（SQLite + 用户保存的 preset + 任务日志）。
+#
+# 位置可自定义：仓库根的指针文件 `studio_data_location.json`（{"path": "..."}）
+# 指向自定义目录。指针必须在 studio_data **外面** —— secrets.json / db 都在
+# studio_data 里，位置本身的配置存里面就成了鸡生蛋。指针在模块 import 时读
+# 一次，进程内不变；迁移（/api/studio-data/migrate）写完指针后需重启 server
+# 生效（cli.py 重启循环用 subprocess 拉新进程，paths 会重新求值）。
+DEFAULT_STUDIO_DATA = REPO_ROOT / "studio_data"
+STUDIO_DATA_POINTER = REPO_ROOT / "studio_data_location.json"
+
+
+def resolve_studio_data(pointer_file: Path | None = None) -> Path:
+    """解析 studio_data 位置：env override → 指针文件 → 默认位置。
+
+    本 fork：环境变量 `ALS_STUDIO_DATA`（绝对路径）优先级最高 —— 云端
+    （Colab / Kaggle）notebook 注入，把工作目录放本机快速盘再单独同步到
+    Google Drive（studio_data 直接软链到 Drive FUSE 会让 SQLite 与小文件
+    写入不可靠：项目 / 预设丢失、zip 损坏等，详见 docs / Colab notebook 注释）。
+
+    指针文件（上游 /api/studio-data/migrate 机制）：目标必须是已存在的绝对
+    路径目录 —— 盘符未挂载 / 目录被删时回退默认（默认位置仍保留迁移前的旧
+    数据，可用），只 log warning 不抛错。
+    """
+    env = os.environ.get("ALS_STUDIO_DATA", "").strip()
+    if env:
+        return Path(env).expanduser()
+    ptr = pointer_file if pointer_file is not None else STUDIO_DATA_POINTER
+    try:
+        if ptr.is_file():
+            raw = json.loads(ptr.read_text("utf-8"))
+            target = Path(str(raw.get("path", "")))
+            if target.is_absolute() and target.is_dir():
+                return target
+            logging.getLogger(__name__).warning(
+                "studio_data 指针目标无效（不存在或非绝对路径），回退默认位置: %s", target,
+            )
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "studio_data 指针文件解析失败，回退默认位置: %s", ptr, exc_info=True,
+        )
+    return DEFAULT_STUDIO_DATA
+
+
+STUDIO_DATA = resolve_studio_data()
 STUDIO_DB = STUDIO_DATA / "studio.db"
 USER_PRESETS_DIR = STUDIO_DATA / "presets"
 USER_CONFIGS_DIR = USER_PRESETS_DIR  # 兼容别名（PP0 后将随 configs_io 一起移除）
@@ -57,6 +86,10 @@ TASKS_DIR = STUDIO_DATA / "tasks"
 # React 前端
 WEB_DIR = REPO_ROOT / "studio" / "web"
 WEB_DIST = WEB_DIR / "dist"
+
+# 公告栏数据源（docs/announcements/<id>.md + <id>.en.md），见
+# docs/todo/announcement-center.md。仓库内 docs/ 下，随版本一起 git 更新到达。
+ANNOUNCEMENTS_DIR = REPO_ROOT / "docs" / "announcements"
 
 
 def migrate_configs_to_presets() -> None:
@@ -107,6 +140,11 @@ def task_samples_dir(task_id: int) -> Path:
     API 读：`studio/api/routers/samples.py` 候选首位。
     """
     return task_dir(task_id) / "samples"
+
+
+def task_eval_dir(task_id: int) -> Path:
+    """`tasks/<task_id>/eval/` —— training task scoped LoRA eval artifacts."""
+    return task_dir(task_id) / "eval"
 
 
 def task_log_path(task_id: int) -> Path:

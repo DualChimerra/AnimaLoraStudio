@@ -49,6 +49,37 @@ def test_cached_latent_invalidates_when_resolution_bucket_changes(tmp_path: Path
     assert cached._is_cache_valid(img_path, npz_path) is True
 
 
+def test_cached_latent_keeps_third_party_caption_fallback(tmp_path: Path) -> None:
+    """Phase 2 resolver 抽取不能把 duck-typed dataset 的 caption 变成空串。"""
+    pytest.importorskip("torch")
+    import numpy as np
+
+    from runtime.training.dataset import CachedLatentDataset
+
+    image = tmp_path / "third-party.png"
+    image.write_bytes(b"fake")
+    caption_path = image.with_suffix(".txt")
+    caption_path.write_text("raw caption", encoding="utf-8")
+    np.savez(image.with_suffix(".npz"), latent=np.zeros((16, 1, 2, 2)))
+
+    class ThirdPartyDataset:
+        caption_override = None
+
+        @staticmethod
+        def _process_caption_txt(caption):
+            return f"processed: {caption}"
+
+    cached = object.__new__(CachedLatentDataset)
+    cached.base_dataset = ThirdPartyDataset()
+    cached.samples = [{"image": image, "txt_path": caption_path}]
+    cached.np = np
+    cached.flip_augment = False
+    cached.load_masks = False
+    cached._multi_reso = set()
+
+    assert cached[0]["caption"] == "processed: raw caption"
+
+
 def test_cached_latent_invalidates_when_flip_augment_added(tmp_path: Path) -> None:
     """老 cache（只有 latent，无 latent_flipped）+ flip_augment=True → 失效重 encode。
 
@@ -233,11 +264,13 @@ class _CountingVAEModel:
     """Mock VAE：每次 encode 把调用次数 +1，让测试能数 VAE 实际被调用了几次。"""
     def __init__(self):
         self.encode_calls = 0
+        self.batch_sizes = []
 
     def encode(self, pixels_5d, scale):
         import torch
         self.encode_calls += 1
         b, _, _, h, w = pixels_5d.shape
+        self.batch_sizes.append(b)
         return torch.zeros(b, 16, 1, h // 8, w // 8, dtype=pixels_5d.dtype)
 
 
@@ -277,11 +310,12 @@ def test_cached_latent_dedupes_repeats_in_encode_pass(tmp_path: Path) -> None:
     vae = _CountingVAE()
     CachedLatentDataset(dataset, vae, device="cpu", dtype=torch.float32)
 
-    # 唯一图 2 张 × flip_augment=False → 2 次 VAE encode（不是 10 次）
+    # 唯一图 2 张 × flip_augment=False，默认 cache_batch_size=1 逐张 → 2 次（不是 10 次）
     assert vae.model.encode_calls == 2, (
         f"期望 2 次 encode（唯一图数）,实际 {vae.model.encode_calls} 次 — "
         "_build_cache 没按 npz_path 去重，对同一张图按 repeat 倍数重复编码"
     )
+    assert vae.model.batch_sizes == [1, 1]
     # 唯一 npz 文件 = 2
     assert len(list(folder.glob("*.npz"))) == 2
 
@@ -312,6 +346,29 @@ def test_cached_latent_dedupes_repeats_with_flip_aug(tmp_path: Path) -> None:
     assert vae.model.encode_calls == 4, (
         f"期望 4 次 encode（2 唯一 × flip/不 flip）,实际 {vae.model.encode_calls} 次"
     )
+    assert vae.model.batch_sizes == [1, 1, 1, 1]
+
+
+def test_cached_latent_respects_cache_batch_size(tmp_path: Path) -> None:
+    """vae_cache_batch_size 控制缓存阶段每次送入 VAE 的同尺寸图片数量。"""
+    pytest.importorskip("torch")
+    import torch
+    from PIL import Image
+
+    from runtime.training.dataset import BucketManager, CachedLatentDataset, ImageDataset
+
+    for i in range(5):
+        img_path = tmp_path / f"img{i}.png"
+        Image.new("RGB", (256, 256), color=(127 + i, 127, 127)).save(img_path)
+        img_path.with_suffix(".txt").write_text("tag", encoding="utf-8")
+
+    bucket_mgr = BucketManager(256, min_reso=256, max_reso=256, step=64)
+    dataset = ImageDataset(tmp_path, 256, bucket_mgr, flip_augment=False)
+    vae = _CountingVAE()
+    CachedLatentDataset(dataset, vae, device="cpu", dtype=torch.float32, cache_batch_size=2)
+
+    assert vae.model.batch_sizes == [2, 2, 1]
+    assert len(list(tmp_path.glob("*.npz"))) == 5
 
 
 def test_cached_latent_getitem_picks_flipped_per_random(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -409,11 +466,86 @@ def test_image_dataset_loads_caption_utils_when_prefer_json(tmp_path: Path) -> N
         assert key in dataset.caption_utils
 
 
+def test_json_caption_list_shape_does_not_crash_issue_345(tmp_path: Path) -> None:
+    """#345: Studio 打标写出的简化 JSON（tags 为扁平 list、非分类 dict）以前被
+    误判为标准格式直接喂给 build，触发 'list' object has no attribute 'get'。
+    现在应正常构建 caption：trigger 在首位、tags 全部保留、trigger 去重。"""
+    pytest.importorskip("torch")
+    import json
+
+    from runtime.training.dataset import ImageDataset
+
+    payload = {
+        "tags": ["mika_pikazo", "1girl", "solo", "blue hair"],
+        "meta": {"trigger": "mika_pikazo"},
+    }
+    jp = tmp_path / "10032281.json"
+    jp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    dataset = ImageDataset(tmp_path, prefer_json=True)
+    caption = dataset._process_caption_json(jp)
+
+    assert caption is not None, "list 形式 caption 不应崩溃 / 静默返回 None"
+    assert caption.startswith("mika_pikazo"), "trigger 应在首位（keep_tokens 保护）"
+    assert "1girl" in caption and "blue hair" in caption
+    assert caption.count("mika_pikazo") == 1, "trigger 与 tags 内重复项应去重"
+
+
+def test_json_caption_preflight_rejects_broken_json(tmp_path: Path) -> None:
+    """#345 follow-up: JSON 样本没有 txt 兜底（_make_sample 置 txt_path=None），
+    caption 解析失败会静默以空 caption 训练。预检应在开训前直接报错拒绝。"""
+    pytest.importorskip("torch")
+    from runtime.training.dataset import ImageDataset
+
+    img = _touch_image(tmp_path, "a.png")
+    img.with_suffix(".json").write_text("{ not valid json", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="拒绝开训"):
+        ImageDataset(tmp_path, prefer_json=True)
+
+
+def test_json_caption_preflight_passes_healthy_flat_json(tmp_path: Path) -> None:
+    """健康的扁平 list caption（#345 场景修复后）应通过预检正常建数据集。"""
+    pytest.importorskip("torch")
+    import json
+
+    from runtime.training.dataset import ImageDataset
+
+    img = _touch_image(tmp_path, "a.png")
+    img.with_suffix(".json").write_text(
+        json.dumps({"tags": ["mika_pikazo", "1girl"], "meta": {"trigger": "mika_pikazo"}}),
+        encoding="utf-8",
+    )
+
+    dataset = ImageDataset(tmp_path, prefer_json=True)
+    assert len(dataset.samples) == 1
+
+
 def test_parse_repeat_kohya_prefix() -> None:
     assert datasets.parse_repeat("5_concept") == (5, "concept")
     assert datasets.parse_repeat("12_a_long_name") == (12, "a_long_name")
     assert datasets.parse_repeat("noprefix") == (1, "noprefix")
     assert datasets.parse_repeat("0_zero") == (0, "zero")
+
+
+def test_txt_caption_tag_dropout_kohya_semantics(tmp_path: Path) -> None:
+    """TXT 路径 tag_dropout（kohya 语义）：keep_tokens 前缀免 shuffle 免 dropout，
+    其余 tag 逐个独立 dropout、无保底。dropout 丢触发词是生态已知行为，保护靠
+    用户显式配 keep_tokens。"""
+    pytest.importorskip("torch")
+    from runtime.training.dataset import ImageDataset
+
+    # dropout=1.0 → 非保护区全部丢弃（确定性）；keep_tokens 前缀原序保留
+    ds = ImageDataset(tmp_path, shuffle_caption=True, keep_tokens=2, tag_dropout=1.0)
+    assert ds._process_caption_txt("trigger, quality, a, b, c") == "trigger, quality"
+
+    # keep_tokens=0 + dropout=1.0 → 全丢、无保底（kohya 同款）
+    ds_all = ImageDataset(tmp_path, shuffle_caption=False, keep_tokens=0, tag_dropout=1.0)
+    assert ds_all._process_caption_txt("a, b, c") == ""
+
+    # dropout=0 → 原样（不 shuffle 时顺序不变）
+    ds_off = ImageDataset(tmp_path, shuffle_caption=False, keep_tokens=0, tag_dropout=0.0)
+    assert ds_off._process_caption_txt("a, b, c") == "a, b, c"
 
 
 def test_caption_kind_priority(tmp_path: Path) -> None:

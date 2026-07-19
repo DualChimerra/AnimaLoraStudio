@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -26,6 +27,7 @@ def isolated_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str,
     from studio import db
     from studio.api.routers import root as _root_router
     from studio.api.routers import samples as _samples_router
+    from studio.services.projects import projects
     output = tmp_path / "output"
     samples_dir = output / "samples"
     web_dist = tmp_path / "web_dist"  # 不创建即模拟未构建
@@ -39,6 +41,7 @@ def isolated_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str,
     monkeypatch.setattr(server, "WEB_DIST", web_dist)
     monkeypatch.setattr(_samples_router, "OUTPUT_DIR", output)
     monkeypatch.setattr(_root_router, "WEB_DIST", web_dist)
+    monkeypatch.setattr(projects, "PROJECTS_DIR", tmp_path / "projects")
     return {
         "tmp": tmp_path,
         "db": dbfile,
@@ -65,18 +68,27 @@ def test_health_returns_ok(client: TestClient) -> None:
     assert body["version"] == server.app.version
 
 
-def test_generate_sample_response_is_not_browser_cached(client: TestClient) -> None:
-    from studio.services.inference import cache as generate_cache
+def test_generate_sample_response_is_not_browser_cached(
+    client: TestClient, isolated_paths: dict[str, Path]
+) -> None:
+    """加密磁盘 cache 读路径：put PNG → GET /api/generate/{tid}/sample/{fn} →
+    解密后 no-store 返回。
 
-    generate_cache.clear_all()
+    本 fork：显式 init disk_cache —— 上游此处依赖其它测试触发过 lifespan init
+    的执行顺序副作用（那些 system 路由测试已随 updater 移除）。
+    """
+    from studio.services.inference import disk_cache as generate_cache
+
+    generate_cache.init(isolated_paths["tmp"] / ".cache" / "generate")
+
     try:
-        generate_cache.cache_image(7, "sample.png", b"PNG")
+        generate_cache.cache_image(7, "sample.png", b"PNG", snapshot={"mode": "single"})
         resp = client.get("/api/generate/7/sample/sample.png")
         assert resp.status_code == 200
         assert resp.content == b"PNG"
         assert resp.headers["cache-control"] == "no-store"
     finally:
-        generate_cache.clear_all()
+        generate_cache.drop_task(7)
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +148,9 @@ def test_torch_reinstall_invalid_target_returns_400(
     )
     resp = client.post("/api/torch/reinstall", json={"target": "xpu"})
     assert resp.status_code == 400
-    assert "非法 target" in resp.json()["detail"]
+    body = resp.json()
+    assert body["error"]["code"] == "install.target_invalid"
+    assert body["error"]["details"]["target"] == "xpu"
 
 
 def test_flash_attention_status_returns_env_and_candidates(
@@ -251,7 +265,7 @@ def test_flash_attention_install_failure_returns_500(
     monkeypatch.setattr(flash_attention_setup, "install", boom)
     resp = client.post("/api/flash-attention/install", json={"url": "https://x/bad.whl"})
     assert resp.status_code == 500
-    assert "bad wheel" in resp.json()["detail"]
+    assert "bad wheel" in resp.json()["error"]["message"]
 
 
 def test_state_missing_returns_empty(client: TestClient, isolated_paths: dict[str, Path]) -> None:
@@ -303,6 +317,46 @@ def test_state_by_task_id_returns_parsed_json(
     resp = client.get(f"/api/state?task_id={tid}")
     assert resp.status_code == 200
     assert resp.json() == payload
+
+
+def test_state_includes_eval_context_for_bound_task(
+    client: TestClient, isolated_paths: dict[str, Path]
+) -> None:
+    from studio import db as _db
+    from studio.services.projects import projects, versions
+
+    payload = {
+        "losses": [],
+        "lr_history": [],
+        "epoch": 1,
+        "step": 10,
+        "total_steps": 20,
+        "speed": 1.0,
+        "samples": [],
+        "start_time": 1700000000.0,
+        "config": {},
+    }
+    tid = _make_task_with_state(isolated_paths, payload)
+    with _db.connection_for(isolated_paths["db"]) as conn:
+        project = projects.create_project(conn, title="Eval Monitor")
+        version = versions.create_version(conn, project_id=project["id"], label="v1")
+        _db.update_task(
+            conn,
+            tid,
+            project_id=project["id"],
+            version_id=version["id"],
+        )
+
+    resp = client.get(f"/api/state?task_id={tid}")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["project_id"] == project["id"]
+    assert body["project_slug"] == project["slug"]
+    assert body["version_id"] == version["id"]
+    assert body["version_label"] == "v1"
+    assert body["task_id"] == tid
+    assert body["step"] == 10
 
 
 def test_state_corrupt_returns_500(
@@ -475,14 +529,17 @@ def test_sample_with_task_id_finds_in_state_dir_samples(
 # /
 # ---------------------------------------------------------------------------
 
-def test_root_redirects_to_studio_when_built(
+def test_root_serves_index_when_built(
     client: TestClient, isolated_paths: dict[str, Path]
 ) -> None:
-    """前端 dist 存在时，/ 应 302 跳转到 /studio/。"""
-    isolated_paths["web_dist"].mkdir(parents=True, exist_ok=True)
+    """ADR 0012：前端 dist 存在时，/ 直接吐 index.html，不再重定向。"""
+    web_dist = isolated_paths["web_dist"]
+    web_dist.mkdir(parents=True, exist_ok=True)
+    (web_dist / "index.html").write_text("<!doctype html><title>anima</title>", encoding="utf-8")
     resp = client.get("/", follow_redirects=False)
-    assert resp.status_code == 302
-    assert resp.headers["location"] == "/studio/"
+    assert resp.status_code == 200
+    assert "text/html" in resp.headers["content-type"]
+    assert "<title>anima</title>" in resp.text
 
 
 def test_root_fallback_when_no_dist(
@@ -494,3 +551,78 @@ def test_root_fallback_when_no_dist(
     assert resp.status_code == 200
     body = resp.json()
     assert "AnimaStudio" in body["message"]
+
+
+def test_legacy_studio_path_redirects_to_root(
+    client: TestClient, isolated_paths: dict[str, Path]
+) -> None:
+    """ADR 0012 legacy：老 /studio/... 链接一次性 307 跳到根路径，保留 query。"""
+    resp = client.get("/studio/projects/1?tab=log", follow_redirects=False)
+    assert resp.status_code == 307
+    assert resp.headers["location"] == "/projects/1?tab=log"
+    # 裸 /studio → /
+    resp = client.get("/studio", follow_redirects=False)
+    assert resp.status_code == 307
+    assert resp.headers["location"] == "/"
+
+
+# ---------------------------------------------------------------------------
+# /api/system/restart (ADR 0002 / PR-A)
+# ---------------------------------------------------------------------------
+
+def test_uvicorn_run_bounds_graceful_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """main() 必须给 uvicorn 传 timeout_graceful_shutdown 上限。
+
+    浏览器开着时 /api/events 的 SSE 长连接不主动断，graceful shutdown 默认
+    无限等 →「Waiting for connections to close」卡死；且 py3.12+ 的
+    asyncio.Server.wait_closed() 等全部活跃连接，二次 Ctrl+C 设 force_exit
+    也解不开。没有这个上限，终端 Ctrl+C 永远关不掉 server。
+    """
+    import uvicorn
+
+    from studio.api import main as main_mod
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **kw: captured.update(kw))
+    monkeypatch.setattr("sys.argv", ["anima-studio"])
+    main_mod.main()
+    timeout = captured.get("timeout_graceful_shutdown")
+    assert isinstance(timeout, (int, float)) and timeout > 0
+
+
+def test_cancelled_asgi_noise_filter_scope() -> None:
+    """shutdown 超时取消 SSE 连接时，uvicorn 把 CancelledError 按
+    「Exception in ASGI application」打 ERROR traceback —— 主动取消不是
+    应用错误，应被过滤；其它 ASGI 异常 / 其它 message 必须照常放行。"""
+    import asyncio
+
+    from studio.api.lifespan import _CancelledAsgiNoiseFilter
+
+    f = _CancelledAsgiNoiseFilter()
+
+    def record(msg: str, exc: BaseException | None) -> logging.LogRecord:
+        return logging.LogRecord(
+            name="uvicorn.error", level=logging.ERROR, pathname=__file__,
+            lineno=1, msg=msg, args=(),
+            exc_info=(type(exc), exc, None) if exc is not None else None,
+        )
+
+    # 目标噪声：吞
+    assert not f.filter(
+        record("Exception in ASGI application\n", asyncio.CancelledError())
+    )
+    # 真实应用异常：放行
+    assert f.filter(
+        record("Exception in ASGI application\n", RuntimeError("boom"))
+    )
+    # 无异常信息 / 其它 message：放行
+    assert f.filter(record("Exception in ASGI application\n", None))
+    assert f.filter(record("Cancel 2 running task(s)", asyncio.CancelledError()))
+
+
+# ---------------------------------------------------------------------------
+# /api/system/version (ADR 0002 / PR-B)
+# ---------------------------------------------------------------------------
+

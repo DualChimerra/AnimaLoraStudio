@@ -26,19 +26,23 @@ from .routers import (
     generate,
     health,
     installs,
-    jobs,
     logs,
     models,
+    models_storage,
     presets,
     root,
     samples,
     secrets as secrets_router,
+    studio_data,
     tag_dictionary,
+    tagger,
     upscalers,
 )
 from .routers.projects import crud as projects_crud
 from .routers.projects import exports as projects_exports
 from .routers.projects import curation as projects_curation
+from .routers.projects import eval_metrics as projects_eval_metrics
+from .routers.projects import eval_samples as projects_eval_samples
 from .routers.projects import ingestion as projects_ingestion
 from .routers.projects import training as projects_training
 from .routers.queue import io as queue_io_router
@@ -65,19 +69,23 @@ app.include_router(browse.router)
 app.include_router(events_sse.router)
 # ADR-0009 PR-3 C1: 前端错误上报 (ErrorBoundary / window.onerror / unhandledrejection)
 app.include_router(client_errors.router)
-# PR-6 commit 1: 4 个小 router（root / samples / logs / data_exports）
+# PR-6 commit 1: 5 个小 router（root / samples / logs / data_exports / tagger）
+# 本 fork：公告栏（announcements）与自更新（system）随 in-app updater 一起移除。
 app.include_router(root.router)
 app.include_router(samples.router)
 app.include_router(logs.router)
 app.include_router(data_exports.router)
-# PR-6 commit 2: 4 个 admin router（jobs / secrets / models / upscalers）
-app.include_router(jobs.router)
+app.include_router(tagger.router)
+# PR-6 commit 2: admin router（secrets / models / upscalers）。jobs router 已删（R-5 台账合并，数据作业走 /api/queue）
 app.include_router(secrets_router.router)
 app.include_router(models.router)
 app.include_router(upscalers.router)
 app.include_router(tag_dictionary.router)
 # PR-6 commit 3: installs router（10 routes: wd14/torch/flash-attn/xformers/llm-tagger admin）
 app.include_router(installs.router)
+# studio_data 迁移 + 模型来源统一管理（#446）。system router（自更新）本 fork 不含。
+app.include_router(studio_data.router)
+app.include_router(models_storage.router)
 # PR-6 commit 5: generate router（8 routes: 出图 + daemon 状态 + TAEFlux）
 app.include_router(generate.router)
 # PR-6 commit 6: queue 子包 3 文件（lifecycle 12 + io 3 + outputs 5 = 20 routes）
@@ -88,6 +96,10 @@ app.include_router(queue_lifecycle.router)
 app.include_router(queue_outputs.router)
 # PR-6.5 commit 1: projects/versions CRUD 子包第一刀（16 routes）
 app.include_router(projects_crud.router)
+# ADR-0011: eval sample runs + manual run trigger (task-scoped)
+app.include_router(projects_eval_samples.router)
+# ADR-0011: metric result endpoints and concrete metric runner triggers
+app.include_router(projects_eval_metrics.router)
 # PR-6.5 commit 2: train.zip / bundle.zip / export-bundle / import-bundle (path/upload) /
 # import-train（6 routes）
 app.include_router(projects_exports.router)

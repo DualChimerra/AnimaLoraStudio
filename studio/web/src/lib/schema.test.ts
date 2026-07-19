@@ -33,6 +33,18 @@ describe('controlKind', () => {
     expect(controlKind({ type: 'string' } as SchemaProperty)).toBe('string')
   })
 
+  it('maps integer arrays (e.g. resolution) to int-list, string arrays to string-list', () => {
+    expect(
+      controlKind({ type: 'array', items: { type: 'integer' } } as SchemaProperty)
+    ).toBe('int-list')
+    expect(
+      controlKind({ type: 'array', items: { type: 'number' } } as SchemaProperty)
+    ).toBe('int-list')
+    expect(
+      controlKind({ type: 'array', items: { type: 'string' } } as SchemaProperty)
+    ).toBe('string-list')
+  })
+
   it('handles Optional[T] via anyOf', () => {
     expect(
       controlKind({
@@ -92,6 +104,9 @@ describe('evalShowWhen', () => {
     ).toBe(false)
   })
 })
+
+// pruneInactiveConfig 已删（刀 2 / R4）：YAML 预览改走后端 /api/schema/preview-yaml，
+// 裁剪语义唯一实现在 studio/domain/config_prune.py（tests/test_config_prune.py 锁）。
 
 describe('fieldLabel', () => {
   it('capitalizes underscored words', () => {

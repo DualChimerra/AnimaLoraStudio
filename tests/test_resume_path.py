@@ -4,7 +4,7 @@
   - cmd_builder 单测：构造 task dict 调 `_default_cmd_builder`
   - bootstrap 覆盖单测：argparse.Namespace + sibling snapshot 落盘 + 调
     `_maybe_apply_pause_snapshot`
-  - supervisor `_clear_pause_artifacts` 单测：构造 db 状态 + 调 method
+  - supervisor `_clear_pause_fields` 单测：构造 db 状态 + 调 method
   - server resume endpoint 单测：直接调函数（绕过 fastapi router，因为本
     dev env 没装 fastapi/test_client）
 
@@ -360,7 +360,7 @@ def test_resolve_sample_seed_missing_attr_treated_as_zero() -> None:
 
 
 # ---------------------------------------------------------------------------
-# supervisor._clear_pause_artifacts
+# supervisor._clear_pause_fields（Addendum 2 起不删文件，只清 db 字段）
 # ---------------------------------------------------------------------------
 
 
@@ -386,10 +386,11 @@ def _new_sup(env) -> Supervisor:
     )
 
 
-def test_clear_pause_artifacts_deletes_files_and_clears_db(env) -> None:
+def test_clear_pause_fields_keeps_files_and_clears_db(env) -> None:
+    """Addendum 2：恢复点文件保留（resume 后窗口期仍有恢复点），只清 db 字段。"""
     sup = _new_sup(env)
-    state_pt = env["root"] / "pause_step_100.pt"
-    cfg_json = env["root"] / "pause_step_100.config.json"
+    state_pt = env["root"] / "auto_epoch_state.pt"
+    cfg_json = env["root"] / "auto_epoch_state.config.json"
     state_pt.write_bytes(b"fake state")
     cfg_json.write_text("{}", encoding="utf-8")
 
@@ -404,10 +405,10 @@ def test_clear_pause_artifacts_deletes_files_and_clears_db(env) -> None:
             paused_at=time.time(),
         )
 
-    sup._clear_pause_artifacts(tid)
+    sup._clear_pause_fields(tid)
 
-    assert not state_pt.exists()
-    assert not cfg_json.exists()
+    assert state_pt.exists()
+    assert cfg_json.exists()
     with db.connection_for(env["db"]) as conn:
         task = db.get_task(conn, tid)
     assert task is not None
@@ -419,14 +420,14 @@ def test_clear_pause_artifacts_deletes_files_and_clears_db(env) -> None:
     assert task["status"] == "running"
 
 
-def test_clear_pause_artifacts_unknown_task_noop(env) -> None:
+def test_clear_pause_fields_unknown_task_noop(env) -> None:
     """task 不存在 → 静默返回，不抛错。"""
     sup = _new_sup(env)
-    sup._clear_pause_artifacts(99999)
+    sup._clear_pause_fields(99999)
 
 
-def test_clear_pause_artifacts_missing_files_robust(env) -> None:
-    """文件已被外部删 → db 字段照样清，不抛错。"""
+def test_clear_pause_fields_dangling_paths_robust(env) -> None:
+    """路径指向不存在的文件 → db 字段照样清，不抛错。"""
     sup = _new_sup(env)
     with db.connection_for(env["db"]) as conn:
         tid = db.create_task(conn, name="t", config_name="c")
@@ -436,7 +437,7 @@ def test_clear_pause_artifacts_missing_files_robust(env) -> None:
             paused_config_path="/nonexistent/path.config.json",
             paused_step=100,
         )
-    sup._clear_pause_artifacts(tid)
+    sup._clear_pause_fields(tid)
     with db.connection_for(env["db"]) as conn:
         task = db.get_task(conn, tid)
     assert task["paused_state_path"] is None
@@ -484,8 +485,9 @@ def _import_server_module():
     重 import server。
     """
     try:
-        from fastapi import HTTPException
+        from fastapi import HTTPException  # noqa: F401  (kept for back-compat)
         from studio.api.routers.queue.lifecycle import resume_task as _resume_task
+        from studio.domain.errors import ConflictError, NotFoundError
     except ImportError:
         pytest.skip("fastapi not installed; cannot import resume endpoint")
 
@@ -493,27 +495,34 @@ def _import_server_module():
         pass
 
     shim = _ServerShim()
+    # ADR 0009 Phase 2: resume_task now raises studio.domain.errors.* (DomainError
+    # subclasses with .http_status / .message / .code), not fastapi HTTPException.
     shim.HTTPException = HTTPException
+    shim.NotFoundError = NotFoundError
+    shim.ConflictError = ConflictError
     shim.resume_task = _resume_task
     return shim
 
 
 def test_resume_endpoint_rejects_unknown_task(server_env) -> None:
     server = _import_server_module()
-    with pytest.raises(server.HTTPException) as exc:
+    with pytest.raises(server.NotFoundError) as exc:
         server.resume_task(99999)
-    assert exc.value.status_code == 404
+    assert exc.value.http_status == 404
+    assert exc.value.code == "task.not_found"
 
 
-def test_resume_endpoint_rejects_non_paused(server_env) -> None:
+def test_resume_endpoint_rejects_non_resumable_status(server_env) -> None:
+    """pending 不可 resume（Addendum 2 放宽到 paused/failed/canceled，
+    但 pending/running/done 仍拒绝）。"""
     server = _import_server_module()
     with db.connection_for(server_env["db"]) as conn:
         tid = db.create_task(conn, name="t", config_name="c")
         # pending status
-    with pytest.raises(server.HTTPException) as exc:
+    with pytest.raises(server.ConflictError) as exc:
         server.resume_task(tid)
-    assert exc.value.status_code == 409
-    assert "not paused" in exc.value.detail
+    assert exc.value.http_status == 409
+    assert exc.value.code == "task.not_resumable"
 
 
 def test_resume_endpoint_rejects_when_state_file_missing(server_env) -> None:
@@ -522,10 +531,11 @@ def test_resume_endpoint_rejects_when_state_file_missing(server_env) -> None:
     cfg_json = server_env["root"] / "pause_step_100.config.json"
     cfg_json.write_text("{}", encoding="utf-8")  # state missing, config exists
     tid = _create_paused_task(server_env, state_pt, cfg_json)
-    with pytest.raises(server.HTTPException) as exc:
+    with pytest.raises(server.ConflictError) as exc:
         server.resume_task(tid)
-    assert exc.value.status_code == 409
-    assert "missing" in exc.value.detail
+    assert exc.value.http_status == 409
+    assert exc.value.code == "task.resume_state_missing"
+    assert "missing" in exc.value.message
 
 
 def test_resume_endpoint_rejects_when_config_snapshot_missing(server_env) -> None:
@@ -534,10 +544,12 @@ def test_resume_endpoint_rejects_when_config_snapshot_missing(server_env) -> Non
     cfg_json = server_env["root"] / "pause_step_100.config.json"
     state_pt.write_bytes(b"")  # state exists, config missing
     tid = _create_paused_task(server_env, state_pt, cfg_json)
-    with pytest.raises(server.HTTPException) as exc:
+    with pytest.raises(server.ConflictError) as exc:
         server.resume_task(tid)
-    assert exc.value.status_code == 409
-    assert "snapshot missing" in exc.value.detail
+    assert exc.value.http_status == 409
+    # config snapshot missing reuses the resume_state_missing code (CATALOG: the
+    # frozen config is part of the saved training state).
+    assert exc.value.code == "task.resume_state_missing"
 
 
 def test_resume_endpoint_success_flips_status_keeps_paused_fields(server_env) -> None:

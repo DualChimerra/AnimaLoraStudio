@@ -1,9 +1,11 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import type { LoraEntry, XYAxisType } from '../../../api/client'
 import PathPicker from '../../../components/PathPicker'
+import AddSlotButton from './AddSlotButton'
 import InlineLoraPicker from './InlineLoraPicker'
 import NumberListInput from './NumberListInput'
-import type { ProjectLora } from './types'
+import type { LoraCatalog } from './useLoraCatalog'
 import { AXIS_VALUE_TYPE, REQUIRES_LORA_INDEX, axisLabel, ckptStemFromPath, type XYAxisDraft } from './xy'
 
 const ALL_AXES: XYAxisType[] = ['lora_ckpt', 'lora_scale', 'cfg_scale', 'steps']
@@ -22,13 +24,13 @@ function placeholderFor(axis: XYAxisType): string {
  * axis.loraIndex 指向那个槽；axis.raw 是 picks.map(path).join(', ')。
  */
 function AxisLoraCkptPicker({
-  draft, onDraftChange, loras, onLorasChange, projectLoras,
+  draft, onDraftChange, loras, onLorasChange, catalog,
 }: {
   draft: XYAxisDraft
   onDraftChange: (d: XYAxisDraft) => void
   loras: LoraEntry[]
   onLorasChange: (l: LoraEntry[]) => void
-  projectLoras: ProjectLora[]
+  catalog: LoraCatalog
 }) {
   const [externalOpen, setExternalOpen] = useState(false)
 
@@ -65,12 +67,28 @@ function AxisLoraCkptPicker({
     })
   }
 
-  // 显示已绑的 LoRA 摘要（如果 raw 非空 + loraIndex 有效）
+  // 显示已绑的 LoRA 摘要（如果 raw 非空 + loraIndex 有效）。项目/版本名从 catalog
+  // 取（下面的 picker mount 会懒拉对应 project/versions）；还没加载时下面回退到
+  // ckptStemFromPath(bound.path)。
   const bound = draft.loraIndex !== null && draft.loraIndex < loras.length
     ? loras[draft.loraIndex]
     : null
-  const matched = bound ? projectLoras.find((p) => p.versionId === bound.version_id) : null
+  const boundProject = bound ? catalog.projects.find((p) => p.id === bound.project_id) : null
+  const boundVersion = bound && bound.project_id != null
+    ? catalog.versionsOf(bound.project_id)?.find((v) => v.id === bound.version_id)
+    : undefined
+  const matchedLabel = boundProject && boundVersion
+    ? `${boundProject.title} / ${boundVersion.label}`
+    : null
   const pickedCount = draft.raw.trim() ? draft.raw.split(',').filter((s) => s.trim()).length : 0
+
+  // 受控同步给 InlineLoraPicker：raw 字符串当 path/basename 列表喂过去 + 锚定
+  // 到 bound LoRA 的 (pid, vid)，让历史回填 picker chip 高亮、basename → 全 path
+  // 自动 upgrade。
+  const selectedPaths = useMemo(
+    () => draft.raw.split(',').map((s) => s.trim()).filter(Boolean),
+    [draft.raw],
+  )
 
   return (
     <div className="flex flex-col gap-1.5">
@@ -84,19 +102,22 @@ function AxisLoraCkptPicker({
             color: 'var(--fg-tertiary)',
           }}
         >
-          <span>Scan:</span>
+          <span>扫:</span>
           <span className="font-medium" style={{ color: 'var(--fg-secondary)' }}>
-            {matched ? `${matched.projectTitle} / ${matched.versionLabel}` : ckptStemFromPath(bound.path)}
+            {matchedLabel ?? ckptStemFromPath(bound.path)}
           </span>
-          <span className="font-mono">· {pickedCount} ckpts</span>
+          <span className="font-mono">· {pickedCount} 个 ckpt</span>
         </div>
       )}
       <InlineLoraPicker
         mode="multi"
         live
-        projectLoras={projectLoras}
+        catalog={catalog}
         existingPaths={new Set()}
         showWeight={false}
+        selectedPaths={selectedPaths}
+        initialPid={bound?.project_id ?? null}
+        initialVid={bound?.version_id ?? null}
         onPick={commitPicks}
         onClose={() => { /* 常驻在 axis card 里，nothing to close */ }}
         onPickExternal={() => setExternalOpen(true)}
@@ -116,7 +137,7 @@ function AxisLoraCkptPicker({
 }
 
 function AxisCard({
-  label, draft, onChange, onRemove, loras, onLorasChange, projectLoras,
+  label, draft, onChange, onRemove, loras, onLorasChange, catalog,
 }: {
   label: 'X' | 'Y'
   draft: XYAxisDraft
@@ -124,63 +145,69 @@ function AxisCard({
   onRemove?: () => void
   loras: LoraEntry[]
   onLorasChange: (l: LoraEntry[]) => void
-  projectLoras: ProjectLora[]
+  catalog: LoraCatalog
 }) {
+  const { t } = useTranslation()
   const isCkpt = draft.axis === 'lora_ckpt'
 
+  // 背景 / padding 对齐 LoRA 槽的 InlineLoraPicker（bg-overlay + p-2.5）；不用 bg-sunken
+  // —— dark 下近黑，跟 LoRA 区不一致显突兀。
   return (
-    <div className="bg-sunken border border-subtle rounded-md px-2.5 py-2 flex flex-col gap-2">
-      <div className="flex items-center gap-2">
-        <span className="text-xs font-semibold text-fg-secondary shrink-0 w-4">{label}</span>
-        <select
-          className="input text-xs flex-1"
-          value={draft.axis}
-          onChange={(e) => {
-            const newAxis = e.target.value as XYAxisType
-            onChange({
-              ...draft,
-              axis: newAxis,
-              raw: newAxis === 'lora_ckpt' ? '' : draft.raw,
-              loraIndex: REQUIRES_LORA_INDEX.has(newAxis)
-                ? (loras.length > 0 ? 0 : null)
-                : null,
-            })
-          }}
-        >
-          {ALL_AXES.map((a) => (
-            <option key={a} value={a}>{axisLabel(a)}</option>
-          ))}
-        </select>
+    <div className="bg-overlay border border-subtle rounded-md p-2.5 flex flex-col gap-2">
+      {/* 轴名单独成行作整张卡的标题（下面的轴类型 dropdown + 取值都隶属它）；× 放这行
+          最右端、跟轴名分处两端 —— 之前单字母 "X" 跟下拉同行、像个关闭按钮，易混淆。 */}
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-xs font-semibold text-fg-secondary">
+          {t('generate.xyAxis', { label })}
+        </span>
         {onRemove && (
           <button
             onClick={onRemove}
             className="btn btn-ghost btn-sm text-fg-tertiary hover:text-err shrink-0 px-1.5"
-            title="Remove Y axis (back to single axis)"
-            aria-label="Remove Y axis"
+            title={t('generate.xyRemoveAxisTitle', { label })}
+            aria-label={t('generate.xyRemoveAxisAria', { label })}
           >
             ×
           </button>
         )}
       </div>
 
-      {/* axis=lora_ckpt：多选 chip picker 直接产出 raw + loraIndex；
-          axis=lora_scale：纯数字（chip 列表），不再绑 LoRA；
-          axis=steps/cfg：文本输入。 */}
+      <select
+        className="input text-xs w-full"
+        value={draft.axis}
+        onChange={(e) => {
+          const newAxis = e.target.value as XYAxisType
+          onChange({
+            ...draft,
+            axis: newAxis,
+            raw: newAxis === 'lora_ckpt' ? '' : draft.raw,
+            loraIndex: REQUIRES_LORA_INDEX.has(newAxis)
+              ? (loras.length > 0 ? 0 : null)
+              : null,
+          })
+        }}
+      >
+        {ALL_AXES.map((a) => (
+          <option key={a} value={a}>{axisLabel(a)}</option>
+        ))}
+      </select>
+
+      {/* 用细线把轴类型 dropdown 跟取值分隔（不靠缩进、不占横向空间）；取值隶属上面
+          选中的轴类型：lora_ckpt → 多选 chip picker（产出 raw + loraIndex）；
+          lora_scale → 纯数字 chip（不绑 LoRA）；steps/cfg → 文本。 */}
+      <div className="divider" />
       {isCkpt ? (
         <AxisLoraCkptPicker
           draft={draft}
           onDraftChange={onChange}
           loras={loras}
           onLorasChange={onLorasChange}
-          projectLoras={projectLoras}
+          catalog={catalog}
         />
       ) : draft.axis === 'lora_scale' ? (
         <NumberListInput
           raw={draft.raw}
           onChange={(raw) => onChange({ ...draft, raw })}
-          min={0}
-          max={1.5}
-          step={0.05}
           placeholder="0.6, 0.8, 1.0"
         />
       ) : (
@@ -205,7 +232,7 @@ function AxisCard({
  */
 export default function SidebarXYAxes({
   xDraft, yDraft, onXChange, onYChange,
-  loras, onLorasChange, projectLoras,
+  loras, onLorasChange, catalog,
 }: {
   xDraft: XYAxisDraft
   yDraft: XYAxisDraft | null
@@ -213,36 +240,36 @@ export default function SidebarXYAxes({
   onYChange: (d: XYAxisDraft | null) => void
   loras: LoraEntry[]
   onLorasChange: (l: LoraEntry[]) => void
-  projectLoras: ProjectLora[]
+  catalog: LoraCatalog
 }) {
   return (
-    <div className="card" style={{ padding: 18 }}>
+    // 外层不再套 .card —— 父级 sidebar 已是统一卡片，这里只做内容分组避免双重边框。
+    <div>
       <div className="flex items-center justify-between mb-3">
-        <div className="text-md font-semibold">XY axes</div>
+        <div className="text-md font-semibold">XY 轴</div>
       </div>
       <div className="flex flex-col gap-2">
         <AxisCard
           label="X" draft={xDraft} onChange={onXChange}
-          loras={loras} onLorasChange={onLorasChange} projectLoras={projectLoras}
+          loras={loras} onLorasChange={onLorasChange} catalog={catalog}
         />
         {yDraft ? (
           <AxisCard
             label="Y" draft={yDraft}
             onChange={(d) => onYChange(d)}
             onRemove={() => onYChange(null)}
-            loras={loras} onLorasChange={onLorasChange} projectLoras={projectLoras}
+            loras={loras} onLorasChange={onLorasChange} catalog={catalog}
           />
         ) : (
-          <button
+          <AddSlotButton
             onClick={() => onYChange({
               axis: 'lora_scale',
               raw: '1',  // 一个值起步，用户自己 + 添加
               loraIndex: null,
             })}
-            className="btn btn-ghost btn-sm self-start text-xs text-fg-tertiary"
           >
-            + Add Y axis
-          </button>
+            + 添加 Y 轴
+          </AddSlotButton>
         )}
       </div>
     </div>

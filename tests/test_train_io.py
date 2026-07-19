@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from studio import db
+from studio.domain.errors import NotFoundError
 from studio.services.projects import projects, versions
 from studio.services.data_io import train_io
 
@@ -113,7 +114,9 @@ def test_export_empty_train_raises(isolated, tmp_path: Path) -> None:
 
 
 def test_export_missing_version(isolated, tmp_path: Path) -> None:
-    with db.connection_for(isolated["db"]) as conn, pytest.raises(train_io.TrainIOError):
+    with db.connection_for(isolated["db"]) as conn, pytest.raises(
+        NotFoundError, match="Version not found"
+    ):
         train_io.export_train(conn, 9999, tmp_path / "x.zip")
 
 
@@ -247,6 +250,196 @@ def test_import_bad_zip(isolated, tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # bundle import: 4 全局模型路径字段跨机器处理
 # ---------------------------------------------------------------------------
+
+
+def test_export_bundle_records_version_and_preset_names(isolated, tmp_path: Path) -> None:
+    p, v, train = _make_project_with_train(isolated, label="anime-v2")
+    (train / "1_data").mkdir(parents=True, exist_ok=True)
+    (train / "1_data" / "a.png").write_bytes(_png())
+
+    dest = tmp_path / "out.bundle.zip"
+    with db.connection_for(isolated["db"]) as conn:
+        versions.update_version(conn, v["id"], config_name="style_preset")
+        result = train_io.export_bundle(
+            conn,
+            v["id"],
+            dest,
+            train_io.BundleOptions(train=True, train_captions=True),
+        )
+
+    source = result["manifest"]["source"]
+    assert source["version_label"] == "anime-v2"
+    assert source["preset_name"] == "style_preset"
+
+    with zipfile.ZipFile(dest) as zf:
+        manifest = json.loads(zf.read("manifest.json"))
+    assert manifest["source"]["version_label"] == "anime-v2"
+    assert manifest["source"]["preset_name"] == "style_preset"
+
+
+def test_export_bundle_training_caches_roundtrip(isolated, tmp_path: Path) -> None:
+    """cache=True：train/reg 的 latent + text cache 一并打包。
+
+    导入后 npz mtime ≥ 图片 mtime（_is_cache_valid 的不变量，否则缓存白搬）；
+    text cache 只按文件内指纹失效，无 mtime 要求。
+    """
+    p, v, train = _make_project_with_train(isolated)
+    (train / "1_data").mkdir(parents=True, exist_ok=True)
+    (train / "1_data" / "a.png").write_bytes(_png())
+    (train / "1_data" / "a.npz").write_bytes(b"fake-latent")
+    (train / "1_data" / "a.r512.npz").write_bytes(b"fake-latent-512")
+    (train / "1_data" / "a.png.text.safetensors").write_bytes(b"fake-text")
+    reg = train.parent / "reg" / "girl"
+    reg.mkdir(parents=True)
+    (reg / "r.png").write_bytes(_png(b"r"))
+    (reg / "r.npz").write_bytes(b"fake-reg-latent")
+    (reg / "r.png.text.safetensors").write_bytes(b"fake-reg-text")
+
+    dest = tmp_path / "cache.bundle.zip"
+    with db.connection_for(isolated["db"]) as conn:
+        result = train_io.export_bundle(
+            conn, v["id"], dest,
+            train_io.BundleOptions(
+                train=True, reg=True,
+                train_latent_cache=True, reg_latent_cache=True,
+            ),
+        )
+
+    assert result["manifest"]["includes"]["train_latent_cache"] is True
+    assert result["manifest"]["includes"]["reg_latent_cache"] is True
+    assert result["manifest"]["stats"]["latent_cache_count"] == 3
+    assert result["manifest"]["stats"]["text_cache_count"] == 2
+    with zipfile.ZipFile(dest) as zf:
+        names = set(zf.namelist())
+    assert "train/1_data/a.npz" in names
+    assert "train/1_data/a.r512.npz" in names
+    assert "reg/girl/r.npz" in names
+    assert "train/1_data/a.png.text.safetensors" in names
+    assert "reg/girl/r.png.text.safetensors" in names
+
+    with db.connection_for(isolated["db"]) as conn:
+        imported = train_io.import_bundle(conn, dest, presets_base=tmp_path / "presets")
+
+    new_dir = versions.version_dir(
+        imported["project"]["id"],
+        imported["project"]["slug"],
+        imported["version"]["label"],
+    )
+    npz = new_dir / "train" / "1_data" / "a.npz"
+    img = new_dir / "train" / "1_data" / "a.png"
+    reg_npz = new_dir / "reg" / "girl" / "r.npz"
+    reg_img = new_dir / "reg" / "girl" / "r.png"
+    text_cache = new_dir / "train" / "1_data" / "a.png.text.safetensors"
+    reg_text_cache = new_dir / "reg" / "girl" / "r.png.text.safetensors"
+    assert npz.exists() and (new_dir / "train" / "1_data" / "a.r512.npz").exists()
+    assert reg_npz.exists()
+    assert text_cache.exists() and reg_text_cache.exists()
+    # zip 内 npz 按字典序先于图片落盘，没有 touch 修正会比图片旧
+    assert npz.stat().st_mtime >= img.stat().st_mtime
+    assert reg_npz.stat().st_mtime >= reg_img.stat().st_mtime
+
+
+def test_export_bundle_excludes_latent_cache_by_default(isolated, tmp_path: Path) -> None:
+    p, v, train = _make_project_with_train(isolated)
+    (train / "1_data").mkdir(parents=True, exist_ok=True)
+    (train / "1_data" / "a.png").write_bytes(_png())
+    (train / "1_data" / "a.npz").write_bytes(b"fake-latent")
+    (train / "1_data" / "a.png.text.safetensors").write_bytes(b"fake-text")
+
+    dest = tmp_path / "nocache.bundle.zip"
+    with db.connection_for(isolated["db"]) as conn:
+        result = train_io.export_bundle(
+            conn, v["id"], dest, train_io.BundleOptions(train=True),
+        )
+
+    assert result["manifest"]["includes"]["train_latent_cache"] is False
+    assert result["manifest"]["includes"]["reg_latent_cache"] is False
+    assert result["manifest"]["stats"]["latent_cache_count"] == 0
+    assert result["manifest"]["stats"]["text_cache_count"] == 0
+    with zipfile.ZipFile(dest) as zf:
+        assert not [n for n in zf.namelist() if n.endswith(".npz")]
+        assert not [n for n in zf.namelist() if n.endswith(".text.safetensors")]
+
+
+def _named_bundle(tmp_path: Path, *, with_preset: bool) -> Path:
+    bundle = tmp_path / "named.bundle.zip"
+    with zipfile.ZipFile(bundle, "w", compression=zipfile.ZIP_STORED) as zf:
+        zf.writestr(
+            "manifest.json",
+            json.dumps({
+                "schema_version": 2,
+                "source": {
+                    "title": "Named Bundle",
+                    "slug": "named-bundle",
+                    "version_label": "anime-v2",
+                    "preset_name": "style_preset",
+                },
+                "includes": {"train": True, "presets": with_preset},
+            }),
+        )
+        zf.writestr("train/1_data/a.png", b"fake")
+        if with_preset:
+            import yaml
+            from studio.schema import TrainingConfig
+
+            zf.writestr(
+                "presets/style_preset.yaml",
+                yaml.safe_dump(TrainingConfig().model_dump(mode="python"),
+                               allow_unicode=True, sort_keys=False),
+            )
+    return bundle
+
+
+def test_import_bundle_restores_version_and_preset_names(isolated, tmp_path: Path) -> None:
+    bundle = _named_bundle(tmp_path, with_preset=True)
+
+    with db.connection_for(isolated["db"]) as conn:
+        result = train_io.import_bundle(conn, bundle, presets_base=tmp_path / "presets")
+
+    assert result["version"]["label"] == "anime-v2"
+    assert result["version"]["config_name"] == "style_preset"
+    train_dir = versions.version_dir(
+        result["project"]["id"],
+        result["project"]["slug"],
+        "anime-v2",
+    ) / "train"
+    assert (train_dir / "1_data" / "a.png").exists()
+
+
+def test_import_bundle_skips_preset_name_when_preset_missing(isolated, tmp_path: Path) -> None:
+    """bundle 没带预设、本机也没有 → config_name 不回填，避免悬空引用。"""
+    bundle = _named_bundle(tmp_path, with_preset=False)
+
+    with db.connection_for(isolated["db"]) as conn:
+        result = train_io.import_bundle(conn, bundle, presets_base=tmp_path / "presets")
+
+    assert result["version"]["label"] == "anime-v2"
+    assert result["version"]["config_name"] is None
+
+
+def test_import_bundle_rejects_dot_version_label(isolated, tmp_path: Path) -> None:
+    """manifest 不可信：纯点 label（".." == project 根）必须回退 v1，
+    否则 delete_version 时 rmtree 会带走整个项目目录。"""
+    bundle = tmp_path / "dots.bundle.zip"
+    with zipfile.ZipFile(bundle, "w", compression=zipfile.ZIP_STORED) as zf:
+        zf.writestr(
+            "manifest.json",
+            json.dumps({
+                "schema_version": 2,
+                "source": {"title": "Evil", "slug": "evil", "version_label": ".."},
+                "includes": {"train": True},
+            }),
+        )
+        zf.writestr("train/1_data/a.png", b"fake")
+
+    with db.connection_for(isolated["db"]) as conn:
+        result = train_io.import_bundle(conn, bundle, presets_base=tmp_path / "presets")
+
+    assert result["version"]["label"] == "v1"
+    vdir = versions.version_dir(
+        result["project"]["id"], result["project"]["slug"], "v1"
+    )
+    assert (vdir / "train" / "1_data" / "a.png").exists()
 
 
 def _build_bundle_with_config(

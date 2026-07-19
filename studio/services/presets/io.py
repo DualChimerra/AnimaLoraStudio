@@ -15,6 +15,9 @@ from typing import Any
 import yaml
 from pydantic import ValidationError
 
+from ...domain.config_prune import prune_inactive_fields
+from ...domain.config_rules import apply_disable_rule_fixes
+from ...domain.migrations import RETIRED_MONITOR_KEYS
 from ...paths import REPO_ROOT, USER_PRESETS_DIR
 from ...schema import TrainingConfig
 
@@ -76,7 +79,12 @@ def _absolutize_model_paths(data: dict[str, Any]) -> dict[str, Any]:
 
 def _validate_name(name: str) -> None:
     if not NAME_PATTERN.fullmatch(name):
-        raise PresetError(f"非法预设名: {name!r}（只允许字母/数字/下划线/连字符）")
+        raise PresetError(
+            f'Invalid preset name "{name}"; use letters, digits, underscore, or hyphen',
+            code="preset.name_invalid",
+            details={"name": name},
+            http_status=400,
+        )
 
 
 def _preset_path(name: str, base: Path | None = None) -> Path:
@@ -98,13 +106,27 @@ def parse_preset_bytes(raw: bytes, filename: str) -> tuple[dict[str, Any], str]:
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
-        raise PresetError(f"文件不是 UTF-8: {exc}") from exc
+        raise PresetError(
+            "Preset file is not valid UTF-8",
+            code="preset.invalid",
+            details={"reason": str(exc)},
+            http_status=400,
+        ) from exc
     try:
         data = yaml.safe_load(text) or {}
     except yaml.YAMLError as exc:
-        raise PresetError(f"YAML/JSON 解析失败: {exc}") from exc
+        raise PresetError(
+            f"Preset file could not be parsed: {exc}",
+            code="preset.invalid",
+            details={"reason": str(exc)},
+            http_status=400,
+        ) from exc
     if not isinstance(data, dict):
-        raise PresetError("预设格式错误（顶层不是 mapping）")
+        raise PresetError(
+            "Preset file format is invalid",
+            code="preset.invalid",
+            http_status=400,
+        )
     cfg, _, _ = _tolerant_validate(data)
     stem = re.sub(r"\.(ya?ml|json)$", "", filename, flags=re.I)
     suggested = re.sub(r"[^A-Za-z0-9_-]+", "-", stem).strip("-") or "imported"
@@ -140,6 +162,9 @@ def _tolerant_validate(raw: dict[str, Any]) -> tuple[TrainingConfig, list[str], 
             data["attention_backend"] = "none"
     data.pop("flash_attn", None)
     data.pop("xformers", None)
+    # 退役的 monitor server 键：历史 dump 全都写过，静默丢弃不进 dropped 提示。
+    for key in RETIRED_MONITOR_KEYS:
+        data.pop(key, None)
 
     dropped = sorted(k for k in data if k not in known)
     data = {k: v for k, v in data.items() if k in known}
@@ -150,8 +175,14 @@ def _tolerant_validate(raw: dict[str, Any]) -> tuple[TrainingConfig, list[str], 
 
     defaults = TrainingConfig()
     defaulted: list[str] = []
-    # loop bound = data fields + 1 extra round for the InfoNoise compat shim
-    # below (which doesn't consume a field-level slot).
+    # disable_when 规则修复（刀 2 / R2 v2）：钉值/禁值违反按规则修（修复值 =
+    # disable_value，与前端 takeover 语义对齐；含 gate-first「优先关 InfoNoise
+    # 保住用户在 loss_weighting 等的投入」——历史 InfoNoise 专用垫片的泛化）。
+    # 先于逐字段回退跑：规则违反在 pydantic 里是 model-level 错（loc=()），
+    # 逐字段回退定位不到。
+    data, rule_fixed = apply_disable_rule_fixes(data, TrainingConfig)
+    defaulted.extend(rule_fixed)
+
     max_rounds = len(data) + 1
     for _ in range(max_rounds):
         try:
@@ -162,16 +193,14 @@ def _tolerant_validate(raw: dict[str, Any]) -> tuple[TrainingConfig, list[str], 
                 e["loc"][0] for e in exc.errors() if e.get("loc")
             }
             if not bad_fields:
-                # Model-level validator (loc=()) — for the InfoNoise mutex set
-                # (4 _validate_infonoise_*_exclusive), prefer to disable InfoNoise
-                # and preserve the user's investment in loss_weighting / loss_type /
-                # timestep_schedule_shift / noise_enhancement_type. Frontend shows
-                # this as a compat banner via defaulted_fields.
-                if data.get("infonoise_enabled") is True:
-                    data["infonoise_enabled"] = False
-                    defaulted.append("infonoise_enabled")
-                    continue
-                raise PresetError(f"预设校验失败: {exc}") from exc
+                # 剩余 model-level 错 = §6.4 保留手写的校验（区间 / navit 前置），
+                # 无声明式修复策略 —— 按产品语义直接拒绝。
+                raise PresetError(
+                    f"Preset validation failed: {exc}",
+                    code="preset.invalid",
+                    details={"reason": str(exc)},
+                    http_status=400,
+                ) from exc
             for f in bad_fields:
                 data[f] = getattr(defaults, f)
                 defaulted.append(str(f))
@@ -184,10 +213,20 @@ def read_preset(name: str, base: Path | None = None) -> dict[str, Any]:
     """读取并容错校验预设。未知字段丢弃，非法值回退默认。"""
     path = _preset_path(name, base)
     if not path.exists():
-        raise PresetError(f"预设不存在: {name}")
+        raise PresetError(
+            f'Preset "{name}" not found',
+            code="preset.not_found",
+            details={"name": name},
+            http_status=404,
+        )
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     if not isinstance(raw, dict):
-        raise PresetError(f"预设格式错误（顶层不是 mapping）: {name}")
+        raise PresetError(
+            "Preset file format is invalid",
+            code="preset.invalid",
+            details={"name": name},
+            http_status=400,
+        )
     cfg, _, _ = _tolerant_validate(raw)
     return _absolutize_model_paths(cfg.model_dump(mode="python"))
 
@@ -197,12 +236,41 @@ def read_preset_with_warnings(
 ) -> tuple[dict[str, Any], list[str], list[str]]:
     path = _preset_path(name, base)
     if not path.exists():
-        raise PresetError(f"预设不存在: {name}")
+        raise PresetError(
+            f'Preset "{name}" not found',
+            code="preset.not_found",
+            details={"name": name},
+            http_status=404,
+        )
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     if not isinstance(raw, dict):
-        raise PresetError(f"预设格式错误（顶层不是 mapping）: {name}")
+        raise PresetError(
+            "Preset file format is invalid",
+            code="preset.invalid",
+            details={"name": name},
+            http_status=400,
+        )
     cfg, dropped, defaulted = _tolerant_validate(raw)
     return _absolutize_model_paths(cfg.model_dump(mode="python")), dropped, defaulted
+
+
+def render_config_yaml(dumped: dict[str, Any]) -> str:
+    """裁剪后 config dict → yaml 文本。落盘(write_preset / write_version_config)
+    与预览端点(POST /api/schema/preview-yaml)共用的唯一序列化出口 ——
+    R4「预览物理一致」的依据,序列化参数只此一处。"""
+    return yaml.safe_dump(
+        dumped, allow_unicode=True, sort_keys=False, default_flow_style=False
+    )
+
+
+def preview_config_yaml_text(raw: dict[str, Any]) -> str:
+    """当前表单 config → 与保存后落盘文件完全同路径的 yaml 文本(R4)。
+
+    tolerant 语义与保存一致:修复 / 裁剪后的样子就是「点保存后文件的样子」。
+    纯计算不落盘。
+    """
+    cfg, _, _ = _tolerant_validate(raw)
+    return render_config_yaml(prune_inactive_fields(cfg.model_dump(mode="python")))
 
 
 def write_preset(name: str, data: dict[str, Any], base: Path | None = None) -> Path:
@@ -215,20 +283,31 @@ def write_preset(name: str, data: dict[str, Any], base: Path | None = None) -> P
     try:
         cfg = TrainingConfig.model_validate(data)
     except ValidationError as exc:
-        raise PresetError(f"预设校验失败: {exc}") from exc
-    dumped = _absolutize_model_paths(cfg.model_dump(mode="python"))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        yaml.safe_dump(dumped, allow_unicode=True, sort_keys=False, default_flow_style=False),
-        encoding="utf-8",
+        raise PresetError(
+            f"Preset validation failed: {exc}",
+            code="preset.invalid",
+            details={"reason": str(exc)},
+            http_status=400,
+        ) from exc
+    # 落盘前裁掉 show_when 为假的字段（UI 不可见 = 不生效）；read_preset 时
+    # pydantic 把缺失字段补回默认值，API 返回给前端的仍是完整 config。
+    dumped = prune_inactive_fields(
+        _absolutize_model_paths(cfg.model_dump(mode="python"))
     )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(render_config_yaml(dumped), encoding="utf-8")
     return path
 
 
 def delete_preset(name: str, base: Path | None = None) -> None:
     path = _preset_path(name, base)
     if not path.exists():
-        raise PresetError(f"预设不存在: {name}")
+        raise PresetError(
+            f'Preset "{name}" not found',
+            code="preset.not_found",
+            details={"name": name},
+            http_status=404,
+        )
     path.unlink()
 
 
@@ -236,8 +315,18 @@ def duplicate_preset(src: str, dst: str, base: Path | None = None) -> Path:
     src_path = _preset_path(src, base)
     dst_path = _preset_path(dst, base)
     if not src_path.exists():
-        raise PresetError(f"源预设不存在: {src}")
+        raise PresetError(
+            f'Source preset "{src}" not found',
+            code="preset.not_found",
+            details={"name": src},
+            http_status=404,
+        )
     if dst_path.exists():
-        raise PresetError(f"目标已存在: {dst}")
+        raise PresetError(
+            f'Preset "{dst}" already exists',
+            code="preset.exists",
+            details={"name": dst},
+            http_status=409,
+        )
     dst_path.write_bytes(src_path.read_bytes())
     return dst_path
