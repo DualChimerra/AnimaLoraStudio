@@ -5,9 +5,11 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from models.cosmos_predict2_modeling import (
+from modeling.anima.cosmos_predict2_modeling import (
     MiniTrainDIT,
+    set_attention_backend,  # noqa: F401  re-export for callers that import via this module
     set_flash_attn_enabled,  # noqa: F401  re-export for callers that import via this module
+    set_xformers_enabled,  # noqa: F401  re-export for callers that import via this module
     try_flash_attn,
 )
 

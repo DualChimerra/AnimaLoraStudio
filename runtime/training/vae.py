@@ -23,7 +23,6 @@ import torch
 from training.model_loading import (
     _load_safetensors_state_dict,
     _load_weights_best_effort,
-    load_module_from_path,
 )
 
 
@@ -53,11 +52,11 @@ class VAEWrapper:
     _UPSAMPLE = 8
 
     # 整图 decode 峰值显存 ≈ _DECODE_PEAK_BYTES_PER_OUT_PX × (elem/4) × 输出像素 × B × T。
-    # 标定自上游 tools/spike/vae_stress.py（RTX 5090 / WAN VAE dim=96）：fp32 1024²≈10.4G、
+    # 标定自 tools/spike/vae_stress.py（RTX 5090 / WAN VAE dim=96）：fp32 1024²≈10.4G、
     # 1536²≈22.6G；bf16 减半。取 11000（实测 ~9.8k）留 ~12% 余量。
     _DECODE_PEAK_BYTES_PER_OUT_PX = 11000
     # 整图 encode 峰值 ≈ _ENCODE_PEAK_BYTES_PER_IN_PX × (elem/4) × 输入像素 × B × T。
-    # 标定（fp32）：1024²≈5.5G、1536²≈11.6G、2048²≈20.3G。
+    # 标定自 tools/spike/vae_stress.py（fp32）：1024²≈5.5G、1536²≈11.6G、2048²≈20.3G。
     _ENCODE_PEAK_BYTES_PER_IN_PX = 5500
     # auto：当「当前已用 + 预计峰值」超过总显存此比例就分块。崖在 ~50% 而非满显存——
     # fp32 1536²(峰值 22.6G / 总 31.8G = 71%) 即便「装得下」也会因 WDDM 显存换页退化到
@@ -71,12 +70,12 @@ class VAEWrapper:
         self.std = std
         self.scale = [mean, 1.0 / std]
         # VAE 权重精度（mean/std 与 model 同 dtype）。encode/decode 入口按此 cast 输入，
-        # 调用方传其他精度也不会 dtype mismatch。
+        # 这样 fp16 训练 + fp32 VAE 时调用方传 fp16 latent / pixel 也不会 dtype mismatch。
         self.dtype = mean.dtype
         # 分块模式：
         #   auto（默认）= 按 free VRAM 估算，整图峰值逼近可用显存时主动分块；
         #   on          = 始终分块（省显存，慢约 30%）；
-        #   off         = 整图，仅真 OOM 时回退分块（旧行为）。
+        #   off          = 整图，仅真 OOM 时回退分块（旧行为）。
         # auto 解决大显存卡整图 decode 接近占满时触发「系统内存回退」→ 单次 decode
         # 从 <1s 退化到上百秒的卡死（reactive OOM 兜底救不了，因为没抛干净 OOM）。
         self.tiling = str(tiling or "auto").lower().strip()
@@ -85,7 +84,12 @@ class VAEWrapper:
         self._logged_once: set[str] = set()
 
     def _log_once(self, key: str, log_fn, msg: str, *args) -> None:
-        """同一 wrapper 实例下，相同 ``key`` 的日志只发一次（其余静默）。"""
+        """同一 wrapper 实例下，相同 ``key`` 的日志只发一次（其余静默）。
+
+        缓存阶段 transformer/Qwen 已驻留 GPU（models_phase 早于 dataset_phase），
+        free 显存低 → auto 判定对几乎每张图都分块。分块本身是对的（整图 op 会把
+        占用推过 WDDM 显存换页崖），只是逐图重复记日志没有信息量，故去重。
+        """
         if key in self._logged_once:
             return
         self._logged_once.add(key)
@@ -127,7 +131,7 @@ class VAEWrapper:
         z: ``[b, 16, t, H, W]`` latent
         return: ``[b, 3, t, H*8, W*8]``（与底层 `WanVAE_.decode` 一致，未 clamp）
         """
-        z = z.to(self.dtype)  # 对齐 VAE 权重精度（dtype 一致时为 no-op）
+        z = z.to(self.dtype)  # 对齐 VAE 权重精度（fp16 训练 / fp32 VAE；dtype 一致时为 no-op）
         if self.tiling == "on":
             return self._tiled_decode(z)
 
@@ -174,6 +178,8 @@ class VAEWrapper:
             used = total - free
             est = self._est_encode_peak_bytes(pixels)
             if self._should_auto_tile(used, est, total):
+                # debug 级：缓存阶段模型驻留 → free 低 → 几乎张张分块属正常，
+                # 默认不显示，免得「已用 X > 总显存」被误读成显存不足。
                 self._log_once(
                     "auto_encode", logger.debug,
                     "VAE encode 主动分块（tiling=auto）：已用 %.1fG + 预计峰值 %.1fG > 总显存 %.1fG×%.2f",
@@ -272,7 +278,7 @@ class VAEWrapper:
         tile_lh, tile_lw = eff_h // up, eff_w // up
         overlap_lat = (tile_px - stride_px) // up
 
-        # encode 输出通道 = z_dim(16)。WAN VAE 固定 16。
+        # encode 输出通道 = z_dim(16)。从第一个 tile 拿真实通道数更稳，但 WAN VAE 固定 16。
         acc = torch.zeros(b, 16, t, lat_h, lat_w, dtype=torch.float32, device=pixels.device)
         wsum = torch.zeros(1, 1, 1, lat_h, lat_w, dtype=torch.float32, device=pixels.device)
 
@@ -319,109 +325,10 @@ def _cosine_blend_mask(h: int, w: int, *, fade: int, device) -> torch.Tensor:
     return mask_2d[None, None, None, :, :]
 
 
-def ensure_models_namespace(repo_root):
-    """确保 models 命名空间可用。"""
-    repo_root = Path(repo_root)
-    if str(repo_root) not in sys.path:
-        sys.path.insert(0, str(repo_root))
-    if str(repo_root.parent) not in sys.path:
-        sys.path.insert(0, str(repo_root.parent))
-
-
-def load_anima_model(transformer_path, device, dtype, repo_root, *, flash_attn: bool = True):
-    """加载 Anima transformer 模型。
-
-    `flash_attn=False` 显式禁用 flash_attn fast path（attention_backend=xformers/none
-    时由 caller 传入），让 caller 完全决定 attention 实现 —— PR #17 那版默认
-    fn(True) 强制开 flash_attn 不让用户关，与 cfg.attention_backend 解耦不彻底。
-    """
-    from safetensors import safe_open
-
-    ensure_models_namespace(repo_root)
-
-    # 加载模型类
-    cosmos_modeling = load_module_from_path(
-        "cosmos_predict2_modeling",
-        repo_root / "cosmos_predict2_modeling.py",
-    )
-    anima_modeling = load_module_from_path(
-        "anima_modeling",
-        repo_root / "anima_modeling.py",
-    )
-    Anima = anima_modeling.Anima
-
-    # flash_attn 全局开关：set_flash_attn_enabled 内部检查 _FLASH_ATTN_AVAILABLE，
-    # 未装时返回 False 不抛错（idempotent）。用 caller 传入的 flash_attn 而不是
-    # 强制 True，让 attention_backend=none/xformers 时显式关掉。
-    fn = getattr(cosmos_modeling, "set_flash_attn_enabled", None)
-    if fn is not None:
-        try:
-            if fn(flash_attn):
-                logger.info("flash_attn 启用（训练 + sample 走 fast path）")
-            else:
-                logger.info("flash_attn 关闭（attention_backend=%s 或包未安装）",
-                            "flash_attn" if flash_attn else "non-flash")
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("flash_attn 启用失败，继续走 SDPA fallback: %s", exc)
-
-    # 从 checkpoint 推断配置
-    with safe_open(transformer_path, framework="pt", device="cpu") as f:
-        for k in f.keys():
-            if k.endswith("x_embedder.proj.1.weight"):
-                w = f.get_tensor(k)
-                break
-
-    in_channels = (w.shape[1] // 4) - 1  # concat_padding_mask=True
-    model_channels = w.shape[0]
-
-    if model_channels == 2048:
-        num_blocks, num_heads = 28, 16
-    elif model_channels == 5120:
-        num_blocks, num_heads = 36, 40
-    else:
-        raise RuntimeError(f"未知的 model_channels={model_channels}")
-
-    config = dict(
-        max_img_h=1024, max_img_w=1024, max_frames=128,
-        in_channels=in_channels, out_channels=16,
-        patch_spatial=2, patch_temporal=1,
-        concat_padding_mask=True,
-        model_channels=model_channels,
-        num_blocks=num_blocks, num_heads=num_heads,
-        crossattn_emb_channels=1024,
-        pos_emb_cls="rope3d", pos_emb_learnable=True,
-        pos_emb_interpolation="crop",
-        use_adaln_lora=True, adaln_lora_dim=256,
-        rope_h_extrapolation_ratio=4.0 if in_channels == 16 else 3.0,
-        rope_w_extrapolation_ratio=4.0 if in_channels == 16 else 3.0,
-        rope_t_extrapolation_ratio=1.0,
-    )
-
-    model = Anima(**config)
-
-    # 加载权重
-    sd = _load_safetensors_state_dict(Path(transformer_path))
-    info = _load_weights_best_effort(model, sd, label="Transformer")
-
-    # 如果 checkpoint 中完全没有 llm_adapter 权重，随机初始化会把 cross-attn 条件搞乱，直接禁用更安全
-    has_llm_adapter = any("llm_adapter" in k for k in sd.keys())
-    if not has_llm_adapter and hasattr(model, "llm_adapter"):
-        try:
-            model.llm_adapter = None
-            logger.warning("检测到 checkpoint 不包含 llm_adapter 权重：已禁用 llm_adapter（回退为直接使用 Qwen embeddings）")
-        except Exception:
-            pass
-    model = model.to(device=device, dtype=dtype)
-    model.requires_grad_(False)
-
-    logger.info(f"Anima 模型加载完成: {model_channels}ch, {num_blocks} blocks")
-    return model
-
-
 def load_vae(vae_path, device, dtype, repo_root, *, tiling: str = "auto"):
-    """加载 VAE。``tiling``：auto / on / off，见 VAEWrapper。"""
-    wan_vae = load_module_from_path("wan_vae", repo_root / "wan" / "vae2_1.py")
-    WanVAE = wan_vae.WanVAE_
+    """加载 VAE。``tiling`` 透传给 VAEWrapper（auto/on/off）。"""
+    # 正常 import（exec-load 退役，多模型 PR-2a）；repo_root 参数保留但不再使用
+    from modeling.wan.vae2_1 import WanVAE_ as WanVAE
 
     cfg = dict(
         dim=96, z_dim=16, dim_mult=[1, 2, 4, 4],
@@ -447,23 +354,3 @@ def load_vae(vae_path, device, dtype, repo_root, *, tiling: str = "auto"):
 
     logger.info("VAE 加载完成")
     return VAEWrapper(model, mean, std, tiling=tiling)
-
-
-def load_text_encoders(qwen_path, t5_tokenizer_path, device, dtype):
-    """加载文本编码器（Qwen + T5）。"""
-    from transformers import AutoModelForCausalLM, AutoTokenizer, T5Tokenizer
-
-    # Qwen
-    qwen_tokenizer = AutoTokenizer.from_pretrained(qwen_path, trust_remote_code=True)
-    qwen_model = AutoModelForCausalLM.from_pretrained(
-        qwen_path, torch_dtype=dtype, trust_remote_code=True
-    ).to(device).eval().requires_grad_(False)
-
-    # T5 tokenizer
-    if t5_tokenizer_path and Path(t5_tokenizer_path).exists():
-        t5_tokenizer = T5Tokenizer.from_pretrained(t5_tokenizer_path)
-    else:
-        t5_tokenizer = T5Tokenizer.from_pretrained("google/t5-v1_1-xxl")
-
-    logger.info("文本编码器加载完成")
-    return qwen_model, qwen_tokenizer, t5_tokenizer

@@ -18,18 +18,8 @@ import torch
 import torch.nn.functional as F
 
 from training.context import TrainingContext
-from training.leap import (
-    bridge_training_step,
-    lagrange_training_step,
-    leap_training_step,
-    sample_activation_timesteps,
-    sample_two_timesteps,
-    sparse_training_step,
-)
 from training.loss_weighting import compute_loss_weight
-from training.model_loading import forward_with_optional_checkpoint
-from training.navit import navit_packed_forward_and_loss, pack_cross_embeddings
-from training.noise import make_noise
+from training.noise import make_noise, noise_params_from_args
 from training.observability import render_curve_panel
 from training.sample_runner import run_sample
 from training.snapshot import (
@@ -39,12 +29,6 @@ from training.snapshot import (
     write_config_snapshot,
 )
 from training.state import save_training_state
-from training.text_encoding import (
-    _build_qwen_text_from_prompt,
-    encode_qwen,
-    tokenize_t5_comfy_literal,
-    tokenize_t5_weighted,
-)
 from training.timestep_sampling import apply_resolution_shift, latent_token_counts
 from utils.optimizer_utils import get_optimizer_monitor_metrics, optimizer_eval_mode
 
@@ -90,15 +74,96 @@ def _resolve_sra_effective_weight(args: Any, global_step: int, total_steps: int 
     return base * max(0.0, min(1.0, scale))
 
 
+def _compute_loss_weight_from_args(args, t, device):
+    """按 args 的 loss_weighting 配置算 timestep-dependent 权重；scheme=none 返回 None。
+
+    navit（逐图 t）与标准（per-sample t）两条路径共用同一套参数组装，
+    避免加新 scheme 参数时两处漂移。"""
+    scheme = str(getattr(args, "loss_weighting", "none") or "none")
+    if scheme == "none":
+        return None
+    return compute_loss_weight(
+        t,
+        scheme=scheme,
+        min_snr_gamma=float(getattr(args, "min_snr_gamma", 5.0) or 5.0),
+        weight_cap_ratio=float(getattr(args, "weight_cap_ratio", 0.0) or 0.0),
+        detail_inv_t_min=float(getattr(args, "detail_inv_t_min", 1.0) or 1.0),
+        detail_inv_t_max=float(getattr(args, "detail_inv_t_max", 5.0) or 5.0),
+    ).to(device=device, dtype=torch.float32)
+
+
+def _masked_mean(per_element, spatial_mask):
+    """masked loss 的加权均值 reduction：`(loss*mask).sum() / mask.sum()`。
+
+    分母是 mask 元素和而非元素总数 —— 不同 mask 面积的样本在 batch 内权重
+    一致，避免 kohya 朴素 `mean()` 里大 mask 图被隐性降权（设计文档 §8）。
+    per-sample 权重（reg / timestep weighting）已乘在 per_element 上，分母
+    不含它们（与无 mask 时 `mean()` 的分母不含权重对称）。
+    """
+    m = spatial_mask.expand_as(per_element)
+    return (per_element * m).sum() / m.sum().clamp_min(1e-6)
+
+
+def _masked_mean_per_sample(per_element, spatial_mask):
+    """per-sample 版 masked mean（InfoNoise `_raw_mse` 记录用）：对每个样本
+    在非 batch 维上做 mask 加权均值，返回 (B,)。mask 区域的误差不进 I-MMSE
+    统计，否则无监督区域的噪声会污染 CDF。"""
+    m = spatial_mask.expand_as(per_element)
+    dims = list(range(1, per_element.dim()))
+    return (per_element * m).sum(dim=dims) / m.sum(dim=dims).clamp_min(1e-6)
+
+
+def _accumulation_step(batch_idx, dl_len, grad_accum):
+    """返回 (group_size, is_group_end)：该 micro-batch 所在梯度累积组的实际大小，
+    以及它是否是该组最后一个（触发 optimizer.step / zero_grad）。
+
+    对齐 kohya-ss / HF Trainer：
+    - epoch 最后一个 batch 即使凑不满 grad_accum 也 step —— 否则尾部 `len % ga` 个
+      batch 的梯度会被丢（单 epoch）或泄漏进下一 epoch 第一个 step（多 epoch，因为
+      zero_grad 只在 step 后调）。
+    - 不满的尾组按**实际** micro-batch 数归一（group_size），而非恒 ÷grad_accum，
+      免得末步梯度被削弱。
+
+    dl_len=None（dataloader 无 __len__）时回退旧行为（恒 grad_accum，仅整除处 step）。
+    """
+    if dl_len is None or grad_accum <= 1:
+        return grad_accum, (batch_idx + 1) % grad_accum == 0
+    remainder = dl_len % grad_accum
+    in_tail = remainder != 0 and batch_idx >= dl_len - remainder
+    group_size = remainder if in_tail else grad_accum
+    is_group_end = (batch_idx + 1) % grad_accum == 0 or (batch_idx + 1) == dl_len
+    return group_size, is_group_end
+
+
+def _sample_timesteps(timestep_sampler, bs: int, device, latents) -> torch.Tensor:
+    """按 sampler 能力声明按需注入 batch context，避免 family 分支进入共享循环。"""
+    if getattr(timestep_sampler, "requires_token_counts", False):
+        return timestep_sampler.sample(
+            bs,
+            device,
+            token_counts=latent_token_counts(latents),
+        )
+    return timestep_sampler.sample(bs, device)
+
+
 def run(ctx: TrainingContext) -> None:
     """跑训练直到 args.epochs 或 args.max_steps 上限。"""
     args = ctx.args
 
     step_start_time = time.perf_counter()
 
+    # dataloader 每 epoch 的 batch 数（用于尾组「不满也 step」+ 按实际大小归一）。
+    # 少数无 __len__ 的 dataloader 回退旧行为（见 _accumulation_step）。
+    try:
+        dl_len = len(ctx.dataloader)
+        _has_len = True
+    except TypeError:
+        dl_len = None
+        _has_len = False
+
     # timestep shift 分辨率修正（timestep_shift_resolution_aware，opt-in）：多分辨率 /
     # NaViT 原生分辨率下按每图 token 数把 t 推到与基准档等效的噪声水平（SD3 §5.3.2，
-    # s_i = sqrt(n_i/n_base)）。基准档 = resolution：该档 s=1 恒等，全局
+    # s_i = sqrt(n_i/n_base)）。基准档 = resolution 首档：该档 s=1 恒等，全局
     # timestep_shift 仍是"基准档的校准值"；单分辨率训练下本开关是 no-op。
     res_shift_base_tokens = 0
     if bool(getattr(args, "timestep_shift_resolution_aware", False)):
@@ -110,6 +175,10 @@ def run(ctx: TrainingContext) -> None:
             "（基准档 %dpx），作用于采样后的 t。",
             res_shift_base_tokens, _base_reso,
         )
+        if getattr(ctx.timestep_sampler, "applies_resolution_shift", False):
+            raise ValueError(
+                "timestep_shift_resolution_aware 不能与自带分辨率 shift 的 timestep sampler 同时启用"
+            )
 
     for epoch in range(ctx.start_epoch, args.epochs):
         ctx.current_epoch = epoch
@@ -117,6 +186,12 @@ def run(ctx: TrainingContext) -> None:
         epoch_step_count = 0
         if ctx.use_cached and hasattr(ctx.dataloader, "batch_sampler") and hasattr(ctx.dataloader.batch_sampler, "set_epoch"):
             ctx.dataloader.batch_sampler.set_epoch(epoch)
+            # NaViT 打包器每 epoch reshuffle 后包数会变（next-fit/窗口 FFD 顺序依赖），
+            # 须在 set_epoch 后刷新 dl_len，否则 _accumulation_step 的尾组判定沿用
+            # epoch-0 的陈旧包数 → 梯度累积尾组被丢弃或跨 epoch 泄漏。
+            # ARB BucketBatchSampler 包数与 shuffle 无关，刷新是幂等的。
+            if _has_len:
+                dl_len = len(ctx.dataloader)
         for batch_idx, batch in enumerate(ctx.dataloader):
             # 在累积周期开始时记录时间
             if batch_idx % args.grad_accum == 0:
@@ -124,10 +199,10 @@ def run(ctx: TrainingContext) -> None:
 
             captions = batch["captions"]
 
-            # 获取 latents（缓存模式或实时编码 / NaViT 打包列表）
+            # 获取 latents（缓存模式或实时编码）
             navit_latents = None
             if bool(getattr(args, "navit_packing", False)):
-                # NaViT pack：per-image 缓存 latent（尺寸各异 → 保留为列表）。
+                # NaViT pack: per-image cached latents (shapes differ → kept as a list).
                 navit_latents = [
                     l.to(ctx.device, dtype=ctx.dtype) for l in batch["navit_latents"]
                 ]
@@ -142,44 +217,35 @@ def run(ctx: TrainingContext) -> None:
                     latents = ctx.vae.model.encode(pixels_5d, ctx.vae.scale)
                 bs = latents.shape[0]
 
-            # 文本编码
-            with torch.no_grad():
-                if bool(getattr(args, "caption_comfy_encoding", True)):
-                    # Comfy-style（默认）：raw caption 进 Qwen（不清洗）；T5 整段
-                    # 字面 tokenize，不解析权重语法——booru 括号 tag 保持字面，
-                    # 等价于 CUI 用户推理时转义后 T5 看到的序列。与测试出图 /
-                    # 训练预览的 conditioning 同一链路。
-                    qwen_texts = [str(c) for c in captions]
-                    qwen_emb, qwen_attn = encode_qwen(ctx.qwen_model, ctx.qwen_tok, qwen_texts, ctx.device)
-                    t5_ids, t5_attn, t5_w = tokenize_t5_comfy_literal(ctx.t5_tok, captions, max_length=512)
-                else:
-                    # legacy（A/B 对照 / 旧 state 续训）：清洗 Qwen 文本；T5 按
-                    # 逗号逐 tag 分词 + (tag:1.3) 权重语法
-                    qwen_texts = [_build_qwen_text_from_prompt(c) for c in captions]
-                    qwen_emb, qwen_attn = encode_qwen(ctx.qwen_model, ctx.qwen_tok, qwen_texts, ctx.device)
-                    t5_ids, t5_attn, t5_w = tokenize_t5_weighted(ctx.t5_tok, captions, max_length=512)
-                t5_ids = t5_ids.to(ctx.device)
-                t5_attn = t5_attn.to(ctx.device)
-                t5_w = t5_w.to(ctx.device, dtype=torch.float32)
-                # t5_w 透传到 preprocess_text_embeds 内乘到 LLMAdapter 输出上（与
-                # ComfyUI 原生 `comfy/ldm/anima/model.py:198-206` 对齐）。
-                cross = ctx.model.preprocess_text_embeds(qwen_emb, t5_ids, t5xxl_weights=t5_w)
-                if cross.shape[1] < 512:
-                    cross = F.pad(cross, (0, 0, 0, 512 - cross.shape[1]))
-                # KV trim：把 padding 截到最近有效 token bucket（64/128/256/512）
-                # t5_attn=1 表示有效 token；取批次内最大实际长度再 round up
-                if getattr(args, "kv_trim", False):
-                    _actual = int(t5_attn.sum(dim=-1).max().item())
-                    _bucket = 512  # _actual > 512 时兜底（不裁，保持原行为）
-                    for _b in (64, 128, 256, 512):
-                        if _b >= _actual:
-                            _bucket = _b
-                            break
-                    cross = cross[:, :_bucket, :].contiguous()
+            # 文本编码：整块下沉 family（cond 对循环 opaque，03 §2.7-4；
+            # pad-to-512 / kv_trim / LLMAdapter 融合均为 Anima 私货）
+            _enc_kwargs = dict(
+                comfy_encoding=bool(getattr(args, "caption_comfy_encoding", True)),
+                kv_trim=bool(getattr(args, "kv_trim", False)),
+            )
+            if navit_latents is not None:
+                # NaViT 打包需要逐图 attention mask 做 cross-attn padding 截断；
+                # navit 是 Anima 能力位（能力校验 fail-fast），族私有 kwarg 不进 protocol。
+                cross, t5_attn = ctx.family.encode_text_for_batch(
+                    ctx.text_stack, ctx.model, captions,
+                    ctx.device, ctx.dtype,
+                    return_t5_attn=True, **_enc_kwargs,
+                )
+            else:
+                cross = ctx.family.encode_text_for_batch(
+                    ctx.text_stack, ctx.model, captions,
+                    ctx.device, ctx.dtype,
+                    **_enc_kwargs,
+                )
 
             # Flow Matching：统一通过 timestep_sampler plugin 接口采样
             # （baseline = 4 种 mode；adaptive = InfoNoise 等；接口在 ADR 0003 plugin registry）
-            t = ctx.timestep_sampler.sample(bs, ctx.device)
+            t = _sample_timesteps(
+                ctx.timestep_sampler,
+                bs,
+                ctx.device,
+                navit_latents if navit_latents is not None else latents,
+            )
 
             # 分辨率相关 shift 修正（见 run() 顶部 setup）：navit 逐图 latent 各算各的
             # token 数；批量网格 batch 内同尺寸 → 等值向量。后续 record / sigma_t /
@@ -205,49 +271,19 @@ def run(ctx: TrainingContext) -> None:
             )
             ctx.injector.on_step_begin(step_ctx)
 
-            if navit_latents is not None:
-                # ── NaViT / Patch-n-Pack 块对角打包路径 ──
-                # per-image 加噪 + 一次块对角打包前向。InfoNoise 与 navit 互斥（schema
-                # 层 fail-fast），此路径不做 timestep_sampler.record。loss_weighting / 正则集
-                # loss_weight 按 per-image 权重接入（navit 逐图 t 对应 per-sample SNR 语义）。
-                with torch.autocast("cuda", dtype=ctx.dtype):
-                    cross_packed, text_seqlens = pack_cross_embeddings(
-                        cross, t5_attn,
-                        bool(getattr(args, "navit_text_trim_padding", False)),
-                    )
-                    _piw = None
-                    if "loss_weight" in batch:
-                        _piw = batch["loss_weight"].to(ctx.device, dtype=torch.float32)
-                    _lw_scheme = str(getattr(args, "loss_weighting", "none") or "none")
-                    if _lw_scheme != "none":
-                        _lw = compute_loss_weight(
-                            t,
-                            scheme=_lw_scheme,
-                            min_snr_gamma=float(getattr(args, "min_snr_gamma", 5.0) or 5.0),
-                            weight_cap_ratio=float(getattr(args, "weight_cap_ratio", 0.0) or 0.0),
-                            detail_inv_t_min=float(getattr(args, "detail_inv_t_min", 1.0) or 1.0),
-                            detail_inv_t_max=float(getattr(args, "detail_inv_t_max", 5.0) or 5.0),
-                        ).to(device=ctx.device, dtype=torch.float32)
-                        _piw = _lw if _piw is None else _piw * _lw
-                    loss, pred, _navit_info = navit_packed_forward_and_loss(
-                        ctx.model, navit_latents, t, cross_packed, text_seqlens,
-                        ctx.loss_fn,
-                        noise_offset=float(getattr(args, "noise_offset", 0.0) or 0.0),
-                        pyramid_iters=int(getattr(args, "pyramid_noise_iters", 0) or 0),
-                        pyramid_discount=float(getattr(args, "pyramid_noise_discount", 0.35) or 0.35),
-                        use_checkpoint=bool(args.grad_checkpoint),
-                        per_image_weights=_piw,
-                    )
-                    reg = ctx.injector.regularization_loss(step_ctx)
-                    if reg is not None:
-                        loss = loss + reg
-            else:
+            # NaViT 自己在打包前向里逐图加噪（各图各自的 t / 形状），不走批量网格加噪。
+            t_exp = noise = pad_mask = None
+            use_leap_this_step = False
+            if navit_latents is None:
                 t_exp = t.view(-1, 1, 1, 1, 1)
+                # 噪声增强参数按 noise_enhancement_type 分派（审计 #3：残留的
+                # 另一组参数值不参与，防 offset+pyramid 静默叠加）
+                _no, _pi, _pd = noise_params_from_args(args)
                 noise = make_noise(
                     latents,
-                    noise_offset=float(getattr(args, "noise_offset", 0.0) or 0.0),
-                    pyramid_iters=int(getattr(args, "pyramid_noise_iters", 0) or 0),
-                    pyramid_discount=float(getattr(args, "pyramid_noise_discount", 0.35) or 0.35),
+                    noise_offset=_no,
+                    pyramid_iters=_pi,
+                    pyramid_discount=_pd,
                 )
 
                 leap_enabled = bool(getattr(args, "leap_enabled", False))
@@ -263,123 +299,188 @@ def run(ctx: TrainingContext) -> None:
                     random.random() < (0.6 if _leap_ratio is None else float(_leap_ratio))
                 )
 
-                # 前向
-                pad_mask = torch.zeros(bs, 1, latents.shape[-2], latents.shape[-1], device=ctx.device, dtype=ctx.dtype)
-                with torch.autocast("cuda", dtype=ctx.dtype):
-                    if use_leap_this_step:
-                        # ── LeapAlign / FlowBP 轨迹自蒸馏路径（四 variant）──
-                        # 用真实 latent 当 x0，沿解析构造的代理轨迹积分出 x̂0，
-                        # 自蒸馏 loss = MSE(x̂0, 真实 x0)。variant 决定轨迹结构，详见 training/leap.py：
-                        #   original  两步跳 + straight-through connector（K=2，行为同历史版）
-                        #   sparse    K 点 Euler 重放，纯直接项求和（零 connector / 零雅可比）
-                        #   bridge    两步跳 + Euler 重构 connector（无 straight-through 偏差）
-                        #   lagrange  两段跳 + 每段三点 Simpson 积分（6× 前向）
-                        leap_variant = str(getattr(args, "leap_variant", "original") or "original")
-                        _leap_min_gap = float(getattr(args, "leap_min_gap", 0.1) or 0.1)
-                        _leap_tsw = bool(getattr(args, "leap_traj_sim_weighting", False))
-                        _leap_tsm = float(getattr(args, "leap_traj_sim_min", 0.1) or 0.1)
-                        _leap_ngc = float(getattr(args, "leap_nested_grad_coe", 0.3))
-                        if leap_variant == "sparse":
-                            # K 点激活集（K× 前向 + K× activation 显存）
-                            t_steps = sample_activation_timesteps(
-                                bs, ctx.device,
-                                k=int(getattr(args, "leap_activation_k", 3) or 3),
-                                dtype=torch.float32,
-                            )
-                            loss_per_sample = sparse_training_step(
-                                ctx.model, latents, noise, cross, pad_mask, t_steps,
-                                traj_sim_weighting=_leap_tsw, traj_sim_min=_leap_tsm,
-                                use_checkpoint=args.grad_checkpoint,
-                            )
-                        else:
-                            # original / bridge / lagrange 共用两时刻 (k,j) 拓扑
-                            t_k, t_j = sample_two_timesteps(
-                                bs, ctx.device, min_gap=_leap_min_gap, dtype=torch.float32,
-                            )
-                            if leap_variant == "bridge":
-                                _step_fn = bridge_training_step
-                            elif leap_variant == "lagrange":
-                                _step_fn = lagrange_training_step
-                            else:  # original（默认，行为零变化）
-                                _step_fn = leap_training_step
-                            loss_per_sample = _step_fn(
-                                ctx.model, latents, noise, cross, pad_mask, t_k, t_j,
-                                nested_grad_coe=_leap_ngc,
-                                traj_sim_weighting=_leap_tsw, traj_sim_min=_leap_tsm,
-                                use_checkpoint=args.grad_checkpoint,
-                            )
-                        # leap 路径有意跳过两个标准机制（互斥校验已在 TrainingConfig 强制关闭）：
-                        #   - InfoNoise record：双 timestep 与单 t 的 I-MMSE 语义不匹配
-                        #   - loss_weighting：依赖单一 t 算 SNR 权重；leap 自带 traj_sim 加权
-                        # 仍尊重 batch 的 loss_weight（正则集降权），与标准路径一致。
-                        if "loss_weight" in batch:
-                            w = batch["loss_weight"].to(ctx.device).view(-1, *([1] * (loss_per_sample.dim() - 1)))
-                            loss_per_sample = loss_per_sample * w
-                        loss = loss_per_sample.mean()
-                    else:
-                        # ── 标准 rectified flow 路径（零行为变化）──
-                        noisy = (1 - t_exp) * latents + t_exp * noise
-                        target = noise - latents
-                        pred = forward_with_optional_checkpoint(
-                            ctx.model, noisy, t.view(-1, 1), cross, pad_mask,
+                # pad_mask：标准路径已随 forward_train 下沉 family（03-③）；
+                # 这里仅为 leap（Anima-only 门控代码）保留循环侧构造
+                if use_leap_this_step:
+                    pad_mask = torch.zeros(bs, 1, latents.shape[-2], latents.shape[-1], device=ctx.device, dtype=ctx.dtype)
+            denoise_loss_log = None
+            sra_align_loss_log = None
+            sra_weighted_loss_log = None
+            sra_effective_weight_log = None
+            with torch.autocast("cuda", dtype=ctx.dtype):
+                if navit_latents is not None:
+                    # ── NaViT / Patch-n-Pack 块对角打包路径 ──
+                    # per-image noise + one packed forward (block-diagonal self/cross)。
+                    # 标准 path 的 leap / SRA / InfoNoise 假设批量网格 + 逐 batch 单 t，
+                    # 与逐图打包不兼容——互斥校验已 fail-fast 强制关闭。
+                    # loss_weighting / 正则集 loss_weight 不在此列：navit 的逐图 t 正好对应
+                    # per-sample SNR 权重语义，按 per-image 接入（见下方 per_image_weights）。
+                    from training.families.anima.navit import (  # noqa: PLC0415  能力门控（D5），惰性 import
+                        navit_packed_forward_and_loss,
+                        pack_cross_embeddings,
+                    )
+
+                    cross_packed, text_seqlens = pack_cross_embeddings(
+                        cross, t5_attn,
+                        bool(getattr(args, "navit_text_trim_padding", False)),
+                    )
+                    # per-image 权重：正则集 loss_weight × timestep-dependent loss_weighting。
+                    # 与标准路径对称——navit 逐图 t 对应 per-sample SNR 权重（min_snr / cosmap /
+                    # detail_inv_t 按 per-image t 算权重，语义自洽；不像 leap 是多 timestep）。
+                    _piw = None
+                    if "loss_weight" in batch:
+                        _piw = batch["loss_weight"].to(ctx.device, dtype=torch.float32)
+                    _lw = _compute_loss_weight_from_args(args, t, ctx.device)
+                    if _lw is not None:
+                        _piw = _lw if _piw is None else _piw * _lw
+                    _no, _pi, _pd = noise_params_from_args(args)
+                    loss, pred, _navit_info = navit_packed_forward_and_loss(
+                        ctx.model, navit_latents, t, cross_packed, text_seqlens,
+                        ctx.loss_fn,
+                        noise_offset=_no,
+                        pyramid_iters=_pi,
+                        pyramid_discount=_pd,
+                        use_checkpoint=bool(args.grad_checkpoint),
+                        per_image_weights=_piw,
+                    )
+                    denoise_loss_log = loss.detach()
+                elif use_leap_this_step:
+                    # ── LeapAlign / FlowBP 轨迹自蒸馏路径（四 variant）──
+                    # 用真实 latent 当 x0，沿解析构造的代理轨迹积分出 x̂0，
+                    # 自蒸馏 loss = MSE(x̂0, 真实 x0)。variant 决定轨迹结构，详见 training/leap.py：
+                    #   original  两步跳 + straight-through connector（K=2，行为同历史版）
+                    #   sparse    K 点 Euler 重放，纯直接项求和（零 connector / 零雅可比）
+                    #   bridge    两步跳 + Euler 重构 connector（无 straight-through 偏差）
+                    #   lagrange  两段跳 + 每段三点 Simpson 积分（6× 前向）
+                    leap_variant = str(getattr(args, "leap_variant", "original") or "original")
+                    from training.families.anima.leap import (  # noqa: PLC0415  能力门控（D5），惰性 import
+                        bridge_training_step,
+                        lagrange_training_step,
+                        leap_training_step,
+                        sample_activation_timesteps,
+                        sample_two_timesteps,
+                        sparse_training_step,
+                    )
+
+                    _leap_min_gap = float(getattr(args, "leap_min_gap", 0.1) or 0.1)
+                    _leap_tsw = bool(getattr(args, "leap_traj_sim_weighting", False))
+                    _leap_tsm = float(getattr(args, "leap_traj_sim_min", 0.1) or 0.1)
+                    _leap_ngc = float(getattr(args, "leap_nested_grad_coe", 0.3))
+                    if leap_variant == "sparse":
+                        # K 点激活集（K× 前向 + K× activation 显存）
+                        t_steps = sample_activation_timesteps(
+                            bs, ctx.device,
+                            k=int(getattr(args, "leap_activation_k", 3) or 3),
+                            dtype=torch.float32,
+                        )
+                        loss_per_sample = sparse_training_step(
+                            ctx.model, latents, noise, cross, pad_mask, t_steps,
+                            traj_sim_weighting=_leap_tsw, traj_sim_min=_leap_tsm,
                             use_checkpoint=args.grad_checkpoint,
                         )
-                        # 训练 loss 通过 losses/ plugin registry 派发（mse / huber / ...）
-                        loss_per_sample = ctx.loss_fn.compute(pred.float(), target.float(), t)
-                        # 自适应采样器（如 InfoNoise）记录原始 per-sample MSE（不受 huber/loss_weighting 等
-                        # 加工影响）；跟训练 loss 解耦保证 InfoNoise 论文一致性。
-                        # baseline 采样器是 no-op，无需 if 守卫。
-                        # 用 no_grad 避免构造 autograd 元数据（比 .detach() 少一份 grad_fn 开销）。
-                        with torch.no_grad():
-                            _raw_mse_per_sample = F.mse_loss(pred.float(), target.float(), reduction="none")
+                    else:
+                        # original / bridge / lagrange 共用两时刻 (k,j) 拓扑
+                        t_k, t_j = sample_two_timesteps(
+                            bs, ctx.device, min_gap=_leap_min_gap, dtype=torch.float32,
+                        )
+                        if leap_variant == "bridge":
+                            _step_fn = bridge_training_step
+                        elif leap_variant == "lagrange":
+                            _step_fn = lagrange_training_step
+                        else:  # original（默认，行为零变化）
+                            _step_fn = leap_training_step
+                        loss_per_sample = _step_fn(
+                            ctx.model, latents, noise, cross, pad_mask, t_k, t_j,
+                            nested_grad_coe=_leap_ngc,
+                            traj_sim_weighting=_leap_tsw, traj_sim_min=_leap_tsm,
+                            use_checkpoint=args.grad_checkpoint,
+                        )
+                    # leap 路径有意跳过两个标准机制（互斥校验已在 TrainingConfig 强制关闭）：
+                    #   - InfoNoise record：双 timestep 与单 t 的 I-MMSE 语义不匹配
+                    #   - loss_weighting：依赖单一 t 算 SNR 权重；leap 自带 traj_sim 加权
+                    # 仍尊重 batch 的 loss_weight（正则集降权），与标准路径一致。
+                    if "loss_weight" in batch:
+                        w = batch["loss_weight"].to(ctx.device).view(-1, *([1] * (loss_per_sample.dim() - 1)))
+                        loss_per_sample = loss_per_sample * w
+                    loss = loss_per_sample.mean()
+                    denoise_loss_log = loss.detach()
+                else:
+                    # ── 标准 rectified flow 路径（零行为变化）──
+                    noisy = (1 - t_exp) * latents + t_exp * noise
+                    target = noise - latents
+                    pred = ctx.family.forward_train(
+                        ctx.model, noisy, t, cross,
+                        use_checkpoint=args.grad_checkpoint,
+                    )
+                    # masked loss（B2）：dataset 已把 mask 下采样到 latent 分辨率，
+                    # (B,h,w) → (B,1,1,h,w) 广播到 loss 的 (B,C,T,H,W)。
+                    # masked_loss 关闭或本 batch 全无 mask 时为 None（零开销）。
+                    spatial_mask = None
+                    if bool(getattr(args, "masked_loss", False)) and "masks" in batch:
+                        _m = batch["masks"].to(ctx.device, dtype=torch.float32)
+                        spatial_mask = _m.view(bs, 1, 1, *_m.shape[-2:])
+                    # 训练 loss 通过 losses/ plugin registry 派发（mse / huber / ...）
+                    loss_per_sample = ctx.loss_fn.compute(pred.float(), target.float(), t)
+                    # 自适应采样器（如 InfoNoise）记录原始 per-sample MSE（不受 huber/loss_weighting 等
+                    # 加工影响）；跟训练 loss 解耦保证 InfoNoise 论文一致性。
+                    # baseline 采样器是 no-op，无需 if 守卫。
+                    # 用 no_grad 避免构造 autograd 元数据（比 .detach() 少一份 grad_fn 开销）。
+                    with torch.no_grad():
+                        _raw_mse_per_sample = F.mse_loss(pred.float(), target.float(), reduction="none")
+                        if spatial_mask is not None:
+                            # mask 区域无监督，其误差不进 I-MMSE 统计
+                            _raw_mse = _masked_mean_per_sample(_raw_mse_per_sample, spatial_mask)
+                        else:
                             _raw_mse = _raw_mse_per_sample.mean(
                                 dim=list(range(1, _raw_mse_per_sample.dim()))
                             )
-                        # 仅 main 集样本进 InfoNoise schedule 学习：I-MMSE 假设单一数据分布，
-                        # reg 集典型是通用图（booru）vs main 集是单一主题，混入 record 学到的是
-                        # mixture MMSE 不是 mmse_main(t)。用 is_reg flag 而非 loss_weight 阈值
-                        # 是因为 distribution identity 跟 gradient 权重是两条独立轴
-                        # （reg_weight=1.0 时 loss_weight=1.0 但 reg 仍是不同分布）。
-                        # 见 docs/todo/infonoise-reg-policy-reeval.md 未来重评估条件。
-                        if "is_reg" in batch:
-                            _main_mask = ~batch["is_reg"].to(t.device)
-                            if _main_mask.any():
-                                ctx.timestep_sampler.record(t.detach()[_main_mask], _raw_mse[_main_mask])
-                        else:
-                            ctx.timestep_sampler.record(t.detach(), _raw_mse)
-                        # 按样本加权（正则集可降低权重）
-                        if "loss_weight" in batch:
-                            w = batch["loss_weight"].to(ctx.device).view(-1, *([1] * (loss_per_sample.dim() - 1)))
-                            loss_per_sample = loss_per_sample * w
-                        # timestep-dependent loss 权重
-                        lw_scheme = str(getattr(args, "loss_weighting", "none") or "none")
-                        if lw_scheme != "none":
-                            lw = compute_loss_weight(
-                                t,
-                                scheme=lw_scheme,
-                                min_snr_gamma=float(getattr(args, "min_snr_gamma", 5.0) or 5.0),
-                                weight_cap_ratio=float(getattr(args, "weight_cap_ratio", 0.0) or 0.0),
-                                detail_inv_t_min=float(getattr(args, "detail_inv_t_min", 1.0) or 1.0),
-                                detail_inv_t_max=float(getattr(args, "detail_inv_t_max", 5.0) or 5.0),
-                            ).to(device=ctx.device, dtype=torch.float32)
-                            loss_per_sample = loss_per_sample * lw.view(-1, *([1] * (loss_per_sample.dim() - 1)))
+                    # 仅 main 集样本进 InfoNoise schedule 学习：I-MMSE 假设单一数据分布，
+                    # reg 集典型是通用图（booru）vs main 集是单一主题，混入 record 学到的是
+                    # mixture MMSE 不是 mmse_main(t)。用 is_reg flag 而非 loss_weight 阈值
+                    # 是因为 distribution identity 跟 gradient 权重是两条独立轴
+                    # （reg_weight=1.0 时 loss_weight=1.0 但 reg 仍是不同分布）。
+                    # 见 docs/todo/infonoise-reg-policy-reeval.md 未来重评估条件。
+                    if "is_reg" in batch:
+                        _main_mask = ~batch["is_reg"].to(t.device)
+                        if _main_mask.any():
+                            ctx.timestep_sampler.record(t.detach()[_main_mask], _raw_mse[_main_mask])
+                    else:
+                        ctx.timestep_sampler.record(t.detach(), _raw_mse)
+                    # 按样本加权（正则集可降低权重）
+                    if "loss_weight" in batch:
+                        w = batch["loss_weight"].to(ctx.device).view(-1, *([1] * (loss_per_sample.dim() - 1)))
+                        loss_per_sample = loss_per_sample * w
+                    # timestep-dependent loss 权重
+                    lw = _compute_loss_weight_from_args(args, t, ctx.device)
+                    if lw is not None:
+                        loss_per_sample = loss_per_sample * lw.view(-1, *([1] * (loss_per_sample.dim() - 1)))
+                    if spatial_mask is not None:
+                        loss = _masked_mean(loss_per_sample, spatial_mask)
+                    else:
                         loss = loss_per_sample.mean()
+                    denoise_loss_log = loss.detach()
 
-                    # SRA v2 表征对齐 loss（标准路径；leap 路径不适用）
-                    if ctx.sra_aligner is not None and not use_leap_this_step:
-                        sra_weight = _resolve_sra_effective_weight(args, ctx.global_step, ctx.total_steps)
-                        if sra_weight != 0.0:
-                            align_loss = ctx.sra_aligner.compute(
-                                latents,
-                                sample_weight=batch.get("loss_weight"),
-                            )
-                            loss = loss + sra_weight * align_loss
+                # SRA v2 表征对齐 loss（标准路径；leap / navit 路径不适用）
+                if ctx.sra_aligner is not None and not use_leap_this_step and navit_latents is None:
+                    sra_weight = _resolve_sra_effective_weight(args, ctx.global_step, ctx.total_steps)
+                    sra_effective_weight_log = sra_weight
+                    if sra_weight != 0.0:
+                        align_loss = ctx.sra_aligner.compute(
+                            latents,
+                            sample_weight=batch.get("loss_weight"),
+                        )
+                        weighted_align_loss = sra_weight * align_loss
+                        loss = loss + weighted_align_loss
+                        sra_align_loss_log = align_loss.detach()
+                        sra_weighted_loss_log = weighted_align_loss.detach()
+                    else:
+                        sra_weighted_loss_log = loss.new_tensor(0.0).detach()
 
-                    # PR-C：adapter hook — 变体可加正则项（OFT orth penalty /
-                    # Ortho-Hydra balance loss 等）。LyCORIS 返回 None，noop。
-                    reg = ctx.injector.regularization_loss(step_ctx)
-                    if reg is not None:
-                        loss = loss + reg
+                # PR-C：adapter hook — 变体可加正则项（OFT orth penalty /
+                # Ortho-Hydra balance loss 等）。LyCORIS 返回 None，noop。
+                reg = ctx.injector.regularization_loss(step_ctx)
+                if reg is not None:
+                    loss = loss + reg
 
             # NaN 检测：forward 出 NaN 时跳过本 micro-batch
             if not torch.isfinite(loss):
@@ -387,11 +488,18 @@ def run(ctx: TrainingContext) -> None:
                 ctx.optimizer.zero_grad()
                 continue
 
-            # 反向传播
-            loss = loss / args.grad_accum
-            loss.backward()
+            # 反向传播。尾组（len % grad_accum）不满时按实际 micro-batch 数归一，
+            # 且 epoch 末批不满也 step —— 修尾批丢弃 + 跨 epoch 梯度泄漏（见 _accumulation_step）。
+            group_size, is_group_end = _accumulation_step(batch_idx, dl_len, args.grad_accum)
+            loss = loss / group_size
+            if ctx.scaler is not None:
+                ctx.scaler.scale(loss).backward()
+            else:
+                loss.backward()
 
-            if (batch_idx + 1) % args.grad_accum == 0:
+            if is_group_end:
+                if ctx.scaler is not None:
+                    ctx.scaler.unscale_(ctx.optimizer)
                 # NaN 梯度检测：跳过本次 update，清零继续
                 has_nan_grad = any(
                     p.grad is not None and not torch.isfinite(p.grad).all()
@@ -400,11 +508,17 @@ def run(ctx: TrainingContext) -> None:
                 if has_nan_grad:
                     logger.warning(f"step {ctx.global_step}: 梯度含 NaN/Inf，跳过 optimizer.step()")
                     ctx.optimizer.zero_grad()
+                    if ctx.scaler is not None:
+                        ctx.scaler.update()
                     continue
 
                 if ctx.grad_clip > 0:
                     torch.nn.utils.clip_grad_norm_(ctx.trainable_params, max_norm=ctx.grad_clip)
-                ctx.optimizer.step()
+                if ctx.scaler is not None:
+                    ctx.scaler.step(ctx.optimizer)
+                    ctx.scaler.update()
+                else:
+                    ctx.optimizer.step()
                 if ctx.scheduler is not None and ctx.optimizer_type != "prodigy_plus_schedulefree":
                     ctx.scheduler.step()
                 ctx.optimizer.zero_grad()
@@ -414,7 +528,19 @@ def run(ctx: TrainingContext) -> None:
                 ctx.timestep_sampler.maybe_refresh(ctx.global_step)
 
                 # 记录 loss 历史
-                loss_val = float(loss.item() * args.grad_accum)
+                loss_val = float(loss.item() * group_size)
+                denoise_loss_val = (
+                    float(denoise_loss_log.item())
+                    if denoise_loss_log is not None else loss_val
+                )
+                sra_align_loss_val = (
+                    float(sra_align_loss_log.item())
+                    if sra_align_loss_log is not None else None
+                )
+                sra_weighted_loss_val = (
+                    float(sra_weighted_loss_log.item())
+                    if sra_weighted_loss_log is not None else None
+                )
                 epoch_loss_sum += loss_val
                 epoch_step_count += 1
                 if args.loss_curve_steps and len(ctx.loss_history) < args.loss_curve_steps:
@@ -429,12 +555,20 @@ def run(ctx: TrainingContext) -> None:
                 if ctx.monitor_server:
                     try:
                         from train_monitor import update_monitor
+                        monitor_metrics = dict(optimizer_metrics)
+                        monitor_metrics["denoise_loss"] = denoise_loss_val
+                        if sra_align_loss_val is not None:
+                            monitor_metrics["sra_align_loss"] = sra_align_loss_val
+                        if sra_weighted_loss_val is not None:
+                            monitor_metrics["sra_weighted_loss"] = sra_weighted_loss_val
+                        if sra_effective_weight_log is not None:
+                            monitor_metrics["sra_effective_weight"] = float(sra_effective_weight_log)
                         update_monitor(
                             loss=loss_val, lr=lr, epoch=epoch + 1,
                             total_epochs=int(args.epochs or 0),
                             step=ctx.global_step,
                             total_steps=ctx.total_steps, speed=ctx.speed_ema or 0,
-                            optimizer_metrics=optimizer_metrics,
+                            optimizer_metrics=monitor_metrics,
                         )
                     except Exception:
                         pass
@@ -443,9 +577,16 @@ def run(ctx: TrainingContext) -> None:
                 ctx.speed_ema = steps_per_sec if ctx.speed_ema is None else (0.9 * ctx.speed_ema + 0.1 * steps_per_sec)
                 log_payload: dict[str, Any] = {
                     "train/loss": loss_val,
+                    "train/denoise_loss": denoise_loss_val,
                     "train/lr": float(lr),
                     "train/speed_it_s": float(ctx.speed_ema or 0),
                 }
+                if sra_align_loss_val is not None:
+                    log_payload["train/sra_align_loss"] = sra_align_loss_val
+                if sra_weighted_loss_val is not None:
+                    log_payload["train/sra_weighted_loss"] = sra_weighted_loss_val
+                if sra_effective_weight_log is not None:
+                    log_payload["train/sra_effective_weight"] = float(sra_effective_weight_log)
                 if "d" in optimizer_metrics:
                     log_payload["train/optimizer_d"] = float(optimizer_metrics["d"])
                 if "base_lr" in optimizer_metrics:
@@ -474,9 +615,31 @@ def run(ctx: TrainingContext) -> None:
                             from rich.console import Group
                             ctx.live.update(Group(ctx.progress, panel))
                 elif ctx.use_plain:
-                    print(f"epoch {epoch+1}/{args.epochs} step {ctx.global_step} loss={loss_val:.6f} lr={lr:.2e} speed={ctx.speed_ema:.2f} it/s", end="\r", flush=True)
+                    sra_suffix = (
+                        f" denoise={denoise_loss_val:.6f}"
+                        f" sra={sra_align_loss_val:.6f}"
+                        f" sra_w={sra_weighted_loss_val:.6f}"
+                        if sra_align_loss_val is not None and sra_weighted_loss_val is not None
+                        else f" denoise={denoise_loss_val:.6f}"
+                    )
+                    print(f"epoch {epoch+1}/{args.epochs} step {ctx.global_step} loss={loss_val:.6f}{sra_suffix} lr={lr:.2e} speed={ctx.speed_ema:.2f} it/s", end="\r", flush=True)
                 elif args.log_every and ctx.global_step % args.log_every == 0:
-                    print(f"epoch={epoch} step={ctx.global_step} loss={loss_val:.6f} lr={lr:.2e} speed={steps_per_sec:.2f} it/s")
+                    sra_suffix = (
+                        f" denoise={denoise_loss_val:.6f}"
+                        f" sra={sra_align_loss_val:.6f}"
+                        f" sra_w={sra_weighted_loss_val:.6f}"
+                        if sra_align_loss_val is not None and sra_weighted_loss_val is not None
+                        else f" denoise={denoise_loss_val:.6f}"
+                    )
+                    # flush 必须开：studio spawn 的 stdout 是 pipe（全缓冲
+                    # 8KB），不 flush 时 step 行滞留缓冲——短训练/中止的
+                    # task log 里一行都看不到（曾被误判为 krea2 没打日志）
+                    print(
+                        f"epoch={epoch} step={ctx.global_step} "
+                        f"loss={loss_val:.6f}{sra_suffix} lr={lr:.2e} "
+                        f"speed={steps_per_sec:.2f} it/s",
+                        flush=True,
+                    )
 
                 # 按 step 采样（轮换提示词）
                 if args.sample_steps > 0 and ctx.global_step % args.sample_steps == 0:
@@ -521,6 +684,8 @@ def run(ctx: TrainingContext) -> None:
                             ctx.loss_history, monitor_state=monitor_data, scheduler=ctx.scheduler,
                             timestep_sampler=ctx.timestep_sampler,
                             sra_aligner=ctx.sra_aligner,
+                            scaler=ctx.scaler,
+                            model_family=ctx.family.spec.family_id,
                         )
                         # 同时保存 LoRA 权重
                         lora_path = ctx.output_dir / f"{args.output_name}_step{ctx.global_step}.safetensors"
@@ -586,6 +751,8 @@ def run(ctx: TrainingContext) -> None:
                         ctx.loss_history, monitor_state=monitor_data, scheduler=ctx.scheduler,
                         timestep_sampler=ctx.timestep_sampler,
                         sra_aligner=ctx.sra_aligner,
+                        scaler=ctx.scaler,
+                        model_family=ctx.family.spec.family_id,
                     )
                     lora_path = ctx.output_dir / f"{args.output_name}_epoch{ctx.current_epoch}.safetensors"
                     if not lora_path.exists():
@@ -597,8 +764,10 @@ def run(ctx: TrainingContext) -> None:
             # 跟用户主动开的 save_state_every_epochs / save_state_every_steps（多份历史归档）独立，无 args gate ——
             # 这是系统级 pause 后盾，给 handle_interrupt 暂停时引用。
             # 时机：放在 user-opt epoch save 之后，确保即使 user-opt 没开也有 backup。
-            auto_state_path = build_auto_epoch_state_path(ctx.state_dir())
-            auto_config_path = build_auto_epoch_config_path(ctx.state_dir())
+            # Addendum 2：落 auto_state_dir()（task 档案 tasks/<id>/state/；CLI fallback
+            # 到 state_dir()）—— 用户周期 save 仍走上面的 state_dir() 不动。
+            auto_state_path = build_auto_epoch_state_path(ctx.auto_state_dir())
+            auto_config_path = build_auto_epoch_config_path(ctx.auto_state_dir())
             monitor_data = None
             if ctx.monitor_server:
                 try:
@@ -615,6 +784,8 @@ def run(ctx: TrainingContext) -> None:
                     monitor_state=monitor_data, scheduler=ctx.scheduler,
                     timestep_sampler=ctx.timestep_sampler,
                     sra_aligner=ctx.sra_aligner,
+                    scaler=ctx.scaler,
+                    model_family=ctx.family.spec.family_id,
                 )
             ctx.wandb_monitor.upload_state_auto(auto_state_path)
             # 更新 ctx 字段供 handle_interrupt emit pause_state 用

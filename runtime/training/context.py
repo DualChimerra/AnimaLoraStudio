@@ -29,10 +29,15 @@ if TYPE_CHECKING:
 class TrainingContext:
     # ─── bootstrap_phase 填充 ───
     args: Any  # argparse.Namespace
+    family: Any = None  # ModelFamily（多模型 PR-2b；resolve_family(args) 产物）
     config_path: Optional[Path] = None
     config_dir: Optional[Path] = None
     device: str = "cpu"
     dtype: torch.dtype = torch.float32
+    # VAE 工作精度，独立于训练 dtype。fp16 训练时 VAE 仍走 fp32：V100/Turing 等需要
+    # fp16 的卡没有 bf16，而 fp16 VAE encode/decode 易溢出成 NaN（黑图 / latent 全 NaN
+    # → 训练步全跳）。bootstrap 据 dtype 推导；对齐 ComfyUI vae_dtype() 与出图侧 vae_precision。
+    vae_dtype: torch.dtype = torch.float32
     output_dir: Optional[Path] = None
     sample_dir: Optional[Path] = None
     wandb_monitor: Any = None         # observability.WandBMonitor
@@ -41,14 +46,23 @@ class TrainingContext:
     # 时 env 不存在 → None → state_dir() fallback 到 task_unknown 子目录。
     # 注意：跟 progress bar 的 task_id 字段（line ~80）是两回事，故意起不同名字。
     lora_task_id: Optional[int] = None
+    # task 档案根（studio_data/tasks/<id>/）。bootstrap 从 --monitor-state-file
+    # 上跳两层推出；纯 CLI 没传 → None。samples/ state/ 和 prompt 文本缓存
+    # （.text-cache/）都挂在这个根下。
+    task_archive_dir: Optional[Path] = None
+    # ADR 0006 Addendum 2：auto_epoch_state.pt 落 task 档案（studio_data/tasks/
+    # <id>/state/）。bootstrap 从 --monitor-state-file 推出档案根后填充（跟
+    # sample_dir 同一约定）；纯 CLI 没传 → None → auto_state_dir() fallback
+    # 到 state_dir()。
+    task_archive_state_dir: Optional[Path] = None
 
     # ─── models_phase 填充 ───
     repo_root: Optional[Path] = None
     model: Any = None
     vae: Any = None
-    qwen_model: Any = None
-    qwen_tok: Any = None
-    t5_tok: Any = None
+    # 文本编码器持有物（family 私有结构，Anima=(qwen_model, qwen_tok, t5_tok)；
+    # 对循环 opaque —— 多模型 PR-2b D15，替代原 qwen_model/qwen_tok/t5_tok 三字段）
+    text_stack: Any = None
     injector: Any = None
 
     # ─── dataset_phase 填充 ───
@@ -70,7 +84,7 @@ class TrainingContext:
     scheduler: Any = None
     timestep_sampler: Any = None    # training.timestep_samplers.TimestepSamplerProtocol
     loss_fn: Optional["LossProtocol"] = None
-    sra_aligner: Any = None         # training.sra_align.SRAAligner (optional)
+    sra_aligner: Any = None         # training.families.anima.sra_align.SRAAligner (optional)
 
     # ─── resume_phase 填充 ───
     global_step: int = 0
@@ -93,11 +107,12 @@ class TrainingContext:
     # → supervisor 标 canceled 而非 paused（无可恢复进度）。
     last_auto_epoch_state_path: Optional[Path] = None
     last_auto_epoch_config_path: Optional[Path] = None
+    scaler: Any = None  # torch.cuda.amp.GradScaler，仅 fp16 时非 None
 
     # ─── 共用方法 ───
 
     def state_dir(self) -> Path:
-        """周期 save / handle_interrupt 写 state 的目录，per-task 隔离。
+        """用户周期 save（save_state_every*）写 state 的目录，per-task 隔离。
 
         ADR 0006 §5.3：同一 version 下多 task 跑 state 文件互相覆盖是 latent
         bug，加 task_id 子目录隔离。env LORA_TASK_ID 没设（CLI 直接跑）时
@@ -108,6 +123,22 @@ class TrainingContext:
         d = self.output_dir / "state" / f"task_{tid}"
         d.mkdir(parents=True, exist_ok=True)
         return d
+
+    def auto_state_dir(self) -> Path:
+        """auto_epoch_state.pt（系统级恢复点）的落盘目录（ADR 0006 Addendum 2）。
+
+        跟用户周期 save 分家：auto backup 是 task 档案的一部分（同 run.log /
+        monitor/ / samples/），落 `studio_data/tasks/<id>/state/` —— 生命周期
+        跟 task 行绑定（删 task 一并清），且服务端可从 task id 直接推算路径。
+        用户周期 save 是用户产物，留在 state_dir()（version output 树，
+        ResumeFieldPicker 按 version 扫得到）。
+
+        纯 CLI（没传 --monitor-state-file）fallback 到 state_dir()，行为不变。
+        """
+        if self.task_archive_state_dir is not None:
+            self.task_archive_state_dir.mkdir(parents=True, exist_ok=True)
+            return self.task_archive_state_dir
+        return self.state_dir()
 
     def emit(self, msg: str) -> None:
         """打印一条 user-facing 消息，按当前进度显示模式分流。
