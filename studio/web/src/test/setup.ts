@@ -1,9 +1,10 @@
 import '@testing-library/jest-dom/vitest'
 import { vi } from 'vitest'
 
-// 测试环境里默认 locale = zh（i18n/index.ts 读 localStorage 取不到就 fallback 'zh'）。
-// 不 import 这个,useTranslation 返回 raw key,所有断言中文字面量全打挂。
-import '../i18n'
+// 测试环境里默认 locale = zh：上游测试断言中文字面量。本 fork 应用默认 'en'，
+// import 后同步切到 zh（import 会被 hoist，localStorage 预写没用）。
+import i18n from '../i18n'
+void i18n.changeLanguage('zh')
 
 // jsdom 装的 fetch 会真去打网络。tagDict store / 其他 mount-time 请求在测试态下
 // 打 404 是预期分支，但 `network error` 会让 React 报 act() warning。给 fetch 装

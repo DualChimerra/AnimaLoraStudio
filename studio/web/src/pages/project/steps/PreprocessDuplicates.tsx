@@ -67,13 +67,12 @@ export default function PreprocessDuplicatesPage() {
     ])
   })
 
+  // 裁剪/缩放候选已并入分组（更严格的重复判断），故预览名单直接取分组成员即可。
   const previewNames = useMemo(
     () => result
-      ? Array.from(new Set([
-          ...result.groups.flatMap((group) => group.items.map((item) => item.name)),
-          ...result.blur_candidates.map((item) => item.name),
-          ...result.crop_relations.flatMap((item) => [item.source, item.crop_candidate]),
-        ]))
+      ? Array.from(new Set(
+          result.groups.flatMap((group) => group.items.map((item) => item.name)),
+        ))
       : [],
     [result],
   )
@@ -97,13 +96,13 @@ export default function PreprocessDuplicatesPage() {
         t('duplicates.scanDone', {
           groups: next.group_count,
           candidates: next.candidate_count,
-          blur: next.blur_candidate_count,
           crops: next.crop_relation_count,
         }),
         'success',
       )
     } catch (e) {
       toast(String(e), 'error')
+      setLogs((prev) => [...prev, { ts: Date.now(), status: 'error', text: String(e) }])
     } finally {
       setBusy(false)
     }
@@ -157,22 +156,53 @@ export default function PreprocessDuplicatesPage() {
       eyebrow={`Step 2 · ${project.title} / ${activeVersion?.label ?? '—'}`}
       title={t('steps.preprocess.title')}
       subtitle={t('duplicates.subtitle')}
+      actions={
+        <>
+          {/* 扫描重复 = ghost；确认去除 = primary（主操作），放最右 */}
+          <button
+            type="button"
+            onClick={() => void scan()}
+            disabled={busy}
+            className="btn btn-ghost btn-sm"
+          >
+            {busy ? t('duplicates.scanning') : t('duplicates.scanBtn')}
+          </button>
+          <button
+            type="button"
+            onClick={() => void apply()}
+            disabled={busy || selected.size === 0}
+            className="btn btn-primary btn-sm"
+          >
+            {t('duplicates.applyBtn', { n: selected.size })}
+          </button>
+        </>
+      }
+      belowHeader={<PreprocessToolsBar current="dedupe" projectId={project.id} versionId={vid} />}
+      logSources={[
+        scanLogVisible && logs.length > 0 && {
+          key: 'dup_scan',
+          label: t('logDrawer.dupScan'),
+          // 扫描是同步 HTTP + SSE 进度，前端合成状态：跑着 = running，
+          // 否则按最后一条日志判 failed/done。不可取消。
+          status: busy
+            ? ('running' as const)
+            : logs[logs.length - 1]?.status === 'error'
+              ? ('failed' as const)
+              : ('done' as const),
+          lines: logs.map((l) => l.text),
+          startedAt: logs[0] ? logs[0].ts / 1000 : null,
+          finishedAt: busy ? null : logs[logs.length - 1] ? logs[logs.length - 1].ts / 1000 : null,
+        },
+      ]}
     >
       <div className="flex flex-col h-full gap-3 min-h-0">
         <div className="grid gap-3 flex-1 min-h-0" style={{ gridTemplateColumns: '1fr 260px' }}>
           <div className="flex flex-col gap-2 min-h-0 min-w-0">
-            <PreprocessToolsBar current="dedupe" projectId={project.id} versionId={vid} />
             <DuplicateOperationPanel
               options={options}
-              result={result}
-              selectedCount={selected.size}
-              sourceTotal={project.download_image_count}
               busy={busy}
               onOptionsChange={setOptions}
-              onScan={scan}
-              onApply={apply}
             />
-            {scanLogVisible && <DuplicateLogStrip logs={logs} busy={busy} />}
             <DuplicateReviewPanel
               projectId={project.id}
               versionId={vid}
@@ -180,25 +210,6 @@ export default function PreprocessDuplicatesPage() {
               selected={selected}
               busy={busy}
               onSelect={setSelected}
-              onPreview={openPreview}
-            />
-            <QualityReviewPanel
-              projectId={project.id}
-              versionId={vid}
-              result={result}
-              selected={selected}
-              busy={busy}
-              onSelectNames={(names) => {
-                const next = new Set(selected)
-                names.forEach((name) => next.add(name))
-                setSelected(next)
-              }}
-              onToggle={(name) => {
-                const next = new Set(selected)
-                if (next.has(name)) next.delete(name)
-                else next.add(name)
-                setSelected(next)
-              }}
               onPreview={openPreview}
             />
           </div>
@@ -219,6 +230,8 @@ export default function PreprocessDuplicatesPage() {
         <ImagePreviewModal
           src={api.versionThumbUrl(project.id, vid, 'train', filename, folder, 1600)}
           caption={rel}
+          index={previewIdx}
+          total={previewNames.length}
           hasPrev={previewIdx > 0}
           hasNext={previewIdx < previewNames.length - 1}
           onClose={() => setPreviewIdx(null)}
@@ -232,49 +245,31 @@ export default function PreprocessDuplicatesPage() {
   )
 }
 
+// 灵敏度三档：宽松/标准/严格。只对「差分 + 裁剪」判定生效（驱动后端 variant_score
+// + crop_score），严格重复模式下 gate 掉。
+const SENSITIVITY_OPTIONS = [
+  { id: 'loose', key: 'sensitivityLoose' },
+  { id: 'standard', key: 'sensitivityStandard' },
+  { id: 'strict', key: 'sensitivityStrict' },
+] as const
+
 interface DuplicateOperationPanelProps {
   options: DuplicateScanOptions
-  result: DuplicateScanResult | null
-  selectedCount: number
-  sourceTotal?: number | null
   busy: boolean
   onOptionsChange: (next: DuplicateScanOptions) => void
-  onScan: () => void
-  onApply: () => void
 }
 
 function DuplicateOperationPanel({
   options,
-  result,
-  selectedCount,
-  sourceTotal,
   busy,
   onOptionsChange,
-  onScan,
-  onApply,
 }: DuplicateOperationPanelProps) {
   const { t } = useTranslation()
-  const [advancedOpen, setAdvancedOpen] = useState(false)
-  const total = result?.total_images ?? sourceTotal ?? 0
-  const tileGridValue = options.tile_grids.join(',')
-  const [tileGridsText, setTileGridsText] = useState(tileGridValue)
-  useEffect(() => {
-    setTileGridsText(tileGridValue)
-  }, [tileGridValue])
   const patch = <K extends keyof DuplicateScanOptions>(key: K, value: DuplicateScanOptions[K]) => {
     onOptionsChange({ ...options, [key]: value })
   }
-  const resetDefaults = () => {
-    onOptionsChange(DEFAULT_DUPLICATE_OPTIONS)
-  }
-  const updateTileGrids = (value: string) => {
-    setTileGridsText(value)
-    const grids = value
-      .split(',')
-      .map((part) => Number(part.trim()))
-      .filter((n) => Number.isFinite(n) && n > 0)
-    if (grids.length) patch('tile_grids', grids)
-  }
+  // 灵敏度只影响「差分/裁剪」判定；严格重复模式只看全图哈希，故 gate 掉。
+  const sensitivityLocked = options.match_scope !== 'both'
 
   return (
     <section className="flex flex-col gap-1.5 rounded-md border border-subtle bg-surface px-3 py-2.5 shrink-0">
@@ -284,25 +279,6 @@ function DuplicateOperationPanel({
       </h3>
 
       <div className="flex items-center gap-2 text-sm flex-wrap">
-        <label className="flex items-center gap-1.5">
-          <input
-            type="checkbox"
-            checked={options.detect_blur}
-            disabled={busy}
-            onChange={(e) => patch('detect_blur', e.target.checked)}
-          />
-          <span className="text-fg-tertiary">{t('duplicates.detectBlur')}</span>
-        </label>
-        <label className="flex items-center gap-1.5">
-          <input
-            type="checkbox"
-            checked={options.detect_crops}
-            disabled={busy}
-            onChange={(e) => patch('detect_crops', e.target.checked)}
-          />
-          <span className="text-fg-tertiary">{t('duplicates.detectCrops')}</span>
-        </label>
-        <span className="text-dim">·</span>
         <label className="flex items-center gap-1.5">
           <span className="text-fg-tertiary">{t('duplicates.scope')}</span>
           <select
@@ -317,435 +293,35 @@ function DuplicateOperationPanel({
           </select>
         </label>
         <span className="text-dim">·</span>
-        <NumberOption
-          label={t('duplicates.variantScore')}
-          value={options.variant_score}
-          min={40}
-          max={98}
-          step={1}
-          disabled={busy}
-          onChange={(value) => patch('variant_score', value)}
-        />
-        <span className="text-dim">·</span>
-        <NumberOption
-          label={t('duplicates.workers')}
-          value={options.hash_workers}
-          min={1}
-          max={32}
-          step={1}
-          disabled={busy}
-          onChange={(value) => patch('hash_workers', value)}
-          width={56}
-        />
-        <span className="text-fg-secondary text-xs">
-          {t('duplicates.panelSummary', { total, groups: result?.group_count ?? 0, selected: selectedCount })}
-        </span>
-        <div className="flex items-center gap-2 ml-auto shrink-0">
-          <button type="button" onClick={onScan} disabled={busy} className="btn btn-primary btn-sm">
-            {busy ? t('duplicates.scanning') : t('duplicates.scanBtn')}
-          </button>
-          <button
-            type="button"
-            onClick={onApply}
-            disabled={busy || selectedCount === 0}
-            className="btn btn-sm bg-warn-soft text-warn border-warn"
-          >
-            {t('duplicates.applyBtn', { n: selectedCount })}
-          </button>
-        </div>
-      </div>
-
-      <div className="flex flex-col gap-1.5 rounded-sm bg-sunken/40 border border-subtle px-2.5 py-1.5">
-        <div className="flex items-baseline gap-2 text-xs">
-          <button
-            type="button"
-            onClick={() => setAdvancedOpen((v) => !v)}
-            className="flex items-baseline gap-2 text-left bg-transparent border-0 p-0 cursor-pointer flex-1 min-w-0"
-          >
-            <span className="text-fg-tertiary w-3 inline-block shrink-0">{advancedOpen ? '▾' : '▸'}</span>
-            <span className="text-accent shrink-0">✦</span>
-            <span className="font-medium text-fg-secondary shrink-0">{t('duplicates.advanced')}</span>
-            <span className="text-fg-tertiary truncate">{t('duplicates.advancedDesc')}</span>
-          </button>
-          <button
-            type="button"
-            onClick={resetDefaults}
-            disabled={busy}
-            className="btn btn-ghost btn-sm !py-0.5 text-[11px]"
-          >
-            {t('duplicates.resetDefaults')}
-          </button>
-        </div>
-        {advancedOpen && (
-          <div className="flex items-center gap-2 text-sm flex-wrap">
-            <NumberOption label={t('duplicates.hashSize')} value={options.hash_size} min={0} max={2048} step={64} disabled={busy} onChange={(value) => patch('hash_size', value)} width={74} />
-            <NumberOption label={t('duplicates.structure')} value={options.structure_threshold} min={0} max={24} step={1} disabled={busy} onChange={(value) => patch('structure_threshold', value)} width={58} />
-            <NumberOption label={t('duplicates.aspect')} value={options.aspect_tolerance} min={0.005} max={0.2} step={0.005} disabled={busy} onChange={(value) => patch('aspect_tolerance', value)} width={74} />
-            <NumberOption label={t('duplicates.closeTiles')} value={options.min_close_tiles} min={0} max={1} step={0.01} disabled={busy} onChange={(value) => patch('min_close_tiles', value)} width={66} />
-            <NumberOption label={t('duplicates.tileMedian')} value={options.tile_median} min={0} max={40} step={1} disabled={busy} onChange={(value) => patch('tile_median', value)} width={58} />
-            <NumberOption label={t('duplicates.grayClose')} value={options.min_gray_close} min={0} max={1} step={0.01} disabled={busy} onChange={(value) => patch('min_gray_close', value)} width={66} />
-            <NumberOption label={t('duplicates.blurScore')} value={options.blur_score_threshold} min={0} max={1000} step={5} disabled={busy || !options.detect_blur} onChange={(value) => patch('blur_score_threshold', value)} width={72} />
-            <NumberOption label={t('duplicates.blurLocal')} value={options.blur_local_ratio} min={0} max={0.5} step={0.005} disabled={busy || !options.detect_blur} onChange={(value) => patch('blur_local_ratio', value)} width={72} />
-            <NumberOption label={t('duplicates.cropScore')} value={options.crop_score} min={0.3} max={0.98} step={0.01} disabled={busy || !options.detect_crops} onChange={(value) => patch('crop_score', value)} width={66} />
-            <NumberOption label={t('duplicates.cropHash')} value={options.crop_hash_threshold} min={0} max={64} step={1} disabled={busy || !options.detect_crops} onChange={(value) => patch('crop_hash_threshold', value)} width={58} />
-            <NumberOption label={t('duplicates.cropSide')} value={options.crop_max_side} min={128} max={768} step={32} disabled={busy || !options.detect_crops} onChange={(value) => patch('crop_max_side', value)} width={66} />
-            <NumberOption label={t('duplicates.cropWorkers')} value={options.crop_workers} min={1} max={32} step={1} disabled={busy || !options.detect_crops} onChange={(value) => patch('crop_workers', value)} width={56} />
-            <NumberOption label={t('duplicates.cropSegments')} value={options.crop_prefilter_min_segments} min={1} max={8} step={1} disabled={busy || !options.detect_crops} onChange={(value) => patch('crop_prefilter_min_segments', value)} width={54} />
-            <NumberOption label={t('duplicates.cropCoverage')} value={options.crop_prefilter_min_coverage} min={0} max={1} step={0.01} disabled={busy || !options.detect_crops} onChange={(value) => patch('crop_prefilter_min_coverage', value)} width={66} />
-            <NumberOption label={t('duplicates.cropAspectPrefilter')} value={options.crop_prefilter_aspect_tolerance} min={0} max={1.5} step={0.01} disabled={busy || !options.detect_crops} onChange={(value) => patch('crop_prefilter_aspect_tolerance', value)} width={66} />
-            <NumberOption label={t('duplicates.cropCandidateCap')} value={options.crop_max_candidates_per_image} min={0} max={100} step={1} disabled={busy || !options.detect_crops} onChange={(value) => patch('crop_max_candidates_per_image', value)} width={58} />
-            <label className="flex items-center gap-1.5">
-              <span className="text-fg-tertiary">{t('duplicates.tileGrids')}</span>
-              <input
-                className="input input-mono text-sm"
-                style={{ width: 86, padding: '2px 6px' }}
-                value={tileGridsText}
-                disabled={busy}
-                onChange={(e) => updateTileGrids(e.target.value)}
-                onBlur={() => setTileGridsText(options.tile_grids.join(','))}
-              />
-            </label>
-          </div>
-        )}
-      </div>
-    </section>
-  )
-}
-
-function NumberOption({
-  label,
-  value,
-  min,
-  max,
-  step,
-  disabled,
-  onChange,
-  width = 68,
-}: {
-  label: string
-  value: number
-  min: number
-  max: number
-  step: number
-  disabled: boolean
-  onChange: (value: number) => void
-  width?: number
-}) {
-  return (
-    <label className="flex items-center gap-1.5">
-      <span className="text-fg-tertiary">{label}</span>
-      <input
-        type="number"
-        className="input input-mono text-sm"
-        min={min}
-        max={max}
-        step={step}
-        value={value}
-        disabled={disabled}
-        onChange={(e) => onChange(Number(e.target.value))}
-        style={{ width, padding: '2px 6px' }}
-      />
-    </label>
-  )
-}
-
-function DuplicateLogStrip({ logs, busy }: { logs: DuplicateLog[]; busy: boolean }) {
-  const { t } = useTranslation()
-  const lastLine = logs[logs.length - 1]?.text ?? ''
-  return (
-    <details open={busy} className="group rounded-md border border-subtle bg-surface overflow-hidden shrink-0">
-      <summary className="cursor-pointer flex items-center gap-2 list-none px-2.5 py-1.5 text-sm select-none">
-        <span className="inline-block transition-transform group-open:rotate-90 text-fg-tertiary w-3">▸</span>
-        <span className={busy ? 'badge badge-warn' : 'badge badge-neutral'}>
-          {busy ? t('duplicates.scanning') : t('duplicates.logTitle')}
-        </span>
-        <span className="mono truncate flex-1 min-w-0 text-fg-secondary text-xs">{lastLine}</span>
-      </summary>
-      <pre className="px-3 py-2 text-xs font-mono text-fg-secondary bg-sunken max-h-[224px] overflow-auto whitespace-pre-wrap border-t border-subtle m-0">
-        {logs.length === 0 ? t('jobProgress.waitingLogs') : logs.map((line) => line.text).join('\n')}
-      </pre>
-    </details>
-  )
-}
-
-function QualityReviewPanel({
-  projectId,
-  versionId,
-  result,
-  selected,
-  busy,
-  onSelectNames,
-  onToggle,
-  onPreview,
-}: {
-  projectId: number
-  versionId: number
-  result: DuplicateScanResult | null
-  selected: Set<string>
-  busy: boolean
-  onSelectNames: (names: string[]) => void
-  onToggle: (name: string) => void
-  onPreview: (name: string) => void
-}) {
-  const { t } = useTranslation()
-  const blurCandidates = result?.blur_candidates ?? []
-  const cropRelations = result?.crop_relations ?? []
-  const blurNames = useMemo(
-    () => Array.from(new Set((result?.blur_candidates ?? []).map((item) => item.name))),
-    [result],
-  )
-  const cropCandidateNames = useMemo(
-    () => Array.from(new Set((result?.crop_relations ?? []).map((item) => item.crop_candidate))),
-    [result],
-  )
-  const cropSourceNames = useMemo(
-    () => Array.from(new Set((result?.crop_relations ?? []).map((item) => item.source))),
-    [result],
-  )
-  const cropBothNames = useMemo(
-    () => Array.from(new Set((result?.crop_relations ?? []).flatMap((item) => [item.source, item.crop_candidate]))),
-    [result],
-  )
-  const cropRelationKindLabel = (kind: string) => {
-    if (kind === 'crop_upscaled') return t('duplicates.cropKindUpscaled')
-    if (kind === 'crop_same_area') return t('duplicates.cropKindSameArea')
-    return t('duplicates.cropKindSmaller')
-  }
-  const cropLargerLabel = (name: string) => (
-    name === 'same_area'
-      ? t('duplicates.cropLargerSameArea')
-      : t('duplicates.cropLarger', { name })
-  )
-  if (!result || (blurCandidates.length === 0 && cropRelations.length === 0)) return null
-  return (
-    <section className="flex flex-col rounded-md border border-subtle bg-surface overflow-hidden shrink-0">
-      <div className="h-0.5 bg-accent" />
-      <header className="flex flex-wrap items-center gap-2 px-2.5 py-1.5 border-b border-subtle text-sm">
-        <h3 className="font-semibold">{t('duplicates.qualityTitle')}</h3>
-        <span className="text-xs text-fg-tertiary">
-          {t('duplicates.qualitySummary', { blur: blurCandidates.length, crops: cropRelations.length })}
-        </span>
-        <span className="text-xs text-fg-tertiary min-w-full">
-          {t('duplicates.qualityHint')}
-        </span>
-        <div className="flex flex-wrap items-center gap-1.5 min-w-full">
-          <button
-            type="button"
-            disabled={busy || blurNames.length === 0}
-            onClick={() => onSelectNames(blurNames)}
-            className="btn btn-secondary btn-sm !py-0.5 text-[11px]"
-          >
-            {t('duplicates.selectBlur')}
-          </button>
-          <button
-            type="button"
-            disabled={busy || cropCandidateNames.length === 0}
-            onClick={() => onSelectNames(cropCandidateNames)}
-            className="btn btn-secondary btn-sm !py-0.5 text-[11px]"
-          >
-            {t('duplicates.selectCropCandidates')}
-          </button>
-          <button
-            type="button"
-            disabled={busy || cropSourceNames.length === 0}
-            onClick={() => onSelectNames(cropSourceNames)}
-            className="btn btn-secondary btn-sm !py-0.5 text-[11px]"
-          >
-            {t('duplicates.selectCropSources')}
-          </button>
-          <button
-            type="button"
-            disabled={busy || cropBothNames.length === 0}
-            onClick={() => onSelectNames(cropBothNames)}
-            className="btn btn-secondary btn-sm !py-0.5 text-[11px]"
-          >
-            {t('duplicates.selectCropBoth')}
-          </button>
-        </div>
-      </header>
-      <div className="grid gap-2 p-2 lg:grid-cols-2">
-        <QualitySection
-          title={t('duplicates.blurTitle')}
-          empty={t('duplicates.blurEmpty')}
-          items={blurCandidates.map((item) => ({
-            key: item.name,
-            images: [{ name: item.name }],
-            meta: `${item.width}x${item.height} · ${item.filesize_kb}KB`,
-            score: t('duplicates.blurMetric', {
-              score: Math.round(item.blur_score),
-              local: Math.round(item.largest_blur_region_ratio * 100),
-            }),
-            note: item.reason,
-          }))}
-          projectId={projectId}
-          versionId={versionId}
-          selected={selected}
-          busy={busy}
-          onToggle={onToggle}
-          onPreview={onPreview}
-        />
-        <QualitySection
-          title={t('duplicates.cropTitle')}
-          empty={t('duplicates.cropEmpty')}
-          items={cropRelations.map((item, index) => ({
-            key: `${item.source}:${item.crop_candidate}:${index}`,
-            images: [
-              { name: item.source, label: t('duplicates.cropSource') },
-              { name: item.crop_candidate, label: t('duplicates.cropCandidate') },
-            ],
-            meta: `${item.source_width}x${item.source_height} → ${item.crop_width}x${item.crop_height}`,
-            score: t('duplicates.cropMetric', {
-              score: Math.round(item.score * 100),
-              area: Math.round(item.window_ratio * 100),
-            }),
-            note: [
-              cropRelationKindLabel(item.relation_kind),
-              cropLargerLabel(item.larger_image),
-              t('duplicates.cropAreaRatio', { ratio: item.area_ratio.toFixed(2) }),
-              `${item.source_window.x},${item.source_window.y},${item.source_window.width},${item.source_window.height}`,
-              item.note,
-            ].join(' · '),
-          }))}
-          projectId={projectId}
-          versionId={versionId}
-          selected={selected}
-          busy={busy}
-          onToggle={onToggle}
-          onPreview={onPreview}
-        />
-      </div>
-    </section>
-  )
-}
-
-function QualitySection({
-  title,
-  empty,
-  items,
-  projectId,
-  versionId,
-  selected,
-  busy,
-  onToggle,
-  onPreview,
-}: {
-  title: string
-  empty: string
-  items: Array<{ key: string; images: Array<{ name: string; label?: string }>; meta: string; score: string; note: string }>
-  projectId: number
-  versionId: number
-  selected: Set<string>
-  busy: boolean
-  onToggle: (name: string) => void
-  onPreview: (name: string) => void
-}) {
-  return (
-    <div className="rounded-sm border border-subtle bg-sunken/40 overflow-hidden">
-      <div className="px-2 py-1.5 border-b border-subtle text-xs font-medium text-fg-secondary">{title}</div>
-      {items.length === 0 ? (
-        <div className="px-2 py-3 text-xs text-fg-tertiary">{empty}</div>
-      ) : (
-        <div className="max-h-[360px] overflow-y-auto p-2 flex flex-col gap-2">
-          {items.map((item) => (
-            <article key={item.key} className="rounded-sm border border-subtle bg-surface p-1.5">
-              <div className="grid gap-1.5" style={{ gridTemplateColumns: `repeat(${item.images.length}, minmax(0, 1fr))` }}>
-                {item.images.map((image) => (
-                  <QualityImageCell
-                    key={image.name}
-                    projectId={projectId}
-                    versionId={versionId}
-                    name={image.name}
-                    label={image.label}
-                    selected={selected.has(image.name)}
-                    busy={busy}
-                    onToggle={() => onToggle(image.name)}
-                    onPreview={() => onPreview(image.name)}
-                  />
-                ))}
-              </div>
-              <div className="mt-1.5 flex flex-col gap-0.5 text-[11px]">
-                <div className="flex items-center gap-1.5 min-w-0">
-                  <span className="badge badge-neutral shrink-0">{item.score}</span>
-                  <span className="text-fg-tertiary truncate">{item.meta}</span>
-                </div>
-                <code className="mono text-fg-secondary truncate">{item.images.map((image) => image.name).join(' <-> ')}</code>
-                <div className="text-fg-tertiary truncate" title={item.note}>{item.note}</div>
-              </div>
-            </article>
-          ))}
-        </div>
-      )}
-    </div>
-  )
-}
-
-function QualityImageCell({
-  projectId,
-  versionId,
-  name,
-  label,
-  selected,
-  busy,
-  onToggle,
-  onPreview,
-}: {
-  projectId: number
-  versionId: number
-  name: string
-  label?: string
-  selected: boolean
-  busy: boolean
-  onToggle: () => void
-  onPreview: () => void
-}) {
-  const { t } = useTranslation()
-  return (
-    <div
-      className={
-        'rounded-sm border overflow-hidden bg-surface ' +
-        (selected ? 'border-warn ring-2 ring-warn-soft' : 'border-subtle')
-      }
-    >
-      <button
-        type="button"
-        disabled={busy}
-        onClick={onPreview}
-        className="block w-full aspect-square bg-sunken disabled:opacity-70"
-        title={name}
-      >
-        {(() => {
-          const i = name.lastIndexOf('/')
-          const folder = i >= 0 ? name.slice(0, i) : ''
-          const filename = i >= 0 ? name.slice(i + 1) : name
-          return (
-            <img
-              src={api.versionThumbUrl(projectId, versionId, 'train', filename, folder, 256)}
-              alt={name}
-              loading="lazy"
-              decoding="async"
-              className="w-full h-full object-cover"
-            />
-          )
-        })()}
-      </button>
-      <div className="px-1.5 py-1 flex items-center gap-1 min-w-0">
-        <button
-          type="button"
-          onClick={onToggle}
-          disabled={busy}
-          className={`shrink-0 px-1.5 py-0.5 rounded-sm border text-[11px] font-medium ${
-            selected
-              ? 'bg-warn text-white border-warn'
-              : 'bg-ok-soft text-ok border-ok'
-          } disabled:opacity-60 disabled:cursor-not-allowed`}
-          aria-label={`${selected ? t('duplicates.restoreCandidate') : t('duplicates.removeCandidate')} ${name}`}
+        <div
+          className={'flex items-center gap-1.5' + (sensitivityLocked ? ' opacity-50' : '')}
+          title={sensitivityLocked ? t('duplicates.sensitivityLockedHint') : undefined}
         >
-          {selected ? t('duplicates.selectedRemove') : t('duplicates.keep')}
-        </button>
-        {label && <span className="badge badge-neutral shrink-0">{label}</span>}
-        <code className="mono truncate min-w-0 text-[11px]">{name}</code>
+          <span className="text-fg-tertiary">{t('duplicates.sensitivity')}</span>
+          <div className="inline-flex rounded-sm border border-subtle overflow-hidden">
+            {SENSITIVITY_OPTIONS.map(({ id, key }) => {
+              const active = options.sensitivity === id
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  disabled={busy || sensitivityLocked}
+                  onClick={() => patch('sensitivity', id)}
+                  className={
+                    'px-2 py-0.5 text-xs transition-colors disabled:cursor-not-allowed ' +
+                    (active
+                      ? 'bg-accent text-accent-fg font-medium'
+                      : 'bg-transparent text-fg-secondary hover:bg-overlay/40')
+                  }
+                >
+                  {t(`duplicates.${key}`)}
+                </button>
+              )
+            })}
+          </div>
+        </div>
       </div>
-    </div>
+    </section>
   )
 }
 
@@ -772,7 +348,6 @@ function DuplicateStatsSidebar({
         <StatRow label={t('duplicates.statsTotal')} value={total} />
         <StatRow label={t('duplicates.statsGroups')} value={result?.group_count ?? 0} accent={(result?.group_count ?? 0) > 0 ? 'warn' : undefined} />
         <StatRow label={t('duplicates.statsCandidates')} value={candidateCount} accent={candidateCount > 0 ? 'warn' : undefined} />
-        <StatRow label={t('duplicates.statsBlur')} value={result?.blur_candidate_count ?? 0} accent={(result?.blur_candidate_count ?? 0) > 0 ? 'warn' : undefined} />
         <StatRow label={t('duplicates.statsCrops')} value={result?.crop_relation_count ?? 0} accent={(result?.crop_relation_count ?? 0) > 0 ? 'warn' : undefined} />
         <StatRow label={t('duplicates.statsSelected')} value={selectedCount} accent={selectedCount > 0 ? 'err' : undefined} />
         <StatRow label={t('duplicates.statsAfter')} value={remaining} accent="ok" />

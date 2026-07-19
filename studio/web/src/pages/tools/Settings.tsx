@@ -77,6 +77,7 @@ function _makeFallbackPreset(id: string, label: string, output_format: 'json' | 
     concurrency: 1,
     requests_per_second: 0,
     max_requests_per_minute: 0,
+    assist_tagger: '',
     ...extra,
   }
 }
@@ -93,41 +94,54 @@ const DEFAULT_LLM_PRESETS: LLMPreset[] = [
   }),
 ]
 
+const DEFAULT_WANDB_PRESET = {
+  id: 'default',
+  label: 'Default',
+  api_key: '',
+  project: 'AnimaLoraStudio',
+  entity: '',
+  base_url: '',
+  mode: 'online' as const,
+  log_samples: true,
+  sample_max_side: 1216,
+  sample_every_n_steps: 0,
+  upload_model: false,
+  upload_model_policy: 'last' as const,
+  upload_state_manual: false,
+  upload_state_manual_policy: 'last' as const,
+  upload_state_auto: false,
+  upload_state_auto_policy: 'last' as const,
+}
+
 const EMPTY: Secrets = {
-  gelbooru: {
-    user_id: '',
-    api_key: '',
-    save_tags: false,
-    convert_to_png: true,
-    remove_alpha_channel: true,
-  },
+  gelbooru: { user_id: '', api_key: '' },
   danbooru: { username: '', api_key: '', account_type: 'free' },
   download: {
     exclude_tags: [],
     parallel_workers: 4,
     api_rate_per_sec: 2,
     cdn_rate_per_sec: 5,
+    save_tags: false,
+    convert_to_png: true,
+    remove_alpha_channel: true,
   },
+  reg: { default_excluded_tags: [] },
   huggingface: { token: '', endpoint: '' },
   wandb: {
     enabled: false,
-    api_key: '',
-    project: 'AnimaLoraStudio',
-    entity: '',
-    base_url: '',
-    mode: 'online',
-    log_samples: true,
-    sample_max_side: 1216,
-    sample_every_n_steps: 0,
-    upload_model: false,
-    upload_model_policy: 'last',
-    upload_state_manual: false,
-    upload_state_manual_policy: 'last',
-    upload_state_auto: false,
-    upload_state_auto_policy: 'last',
+    current_preset: 'default',
+    presets: [DEFAULT_WANDB_PRESET],
   },
   modelscope: { token: '' },
+  eval_metrics: {
+    clip_model_name: 'openai/clip-vit-base-patch32',
+    dino_model_name: 'facebook/dinov2-small',
+    ccip_model_name: 'ccip-caformer-24-randaug-pruned',
+    enabled_metrics: [],
+    eval_baseline_enabled: true,
+  },
   download_source: 'huggingface',
+  download_sources: {},
   llm_tagger: {
     current_preset: 'style_json',
     presets: [...DEFAULT_LLM_PRESETS],
@@ -135,7 +149,6 @@ const EMPTY: Secrets = {
   wd14: {
     model_id: 'SmilingWolf/wd-eva02-large-tagger-v3',
     model_ids: [...DEFAULT_WD14_MODELS],
-    local_dir: null,
     threshold_general: 0.35,
     threshold_character: 0.85,
     blacklist_tags: [],
@@ -145,10 +158,10 @@ const EMPTY: Secrets = {
     model_id: 'cella110n/cl_tagger',
     model_path: 'cl_tagger_1_02/model.onnx',
     tag_mapping_path: 'cl_tagger_1_02/tag_mapping.json',
-    local_dir: null,
     threshold_general: 0.35,
     threshold_character: 0.6,
     add_copyright_tag: true,
+    add_artist_tag: false,
     add_meta_tag: false,
     add_model_tag: false,
     add_rating_tag: false,
@@ -156,9 +169,26 @@ const EMPTY: Secrets = {
     blacklist_tags: [],
     batch_size: 8,
   },
-  models: { root: null, selected_anima: '1.0', selected_upscaler: '4x-AnimeSharp', auto_sync_paths: true },
-  queue: { allow_gpu_during_train: false },
-  generate: { preview_every_n_steps: 3, attention_backend: 'auto' },
+  models: {
+    root: null,
+    selected_anima: '1.0',
+    selected: { anima: '1.0' },
+    selected_te: {},
+    custom_anima_paths: [],
+    selected_upscaler: '4x-AnimeSharp',
+    auto_sync_paths: true,
+  },
+  queue: { light_tasks_during_train: true },
+  generate: {
+    preview_every_n_steps: 3,
+    attention_backend: 'auto',
+    vae_precision: 'bf16',
+    idle_timeout_minutes: 10,
+    task_timeout_minutes: 0,
+    vram_policy: 'auto',
+    ram_guard: true,
+    save_test_images: false,
+  },
   proxy: {
     enabled: false,
     http_proxy: '',
@@ -388,11 +418,11 @@ export default function SettingsPage() {
       </SettingsSection>
 
       <SettingsSection id="queue" title={t('settings.queueSchedule')}>
-        <SettingsField label={t('settings.allowGpuDuringTrain')}>
+        <SettingsField label={t('settings.lightTasksDuringTrain')}>
           <div className="flex items-center gap-3">
-            <Bool value={draft.queue.allow_gpu_during_train} onChange={(v) => update('queue', 'allow_gpu_during_train', v)} />
+            <Bool value={draft.queue.light_tasks_during_train} onChange={(v) => update('queue', 'light_tasks_during_train', v)} />
             <span className="text-xs text-warn">
-              {t('settings.allowGpuDuringTrainHint')}
+              {t('settings.lightTasksDuringTrainHint')}
             </span>
           </div>
         </SettingsField>
@@ -716,7 +746,7 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
   catalog: ModelsCatalog | null
   busy: Set<string>
   start: (model_id: string, variant?: string) => Promise<void>
-  reloadCatalog: () => Promise<void>
+  reloadCatalog: () => Promise<unknown>
   catalogError: string | null
   t: TFunction
 }) {
@@ -725,16 +755,20 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
   const [serverRoot, setServerRoot] = useState<string | null>(null)
   const [savingRoot, setSavingRoot] = useState(false)
   const [selectedAnima, setSelectedAnima] = useState<string>('1.0')
+  const [selectedKrea2, setSelectedKrea2] = useState<string>('raw')
+  const [selectedKrea2Te, setSelectedKrea2Te] = useState<string>('bf16')
   const [autoSyncPaths, setAutoSyncPaths] = useState<boolean>(true)
   const [savingAutoSync, setSavingAutoSync] = useState(false)
   const [secretsLoaded, setSecretsLoaded] = useState(false)
 
-  // 一次性拉一份 secrets 取 models.root + selected_anima + auto_sync_paths
+  // 一次性拉一份 secrets 取 models.root + selected（按族）+ auto_sync_paths
   // （这几项走独立 PUT，不进 SettingsPage 的全局 dirty 流程）。catalog 由父级注入。
   useEffect(() => {
     void api.getSecrets().then((sec) => {
       setServerRoot(sec.models?.root ?? null)
-      setSelectedAnima(sec.models?.selected_anima ?? '1.0')
+      setSelectedAnima(sec.models?.selected?.anima ?? sec.models?.selected_anima ?? '1.0')
+      setSelectedKrea2(sec.models?.selected?.krea2 ?? 'raw')
+      setSelectedKrea2Te(sec.models?.selected_te?.krea2 ?? 'bf16')
       setAutoSyncPaths(sec.models?.auto_sync_paths ?? true)
       setSecretsLoaded(true)
     }).catch(() => { setSecretsLoaded(true) })
@@ -751,8 +785,34 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
     if (variant === selectedAnima) return
     setSelectedAnima(variant)
     try {
-      await api.updateSecrets({ models: { selected_anima: variant } })
+      await api.updateSecrets({ models: { selected_anima: variant, selected: { anima: variant } } })
       toast(t('settings.mainModelSelected', { name: variant }), 'success')
+      await reloadCatalog()
+    } catch (e) {
+      toast(String(e), 'error')
+      void reloadCatalog()
+    }
+  }
+
+  const pickKrea2 = async (variant: string) => {
+    if (variant === selectedKrea2) return
+    setSelectedKrea2(variant)
+    try {
+      await api.updateSecrets({ models: { selected: { krea2: variant } } })
+      toast(t('settings.mainModelSelected', { name: variant }), 'success')
+      await reloadCatalog()
+    } catch (e) {
+      toast(String(e), 'error')
+      void reloadCatalog()
+    }
+  }
+
+  const pickKrea2Te = async (variant: string) => {
+    if (variant === selectedKrea2Te) return
+    setSelectedKrea2Te(variant)
+    try {
+      await api.updateSecrets({ models: { selected_te: { krea2: variant } } })
+      toast(t('settings.teSelected', { name: variant }), 'success')
       await reloadCatalog()
     } catch (e) {
       toast(String(e), 'error')
@@ -880,6 +940,77 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
               <DownloadButton exists={catalog.anima_vae.exists} status={catalog.downloads.anima_vae?.status} busy={busy.has('anima_vae')} onClick={() => void start('anima_vae')} />
             </div>
           </ModelGroupCard>
+
+          {/* Krea 2 主模型（0.20 第二模型族；VAE 与 Anima 共享 qwen_image_vae） */}
+          {catalog.krea2_main && (
+            <ModelGroupCard
+              title={catalog.krea2_main.name}
+              helpTooltip={<p>{t('settings.krea2MainHelp')}</p>}
+            >
+              <ul className="list-none m-0 p-0 flex flex-col gap-1">
+                {catalog.krea2_main.variants.map((v) => {
+                  const key = `krea2_main:${v.variant}`
+                  const dl = catalog.downloads[key]
+                  const isSel = v.variant === selectedKrea2
+                  const canSelect = v.exists && dl?.status !== 'running'
+                  return (
+                    <li key={v.variant} className={`flex items-center gap-2 text-xs px-1.5 py-1 rounded-sm ${
+                      isSel ? 'bg-accent-soft border border-accent' : 'bg-transparent border border-transparent'
+                    }`}>
+                      <input type="radio" name="krea2_variant" checked={isSel} disabled={!canSelect}
+                        onChange={() => void pickKrea2(v.variant)}
+                        className="shrink-0"
+                        style={{ accentColor: 'var(--accent)' }}
+                        title={canSelect ? t('settings.selectDefaultMainModel') : v.exists ? t('settings.downloadInProgress') : t('settings.downloadRequiredFirst')}
+                      />
+                      <code className="font-mono text-fg-primary w-32 shrink-0 truncate" title={v.variant}>{v.variant}</code>
+                      {v.purpose && (
+                        <span className={`badge badge-${v.purpose === 'training' ? 'accent' : 'neutral'} text-[10px]`}>
+                          {v.purpose === 'training' ? t('settings.purposeTraining') : t('settings.purposeInference')}
+                        </span>
+                      )}
+                      <ModelStatusBadge exists={v.exists} size={v.size} status={dl?.status} />
+                      <span style={{ flex: 1 }} />
+                      <DownloadButton exists={v.exists} status={dl?.status} busy={busy.has(key)} onClick={() => void start('krea2_main', v.variant)} />
+                    </li>
+                  )
+                })}
+              </ul>
+            </ModelGroupCard>
+          )}
+
+          {/* Krea 2 文本编码器 Qwen3-VL：bf16 目录版 + 官方 fp8 单文件版（单选） */}
+          {catalog.krea2_text_encoder && (
+            <ModelGroupCard title={catalog.krea2_text_encoder.name} helpTooltip={<p>{t('settings.krea2TeHelp')}</p>}>
+              <ul className="list-none m-0 p-0 flex flex-col gap-1">
+                {([['bf16', catalog.krea2_text_encoder], ['fp8', catalog.krea2_text_encoder_fp8]] as const).map(([teKey, m]) => {
+                  if (!m) return null
+                  const dlKey = teKey === 'bf16' ? 'krea2_text_encoder' : 'krea2_text_encoder_fp8'
+                  const dl = catalog.downloads[dlKey]
+                  const allExist = m.files.every((f) => f.exists)
+                  const totalSize = m.files.reduce((s, f) => s + f.size, 0)
+                  const isSel = teKey === selectedKrea2Te
+                  const canSelect = allExist && dl?.status !== 'running'
+                  return (
+                    <li key={teKey} className={`flex items-center gap-2 text-xs px-1.5 py-1 rounded-sm ${
+                      isSel ? 'bg-accent-soft border border-accent' : 'bg-transparent border border-transparent'
+                    }`}>
+                      <input type="radio" name="krea2_te" checked={isSel} disabled={!canSelect}
+                        onChange={() => void pickKrea2Te(teKey)}
+                        className="shrink-0"
+                        style={{ accentColor: 'var(--accent)' }}
+                        title={canSelect ? t('settings.selectDefaultTe') : allExist ? t('settings.downloadInProgress') : t('settings.downloadRequiredFirst')}
+                      />
+                      <code className="font-mono text-fg-primary w-32 shrink-0 truncate">{teKey}</code>
+                      <ModelStatusBadge exists={allExist} size={totalSize} status={dl?.status} fileCount={m.files.length} existsCount={m.files.filter((f) => f.exists).length} />
+                      <span style={{ flex: 1 }} />
+                      <DownloadButton exists={allExist} status={dl?.status} busy={busy.has(dlKey)} onClick={() => void start(dlKey)} />
+                    </li>
+                  )
+                })}
+              </ul>
+            </ModelGroupCard>
+          )}
 
           {/* Qwen3 + T5（CLTagger 已挪到「打标」tab） */}
           {(['qwen3', 't5_tokenizer'] as const).map((id) => {

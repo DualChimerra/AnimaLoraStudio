@@ -5,6 +5,7 @@
 // window.onerror 上报时带上（让开发者在 server log 能 join "前端崩前最后一次
 // API 失败" 跟 "用户实际看到的 toast"）。
 import { setLastApiTraceId } from '../lib/errors/report'
+import i18n from '../i18n'
 
 export interface HealthResponse {
   status: string
@@ -41,10 +42,18 @@ export interface SchemaProperty {
   control?: string
   cli_alias?: string
   show_when?: string
+  /** option 级 show_when（多模型 P4-2）：enum 值 → 表达式（语法同 show_when），
+   * 求值为假的选项从下拉隐藏。未列出的选项永远可见；当前已选中的值即使被
+   * 门控也保留显示（表单如实反映 config，越族值由后端校验报错）。 */
+  option_show_when?: Record<string, string>
   /** 当此表达式为真时字段在 UI 上 disabled（值由 SchemaForm 自动回退到 default）。
    * 表达式语法与 show_when 一致：`key==value` / `key!=value`。
    * 例：lr_scheduler 在 optimizer_type=prodigy_plus_schedulefree 时被 disable。 */
   disable_when?: string
+  /** option 级禁值（刀 2 / R2 v2，D4）：enum 值 → 表达式为真时该选项灰显
+   * 不可选（不隐藏——用户能看见为什么不可选，title 显示 disable_hint）。
+   * 后端 _enforce_disable_rules 消费同一份声明做校验。 */
+  option_disable_when?: Record<string, string>
   /** disable_when 触发时写回的值；缺省回退到 default。 */
   disable_value?: unknown
   /** disable_when 触发时显示的提示徽章文本。 */
@@ -88,9 +97,6 @@ export type ConfigData = Record<string, unknown>
 export interface GelbooruConfig {
   user_id: string
   api_key: string
-  save_tags: boolean
-  convert_to_png: boolean
-  remove_alpha_channel: boolean
 }
 
 export interface DanbooruConfig {
@@ -107,6 +113,15 @@ export interface DownloadGlobalConfig {
   api_rate_per_sec: number
   /** PP9 — CDN host (img*.gelbooru.com / cdn.donmai.us) 限速。 */
   cdn_rate_per_sec: number
+  /** 图片入库处理（booru 下载 / reg / 本地上传共用）。 */
+  save_tags: boolean
+  convert_to_png: boolean
+  remove_alpha_channel: boolean
+}
+
+export interface RegConfig {
+  /** 正则集生成全局默认排除 tag；进入某个 build 且无本地选择时作种子填充。 */
+  default_excluded_tags: string[]
 }
 
 export interface HuggingFaceConfig {
@@ -118,8 +133,10 @@ export interface HuggingFaceConfig {
   endpoint: string
 }
 
-export interface WandBConfig {
-  enabled: boolean
+/** 一套 WandB 账号 + 上传策略预设（0.18 预设化，对齐 LLMPreset 模式）。 */
+export interface WandBPreset {
+  id: string
+  label: string
   api_key: string
   project: string
   entity: string
@@ -127,7 +144,7 @@ export interface WandBConfig {
   mode: 'online' | 'offline' | 'disabled'
   /** 是否把训练采样图上传到 wandb.ai，默认开；私有 / NSFW 数据集请关掉。 */
   log_samples: boolean
-  /** 上传前缩到最长边像素，默认 1216 */
+  /** 上传前缩到最长边像素 */
   sample_max_side: number
   /** step 节流：>0 时只在 global_step % N == 0 上传，0 = 不额外节流 */
   sample_every_n_steps: number
@@ -145,9 +162,121 @@ export interface WandBConfig {
   upload_state_auto_policy: 'all' | 'last'
 }
 
+/** 全局 WandB：顶层只留总开关 + 预设切换，字段全在 preset 里。 */
+export interface WandBConfig {
+  enabled: boolean
+  current_preset: string
+  presets: WandBPreset[]
+}
+
 export interface ModelScopeConfig {
   /** 魔搭社区 token。公开模型可不填；私有 / 限速时需要。 */
   token: string
+}
+
+export interface EvalMetricModelsConfig {
+  /** CLIP-T / CLIP-I 默认模型名或本地目录。 */
+  clip_model_name: string
+  /** DINO-I 默认模型名或本地目录。 */
+  dino_model_name: string
+  /** CCIP（anime 角色身份）默认 ONNX 变体名。 */
+  ccip_model_name: string
+  /** 启用哪些评估指标（Settings 复选框）；eval 只算勾选的。 */
+  enabled_metrics: string[]
+  /** 训练后评估额外出一组纯底模(scale=0)对照，各指标给 Δ = checkpoint − baseline。 */
+  eval_baseline_enabled: boolean
+}
+
+/** 评估指标 registry 条目（catalog.eval_metric_catalog）：Settings 复选框列表用。 */
+export interface EvalMetricCatalogItem {
+  key: string
+  label: string
+  runner: string
+  models: string[]
+  default: boolean
+  desc: string
+  note: string
+}
+
+export interface EvalMetricSpec {
+  key: string
+  label: string
+  question: string
+  requires: string[]
+  higher_is_better: boolean
+}
+
+export interface EvalMetricState {
+  key: string
+  label?: string
+  status: 'not_run' | 'pending' | 'running' | 'done' | 'failed' | 'unavailable' | string
+  value: number | null
+  reason?: string
+  question?: string
+  requires?: string[]
+  higher_is_better?: boolean
+  count?: number
+  model_name?: string
+  job_id?: number
+}
+
+export interface EvalMetricResult {
+  schema_version: number
+  has_metrics: boolean
+  status: string
+  run_id: string
+  project_id?: number
+  project_slug?: string
+  version_id?: number
+  version_label?: string
+  created_at?: number | null
+  updated_at?: number | null
+  manifest_digest?: string
+  checkpoint?: {
+    kind?: string
+    label?: string
+    path?: string
+    value?: number
+    mtime?: number
+  }
+  metrics: Record<string, unknown>
+  metric_states: Record<string, EvalMetricState>
+  summary?: Record<string, number>
+  /** 纯底模(lora_scale=0)对照 run；不作为 checkpoint 展示，只供算 Δ。 */
+  baseline?: boolean
+  /** 各指标相对 baseline 的净增益 Δ = checkpoint 值 − baseline 值。 */
+  delta?: Record<string, number>
+  /** baseline 各指标值（参考）。 */
+  baseline_metrics?: Record<string, number>
+  /** 出图阶段（eval_samples run.json）的状态 + 逐图汇总 {total, pending, running,
+   *  done, failed}。出图是评估里最耗时的部分；用它显示「出图 done/total」子进度。 */
+  sample_run?: {
+    run_id: string
+    path?: string
+    status: string
+    summary: Record<string, number>
+    created_at?: number | null
+    updated_at?: number | null
+  }
+}
+
+/** 训练后 / 手动评估的一条 job（inline 训练时评估无 job）。按 run_id 关联到某个
+ *  checkpoint 行，用来取原始日志（含报错）。 */
+export interface EvalJobInfo {
+  id: number
+  kind: 'eval_samples' | 'eval_clip' | 'eval_dino' | string
+  status: string
+  run_id?: string | null
+  checkpoint_path?: string | null
+}
+
+export interface EvalMetricsListResponse {
+  metric_specs: EvalMetricSpec[]
+  cache: {
+    embeddings_dir: string
+    entries: Array<{ key: string; path: string; file_count: number; size_bytes: number }>
+  }
+  results: EvalMetricResult[]
 }
 
 /** Preset messages 序列里的单条 item。
@@ -174,6 +303,8 @@ export interface LLMPreset {
   endpoint: 'chat_completions' | 'responses'
   messages: LLMMessage[]
   output_format: 'json' | 'text'
+  /** Local ONNX tagger used to pre-tag images and inject {{tags}} into messages ('' = off). */
+  assist_tagger: string
   temperature: number
   max_tokens: number
   max_side: number
@@ -207,7 +338,6 @@ export interface WD14Config {
   model_id: string
   /** 候选模型列表；用户在「设置 → WD14」里维护，model_id 必属于该列表。 */
   model_ids: string[]
-  local_dir: string | null
   threshold_general: number
   threshold_character: number
   blacklist_tags: string[]
@@ -219,10 +349,10 @@ export interface CLTaggerConfig {
   model_id: string
   model_path: string
   tag_mapping_path: string
-  local_dir: string | null
   threshold_general: number
   threshold_character: number
   add_copyright_tag: boolean
+  add_artist_tag: boolean
   add_meta_tag: boolean
   add_model_tag: boolean
   add_rating_tag: boolean
@@ -269,6 +399,9 @@ export interface FlashAttnEnv {
   driver_cuda_ver: string | null
   torch_tag: string | null           // torch2.5
   torch_ver: string | null
+  /** 'cu128' / 'cu130' = CUDA 版 torch；'cpu' = CPU 版（装不了 flash_attn）；
+   *  null = torch 未装 / 检测失败。UI 用 'cpu' 触发「先重装 CUDA 版」提示。 */
+  torch_cuda_build: string | null
   platform: 'linux_x86_64' | 'win_amd64' | null
 }
 export interface FlashAttnCandidate {
@@ -292,17 +425,27 @@ export interface FlashAttnInstallResult {
   restart_required: boolean
 }
 
-/** PP8 — onnxruntime 装包状态 + nvidia-smi 检测结果。 */
+/** onnxruntime 装包状态 + nvidia-smi 检测 + 平台标识（前端用来按平台 disable 按钮）。 */
 export interface WD14Runtime {
-  installed: 'onnxruntime' | 'onnxruntime-gpu' | null
+  installed: 'onnxruntime' | 'onnxruntime-gpu' | 'onnxruntime-directml' | null
   version: string | null
   providers: string[]
   cuda_available: boolean
+  /** DirectML EP 可用（Windows + 装了 onnxruntime-directml 时为 true）。 */
+  directml_available: boolean
+  /** 后端 sys.platform：'win32' / 'linux' / 'darwin' 等。Settings UI 据此 disable
+   *  跨平台不可用的按钮（DirectML 仅 Windows；GPU + nvidia-* wheel 仅 Linux 最优）。 */
+  platform: string
   /** 装的包（dist-info）与当前进程已 import 的 .pyd 不一致 → 需重启 Studio。 */
   restart_required: boolean
   /** PP9.5 — InferenceSession 创建时实际 dlopen 报的错（如缺 libcurand.so.10）；
-   *  非 null 表示已自动降级到 CPU EP，UI 应提示用户装 CUDA 库。 */
+   *  非 null 表示已自动降级到 CPU EP，UI 应提示用户装 CUDA 库或换 DirectML。 */
   cuda_load_error: string | null
+  /** torch 的 CUDA 大版本（onnxruntime-gpu build 锚点）：12 / 13 / null。
+   *  装的 ORT build 必须同 major，否则 import 期 dlopen 挂（cu128 torch → 12）。 */
+  torch_cuda_major?: number | null
+  /** 已装 ORT 的 CUDA 大版本与 torch 不一致（如装成 cu13 但 torch 是 cu12）。 */
+  ort_cuda_major_mismatch?: boolean
   /** PP9.5 — torch 自带 CUDA so 预加载结果（Linux 才会 applied=true）。 */
   preload?: {
     applied: boolean
@@ -348,19 +491,29 @@ export interface ModelsConfig {
   auto_sync_paths: boolean
   /** 训练模型根目录；null/空 → 回退 REPO_ROOT/models/（云端机改这里） */
   root: string | null
-  /** 当前默认主模型 variant（1.0 / preview3-base / preview2 / preview）。
+  /** 当前默认主模型：官方 variant key（1.0 / preview3-base / ...）或
+   * custom_anima_paths 里的某个本地 .safetensors 路径。
    * Studio 创建新 version 时把它展开成绝对路径写到 yaml.transformer_path；
    * 已存在 version 不动（保证训练重现性）。 */
   selected_anima: string
+  /** 按模型族保存的默认主模型：variant key 或已注册的本地路径。 */
+  selected: Record<string, string>
+  /** 按模型族选中的文本编码器 variant（krea2："bf16"|"fp8"，缺失=bf16）。
+   * 决定训练新建 version 的 text_encoder_path 默认 + 测试出图 TE 默认。 */
+  selected_te?: Record<string, string>
+  /** 用户注册的本地 custom 主模型（.safetensors 绝对路径）。微调训练 /
+   * 在微调权重上测试出图用；仅登记路径，不下载不复制。 */
+  custom_anima_paths: string[]
   /** 预处理默认放大器：预设 label（"4x-AnimeSharp" 等）或 custom 文件名
    * （"my-anime.pth"）。Preprocess 页和 worker 用它定权重路径。 */
   selected_upscaler: string
 }
 
 export interface QueueConfig {
-  /** PP10.2：默认 false，训练时推迟 tag/reg_build job 避免 GPU OOM。
-   * 用户开后允许 GPU job 与训练并行（自己确认显存够）。 */
-  allow_gpu_during_train: boolean
+  /** R-1 资源档位：exclusive（训练/正则 AI/出图/评估出图）运行时是否放行
+   *  light 档（打标/超分/正则构建/评估指标，小模型）。默认 true。独占档
+   *  永不并行，不受此开关影响。 */
+  light_tasks_during_train: boolean
 }
 
 /** Phase 2 commit 14 — 测试出图 daemon 行为。 */
@@ -371,6 +524,25 @@ export interface GenerateSecretsConfig {
   /** 注意力后端默认值（design 决策：用户配置一次，不每次出图都改）。
    * Generate 页 enqueue 自动注入；Settings 训练 tab 切换。 */
   attention_backend: AttentionBackend
+  /** 测试出图 VAE decode 精度。bf16（默认）对齐 ComfyUI 现代 GPU 的 auto
+   * VAE dtype；fp32 全精度（decode 前 daemon 临时 offload DiT/Qwen 腾显存）。 */
+  vae_precision: 'bf16' | 'fp32'
+  /** 测试出图 daemon 闲置 N 分钟自动卸载模型释放 VRAM。0 = 关闭，模型常驻
+   * 直到手动点"清理显存"。计时只在 idle + 模型 loaded 时跑。 */
+  idle_timeout_minutes: number
+  /** 出图任务超时兜底：超 N 分钟未完成强制终止 daemon 进程（卡死场景普通
+   * 取消无效）。0（默认）= 不开启。 */
+  task_timeout_minutes: number
+  /** 测试出图显存策略（krea2 生效）。auto=按空闲显存决定文本编码器与 DiT
+   * 是否让位；save_vram=强制顺序化（峰值最低，每图多几秒搬运）；
+   * performance=全部常驻显存（峰值最高、零搬运）。 */
+  vram_policy: 'auto' | 'save_vram' | 'performance'
+  /** 系统内存水位保护：加载大模型前可用物理内存不足 6GB 时中止并报错
+   * （默认开）；关闭后继续加载，可能触发整机换页卡顿。 */
+  ram_guard: boolean
+  /** 开后每次出图自动落盘到 studio_data/test/<date>/{single,xy}/image_N.png。
+   * 默认关；compare 模式始终不落盘。 */
+  save_test_images: boolean
 }
 
 export interface ProxyConfig {
@@ -404,12 +576,15 @@ export interface Secrets {
   gelbooru: GelbooruConfig
   danbooru: DanbooruConfig
   download: DownloadGlobalConfig
+  reg: RegConfig
   huggingface: HuggingFaceConfig
   wandb: WandBConfig
   modelscope: ModelScopeConfig
-  /** 模型下载源：'huggingface'（默认）或 'modelscope'。
-   *  选 modelscope 时，有映射的模型走魔搭 CLI 下载；无映射的自动回退 HF。 */
+  eval_metrics: EvalMetricModelsConfig
+  /** 旧的全局下载源（已退役为迁移种子，无 UI）。新模型按类型在 download_sources 里各自选。 */
   download_source: string
+  /** 按类型下载源：{training|wd14|upscaler: 'huggingface'|'modelscope'}。固定 HF 的类型不在内。 */
+  download_sources: Record<string, string>
   // JoyCaption 已合并为 llm_tagger 的 builtin preset
   llm_tagger: LLMTaggerConfig
   wd14: WD14Config
@@ -433,23 +608,44 @@ export interface ModelFileStatus {
   mtime: number
 }
 
-export interface AnimaVariantInfo extends ModelFileStatus {
+/** 族主模型的官方 variant（多模型 P4-5 统一形状；anima 无 purpose/repo 细分）。 */
+export interface FamilyMainVariantInfo extends ModelFileStatus {
   variant: string
   is_latest: boolean
   target_path: string
-  /** 'preset' = 可下载的官方 variant；'custom' = diffusion_models/ 里的本地 checkpoint。
-   *  旧后端不返回此字段时按 'preset' 处理（向后兼容）。 */
+  /** 'preset' = 可下载的官方 variant；'custom' = 本地 checkpoint 候选。 */
   kind?: 'preset' | 'custom'
   is_current?: boolean
+  /** variant 级 repo（krea2：Raw/Turbo 各自的 HF 仓库）；anima 用 section repo。 */
+  repo?: string
+  /** 用途声明（krea2：raw=training / turbo=inference）。 */
+  purpose?: 'training' | 'inference'
+  size_estimate?: number
 }
 
-export interface AnimaMainCatalog {
-  id: 'anima_main'
+/** 用户注册的本地 custom 主模型（PathPicker 选盘上已有的 .safetensors）。 */
+export interface CustomModelInfo extends ModelFileStatus {
+  /** 注册的绝对路径（也是选中时写入 selected_anima 的值）。 */
+  path: string
+  /** 文件名，列表展示用。 */
+  name: string
+}
+
+/** 族主模型 catalog 区块的统一形状（anima_main / krea2_main 同构，P4-5）。 */
+export interface FamilyMainCatalog {
+  id: string
   name: string
   description: string
   repo: string
-  variants: AnimaVariantInfo[]
+  variants: FamilyMainVariantInfo[]
+  /** 本地注册的 custom 主模型列表。 */
+  custom: CustomModelInfo[]
+  /** 当前选中的主模型：variant key 或 custom 路径。 */
+  selected: string
   latest: string
+  /** 许可展示（krea2 社区许可；anima 无）。 */
+  license?: string
+  license_url?: string
 }
 
 export interface AnimaVaeCatalog extends ModelFileStatus {
@@ -461,11 +657,13 @@ export interface AnimaVaeCatalog extends ModelFileStatus {
 }
 
 export interface ModelDirCatalog {
-  id: 'qwen3' | 't5_tokenizer'
+  id: 'qwen3' | 't5_tokenizer' | 'krea2_text_encoder' | 'krea2_text_encoder_fp8'
   name: string
   description: string
   repo: string
   target_dir: string
+  /** krea2_text_encoder 专属：选中的 TE variant（'bf16' | 'fp8'）。 */
+  selected?: string
   files: Array<{ name: string; exists: boolean; size: number; mtime: number }>
 }
 
@@ -489,9 +687,13 @@ export interface WD14Catalog {
 
 export interface CLTaggerVariantInfo {
   label: string
+  model_id: string
   model_path: string
   tag_mapping_path: string
+  description?: string
   is_current: boolean
+  target_path?: string
+  version_dir?: string
   exists: boolean
   size: number
   files: Array<{ name: string; exists: boolean; size: number; mtime: number }>
@@ -508,6 +710,23 @@ export interface CLTaggerCatalog {
   variants: CLTaggerVariantInfo[]
 }
 
+export interface EvalVariantInfo {
+  kind: 'clip' | 'dino'
+  model_id: string
+  target_path: string
+  exists: boolean
+  size: number
+  /** 下载前的预估大小（bytes）；未知 model_id 为 0。 */
+  size_estimate: number
+}
+
+export interface EvalMetricsCatalog {
+  id: 'eval_metrics'
+  name: string
+  description: string
+  variants: EvalVariantInfo[]
+}
+
 export interface ModelDownloadStatus {
   key: string
   status: 'pending' | 'running' | 'done' | 'failed'
@@ -515,6 +734,44 @@ export interface ModelDownloadStatus {
   finished_at: number | null
   message: string
   log_tail: string[]
+}
+
+/** 统一模型来源候选行（catalog.model_sources[domain]，后端拼好能力位）。
+ *  docs/design/model-source-unification.md §6。 */
+export interface ModelSourceRow {
+  kind: 'preset' | 'download' | 'local' | 'scanned'
+  /** 用户候选的原始存储记录（DELETE 的身份键）；preset / scanned 行为 null。 */
+  candidate: ModelSourceCandidate | null
+  /** 写进该 domain 选中值字段的值（repo id / 绝对路径 / 文件名）。 */
+  value: string
+  label: string
+  /** 行副标题（放大器描述 / 自定义候选的 repo 来源等）。 */
+  description: string
+  /** POST /api/models/download 的 model_id；local 候选为 null（不可下载）。 */
+  download_id: string | null
+  /** 下载触发的 variant 参数（默认 = value；主模型/放大器候选 = repo 内文件路径）。 */
+  download_variant: string | null
+  /** catalog.downloads 的 status key；local 候选为 null。 */
+  status_key: string | null
+  exists: boolean
+  size: number
+  files?: Array<{ name: string; exists: boolean; size: number; mtime: number }> | null
+  size_estimate: number
+  is_current: boolean
+  /** 内置 preset 不可移除（保护默认）。 */
+  removable: boolean
+  /** local 候选永不从 UI 删除磁盘文件。 */
+  deletable: boolean
+  extra: Record<string, string>
+}
+
+/** POST/DELETE /api/model-sources/{domain} 的候选描述。 */
+export interface ModelSourceCandidate {
+  kind: 'download' | 'local'
+  repo?: string
+  filename?: string
+  path?: string
+  extra?: Record<string, string>
 }
 
 export interface UpscalerVariant {
@@ -544,15 +801,36 @@ export interface UpscalersCatalog {
   variants: UpscalerVariant[]
 }
 
+export interface FamilySwitchChange {
+  field: string
+  from: unknown
+  to: unknown
+}
+
+export interface FamilySwitchResponse {
+  config: ConfigData
+  changes: FamilySwitchChange[]
+}
+
 export interface ModelsCatalog {
   models_root: string
-  anima_main: AnimaMainCatalog
+  anima_main: FamilyMainCatalog
   anima_vae: AnimaVaeCatalog
   qwen3: ModelDirCatalog
   t5_tokenizer: ModelDirCatalog
+  krea2_main: FamilyMainCatalog
+  krea2_text_encoder: ModelDirCatalog
+  krea2_text_encoder_fp8: ModelDirCatalog
   wd14: WD14Catalog
   cltagger: CLTaggerCatalog
+  eval_metrics?: EvalMetricsCatalog
+  /** 评估指标 registry（Settings 复选框列表）。 */
+  eval_metric_catalog?: EvalMetricCatalogItem[]
   upscalers?: UpscalersCatalog
+  /** 统一来源候选行（泛化候选卡消费；键 = domain：wd14 / eval_clip / ...）。 */
+  model_sources?: Record<string, ModelSourceRow[]>
+  /** 按类型的下载源选项：current = 当前选中，available = 可选源（长度 1 = 固定单源）。 */
+  download_source_options: Record<string, { current: string; available: string[] }>
   downloads: Record<string, ModelDownloadStatus>
 }
 
@@ -598,6 +876,8 @@ export interface VersionStats {
   train_image_count: number
   tagged_image_count: number
   train_folders: Array<{ name: string; image_count: number }>
+  validation_image_count: number
+  validation_tagged_count: number
   reg_image_count: number
   reg_meta_exists: boolean
   has_output: boolean
@@ -629,8 +909,12 @@ export interface ProjectSummary {
   /** ADR-0007 §11.8-E: 项目卡片右上角 status badge / 卡片显 version 名（list 端点 enrich）。 */
   active_version_label: string | null
   active_version_status: VersionStatus | null
+  /** v12: preparing 时的 phase cursor（badge 显示"准备中 · 打标"）；无 active version 为 null。 */
+  active_version_phase: VersionPhase | null
   created_at: number
   updated_at: number
+  /** v12: 非 null = 已归档（软隐藏）。list 归档/活跃都返回，切分在前端。 */
+  archived_at: number | null
   note: string | null
   download_image_count?: number
   preprocess_image_count?: number
@@ -645,7 +929,10 @@ export interface ProjectDetail extends ProjectSummary {
 // ---- jobs (PP2) -----------------------------------------------------------
 
 export type JobStatus = 'pending' | 'running' | 'done' | 'failed' | 'canceled'
-export type JobKind = 'download' | 'preprocess' | 'reg_build' | 'upload'
+export type JobKind =
+  | 'download' | 'preprocess' | 'tag' | 'reg_build'
+  | 'eval_samples' | 'eval_clip' | 'eval_dino' | 'eval_tag' | 'eval_ccip'
+  | 'upload'
 
 export interface Job {
   id: number
@@ -655,6 +942,8 @@ export interface Job {
   params: string
   params_decoded?: Record<string, unknown> | null
   status: JobStatus
+  /** v16 — 入队时间；老作业 NULL（入队时刻未记录，UI 显示 —）。 */
+  created_at?: number | null
   started_at: number | null
   finished_at: number | null
   pid: number | null
@@ -703,6 +992,18 @@ export interface CropWorkspaceItem {
   mtime: number
   size: number
   processed: boolean
+  /** 训练 mask sidecar 的 mtime；无 mask 时 null。兼作角标判据 + cache-buster。 */
+  mask_mtime: number | null
+}
+
+/** 涂抹保存结果：产物统一 .png，源非 png 时 name 会改（X.jpg → X.png）。 */
+export interface InpaintSaveResult {
+  name: string
+  origin: string
+  mtime: number
+  size: number
+  w: number
+  h: number
 }
 
 /** 总览页「已删除」tab 一项：被去重审核标记的 entry。物理图仍在 download/{source}。 */
@@ -781,11 +1082,26 @@ export interface CurationItem {
 }
 
 export interface CurationView {
-  left: CurationItem[] // download − train
+  left: CurationItem[] // download − train − validation
   right: Record<string, CurationItem[]> // folder → items
   download_total: number
   train_total: number
   folders: string[]
+}
+
+/** held-out 验证集里的一张图：扁平列表（无文件夹概念），但带物理 `folder`
+ *  供缩略图寻址（version thumb 的 validation bucket 需要）与精确删除。 */
+export interface ValidationItem {
+  name: string
+  mtime: number
+  folder: string
+}
+
+export interface CurationValidationView {
+  left: CurationItem[] // download − train − validation（与训练集同候选池）
+  right: ValidationItem[] // validation 全量扁平
+  download_total: number
+  val_total: number
 }
 
 export interface CopyResult {
@@ -794,29 +1110,13 @@ export interface CopyResult {
   missing: string[]
 }
 
+/** 去重扫描请求体。算法内部还有一批阈值/性能参数，但都已固化为后端常量，
+ *  UI 只暴露这两项：
+ *   - match_scope：只查全图重复，还是连同分镜差分/裁剪一起（both 才开裁剪检测）
+ *   - sensitivity：差分/裁剪判定的松紧（驱动后端 variant_score + crop_score） */
 export interface DuplicateScanOptions {
   match_scope: 'strict' | 'both'
-  hash_size: number
-  hash_workers: number
-  tile_grids: number[]
-  structure_threshold: number
-  variant_score: number
-  aspect_tolerance: number
-  min_close_tiles: number
-  tile_median: number
-  min_gray_close: number
-  detect_blur: boolean
-  blur_score_threshold: number
-  blur_local_ratio: number
-  detect_crops: boolean
-  crop_score: number
-  crop_hash_threshold: number
-  crop_max_side: number
-  crop_workers: number
-  crop_prefilter_min_segments: number
-  crop_prefilter_min_coverage: number
-  crop_prefilter_aspect_tolerance: number
-  crop_max_candidates_per_image: number
+  sensitivity: 'loose' | 'standard' | 'strict'
 }
 
 export interface DuplicateMetrics {
@@ -854,37 +1154,6 @@ export interface DuplicateGroup {
   best: DuplicateMetrics | null
 }
 
-export interface BlurCandidate {
-  name: string
-  width: number
-  height: number
-  filesize_kb: number
-  blur_score: number
-  local_blur_ratio: number
-  largest_blur_region_ratio: number
-  reason: string
-}
-
-export interface CropRelation {
-  source: string
-  crop_candidate: string
-  score: number
-  source_width: number
-  source_height: number
-  crop_width: number
-  crop_height: number
-  source_area: number
-  crop_area: number
-  larger_image: string
-  area_ratio: number
-  relation_kind: 'crop_smaller' | 'crop_upscaled' | 'crop_same_area' | string
-  source_window: { x: number; y: number; width: number; height: number }
-  window_ratio: number
-  segment_matches: number
-  segment_coverage: number
-  note: string
-}
-
 export interface DuplicateScanResult {
   target: 'preprocess' | 'download'
   match_scope: DuplicateScanOptions['match_scope']
@@ -892,10 +1161,8 @@ export interface DuplicateScanResult {
   readable_images: number
   group_count: number
   candidate_count: number
-  blur_candidate_count: number
   crop_relation_count: number
   elapsed_seconds: number
-  options: DuplicateScanOptions
   stats: {
     total_pairs: number
     aspect_skipped_pairs: number
@@ -903,8 +1170,6 @@ export interface DuplicateScanResult {
     compared_pairs: number
   }
   groups: DuplicateGroup[]
-  blur_candidates: BlurCandidate[]
-  crop_relations: CropRelation[]
 }
 
 export interface DuplicateApplyResult {
@@ -914,6 +1179,15 @@ export interface DuplicateApplyResult {
 }
 
 // ---- captions (PP4) -------------------------------------------------------
+
+export type TaggerName = 'wd14' | 'cltagger' | 'joycaption' | 'llm'
+
+export interface TaggerStatus {
+  name: TaggerName
+  ok: boolean
+  msg: string
+  requires_service: boolean
+}
 
 export interface CaptionPreview {
   name: string
@@ -1034,6 +1308,16 @@ export interface VersionConfigResponse {
   defaulted_fields?: string[]
 }
 
+/** 训练集 ARB 桶分布（后端用真 BucketManager 算）。count = 有效样本数（含 repeat × fan-out）。 */
+export interface BucketDistribution {
+  resolutions: number[]
+  aspect_ratio_limit: number
+  groups: Array<{
+    reso: number
+    buckets: Array<{ w: number; h: number; count: number }>
+  }>
+}
+
 export interface RegBuildRequest {
   excluded_tags?: string[]
   auto_tag?: boolean
@@ -1072,6 +1356,9 @@ export type AttentionBackend = 'auto' | 'none' | 'xformers' | 'flash_attn'
 /** PR-9 — 先验生成（base 模型反向出 reg 集，无 LoRA）。 */
 export interface RegAiRequest {
   excluded_tags?: string[]
+  /** 本次先验生成临时选用的底模（官方 variant key 或本地 custom 路径）；
+   *  省略 → server 用 Settings 里的 selected_anima。 */
+  base_model?: string
   negative_prompt?: string
   width?: number
   height?: number
@@ -1092,6 +1379,11 @@ export interface LoraEntry {
   /** 来自 picker 的项目 / 版本绑定；外部文件无 */
   project_id?: number | null
   version_id?: number | null
+  /** 仅 placeholder 状态用：历史回填时 resolve 失败保留原 basename
+   *  （如 "my-lora.safetensors"），让 SidebarLoras 渲染 ⚠ placeholder 卡片
+   *  提示用户重选。`path` 非空时此字段被忽略；submit 时 path='' 的 entry
+   *  会被 `.filter(l => l.path.trim())` 跳过，不影响 daemon。 */
+  name?: string | null
 }
 
 /** XY 矩阵：单 task 内循环全图，前端按 (yi, xi) 排成 grid。
@@ -1118,6 +1410,14 @@ export interface XYMatrixSpec {
 
 export interface GenerateRequest {
   prompts: string[]
+  /** 底模所属模型族（多模型 P4-4）；省略 = anima。 */
+  model_family?: 'anima' | 'krea2'
+  /** 本次出图临时选用的底模（官方 variant key 或本地 custom 路径）；
+   *  省略 → server 用 Settings 里该族的 selected。 */
+  base_model?: string
+  /** 本次出图的文本编码器 variant（krea2 生效）：省略 = 跟随下载中心选中
+   *  的 TE（selected_te）；显式 bf16/fp8 临时覆盖（与 base_model 对称）。 */
+  text_encoder?: 'bf16' | 'fp8'
   negative_prompt?: string
   width?: number
   height?: number
@@ -1132,6 +1432,51 @@ export interface GenerateRequest {
   attention_backend?: AttentionBackend
   /** 设值时 prompts 限单条 + count=1（schema 校验） */
   xy_matrix?: XYMatrixSpec | null
+  /** 前端构造的 GenerateParamsSnapshot dict，server 不解释结构、透传到
+   *  daemon → image_done 时塞进加密 cache payload header。
+   *  /api/generate/cache/index 时返还作为 CacheEntry.params 回填用。 */
+  params_snapshot?: Record<string, unknown> | null
+}
+
+/** GET /api/generate/cache/index — 当前 session 加密磁盘 cache 索引。
+ *  server 端 SessionCache 按 task_id 聚合返回；前端转成 CacheEntry。 */
+export interface CacheGenerateHistoryEntry {
+  /** "cache:<task_id>" */
+  id: string
+  taskId: number
+  mode: 'single' | 'xy'
+  /** Unix timestamp ms */
+  createdAt: number
+  /** 该 task 的所有文件名（XY 时按文件名排序） */
+  filenames: string[]
+  /** GenerateParamsSnapshot dict */
+  params: Record<string, unknown>
+  /** 仅 mode=xy 存在；列每张图的 xy 位置，PreviewXYGrid 重建网格用 */
+  samples?: Array<{
+    filename: string
+    xy: { xi: number; yi: number; xv: string | number; yv: string | number | null }
+  }>
+}
+
+/** 落盘测试图历史 entry（GET /api/generate/disk-history）。
+ *  params 是 GenerateParamsSnapshot（前端用 paramsSnapshot.ts 的类型解读），
+ *  这里用 unknown 让 api/client.ts 不依赖 pages 层类型。 */
+export interface DiskGenerateHistoryEntry {
+  /** 稳定 ID："disk:<date>:<mode>:image_<N>"；前端按此 dedup */
+  id: string
+  /** YYYY-MM-DD */
+  date: string
+  mode: 'single' | 'xy'
+  filename: string
+  /** 服务端绝对路径，用于和 IDB entry.diskPath 做 dedup */
+  path: string
+  /** /api/generate/disk-image/<date>/<mode>/<filename> */
+  url: string
+  /** Unix timestamp（sidecar 写入或 fallback 文件 mtime） */
+  created_at: number
+  schema_version: number
+  /** sidecar 里的 params object（前端按 GenerateParamsSnapshot 解读） */
+  params: Record<string, unknown>
 }
 
 /** version output/ 下扫到的 training_state_step*.pt（断点续训用）。 */
@@ -1196,7 +1541,18 @@ export interface XformersInstallResult {
   restart_required: boolean
 }
 
-export type TaskStatus = 'pending' | 'running' | 'done' | 'failed' | 'canceled' | 'paused'
+export type TaskStatus =
+  'pending' | 'running' | 'done' | 'failed' | 'canceled' | 'paused' | 'scheduled'
+
+/** tasks.task_type 的合法值。R-3 台账合并起含九类数据作业 kind。
+ *  档位：exclusive = train/reg_ai/generate/eval_samples；light = 其余；io = download。 */
+export type TaskType =
+  | 'train' | 'reg_ai' | 'generate'
+  | 'download' | 'preprocess' | 'tag' | 'reg_build'
+  | 'eval_samples' | 'eval_clip' | 'eval_dino' | 'eval_tag' | 'eval_ccip'
+
+/** R-5 档位视图参数：GPU 视图 = exclusive，数据视图 = data（light+io）。 */
+export type QueueResourceClass = 'exclusive' | 'data'
 
 /** Terminal task statuses — UI 一般禁用这些上的操作按钮（cancel / pause 等）。
  *  `paused` **不**进 terminal — 它可被 resume 复活。 */
@@ -1208,6 +1564,10 @@ export interface Task {
   id: number
   name: string
   config_name: string
+  /** 0.17 P-D — 后端权威任务类型（_v5 migration 加，值 train/reg_ai/generate）。
+   *  老行经 `NOT NULL DEFAULT 'train'` 的 ALTER 自动 backfill；此处可选仅为兼容
+   *  未带该字段的测试 mock，运行时恒有值。 */
+  task_type?: TaskType
   status: TaskStatus
   priority: number
   created_at: number
@@ -1233,9 +1593,36 @@ export interface Task {
   paused_step?: number | null
   /** ADR 0006 PR-2 — paused 时间（unix 秒）。 */
   paused_at?: number | null
+  /** 0.17 P-B — 计划开始时间（unix 秒）。status='scheduled' 时有值；到点提升为
+   *  pending 后保留作记录。非计划任务恒 null。 */
+  scheduled_at?: number | null
+  /** R-2/_v17 — 数据作业类 task 的 kind 专属参数 JSON；train/reg_ai 恒 null。 */
+  params?: string | null
+  /** 后端读路径附带解码（同旧 jobs DAO 约定）。 */
+  params_decoded?: Record<string, unknown> | null
   /** ADR 0006 PR-4 — is_pausable 信号（§8.1）：UI 用来决定是否显示暂停
    *  按钮。supervisor 跑得起来时由 server enrich；空载默认 false。 */
   is_pausable?: boolean
+  /** ADR 0006 Addendum 2 — 最近一次 epoch 末 auto backup 的 .pt 路径
+   *  （auto_epoch_state.pt，覆盖式单文件）。failed/canceled resume 的恢复点。 */
+  last_state_path?: string | null
+  /** ADR 0006 Addendum 2 — auto backup 配套 config snapshot 路径。 */
+  last_config_path?: string | null
+  /** ADR 0006 Addendum 2 — 备份点 epoch（UI "从 epoch N 继续" 提示）。 */
+  last_state_epoch?: number | null
+  /** ADR 0006 Addendum 2 — 备份点 global_step。 */
+  last_state_step?: number | null
+  /** ADR 0006 Addendum 2 — is_resumable 信号：status ∈ paused/failed/canceled
+   *  且恢复点文件在盘上。UI 用来决定是否显示"继续训练"按钮。 */
+  is_resumable?: boolean
+}
+
+/** 0.17 P-E — /api/queue?group=history 的分页响应。 */
+export interface QueueHistoryPage {
+  items: Task[]
+  total: number
+  page: number
+  page_size: number
 }
 
 /** ADR 0006 PR-2 — GET /api/queue/hold 返回。`held=true` 时 UI 顶部
@@ -1253,6 +1640,11 @@ export interface LogResponse {
 
 /** /api/state — per-task monitor state written by the training process */
 export interface MonitorState {
+  task_id?: number
+  project_id?: number
+  project_slug?: string
+  version_id?: number
+  version_label?: string
   step?: number
   total_steps?: number
   epoch?: number
@@ -1344,8 +1736,71 @@ export interface ImportResult {
  */
 export type ApiError = Error & {
   status?: number
+  /** ADR-0009 Phase 2: 后端 body.error.code（语义错误码），前端按它查 errors.* i18n。 */
+  code?: string
   detail?: unknown
   traceId?: string
+}
+
+/**
+ * ADR-0009 Phase 2 统一错误解析：所有 fetch / XHR 失败路径共用，保证 toast 文案
+ * 一致且可本地化。
+ *
+ * 优先 `body.error`：用 `error.code` 查 `errors.<code>` i18n（带 `error.details`
+ * 插值，缺词条则回退 `error.message` 英文）。`body.detail` 退为 fallback —— 结构化
+ * detail（如 409 冲突的 config/suggested_name）仍挂到 `err.detail` 给 callsite；
+ * 没有 error 信封时（RequestValidationError 422 list / 极老路径）才用 detail 取文案。
+ */
+export function makeApiError(
+  status: number,
+  statusText: string,
+  body: unknown,
+  headerTraceId?: string | null,
+): ApiError {
+  let message = `${status} ${statusText}`
+  let code: string | undefined
+  let detail: unknown = null
+  let traceId: string | undefined
+  const b = body as {
+    detail?: unknown
+    error?: { code?: unknown; message?: unknown; trace_id?: unknown; details?: unknown }
+  } | null | undefined
+  const err = b?.error
+  if (err && typeof err === 'object') {
+    code = typeof err.code === 'string' ? err.code : undefined
+    const enMsg =
+      typeof err.message === 'string' && err.message ? err.message : message
+    const params =
+      err.details && typeof err.details === 'object'
+        ? (err.details as Record<string, unknown>)
+        : {}
+    message = code ? i18n.t(`errors.${code}`, { ...params, defaultValue: enMsg }) : enMsg
+    if (typeof err.trace_id === 'string') traceId = err.trace_id
+    // 结构化数据现在挂在 error.details（如 409 冲突的 config/suggested_name、
+    // running_tasks 列表），callsite 经 err.detail 读到。
+    if (err.details && typeof err.details === 'object') detail = err.details
+  }
+  if (b && b.detail !== undefined) {
+    if (!err) {
+      if (typeof b.detail === 'string') {
+        message = b.detail
+      } else if (b.detail && typeof b.detail === 'object') {
+        detail = b.detail
+        const dm = (b.detail as { message?: unknown }).message
+        if (typeof dm === 'string') message = dm
+      }
+    } else if (detail === null && b.detail && typeof b.detail === 'object') {
+      detail = b.detail
+    }
+  }
+  if (!traceId && headerTraceId) traceId = headerTraceId
+  if (traceId) setLastApiTraceId(traceId)
+  const e = new Error(message) as ApiError
+  e.status = status
+  e.code = code
+  e.detail = detail
+  e.traceId = traceId
+  return e
 }
 
 /**
@@ -1375,39 +1830,8 @@ async function req<T>(
     ...init,
   })
   if (!resp.ok) {
-    let detail = `${resp.status} ${resp.statusText}`
-    let rawDetail: unknown = null
-    let traceId: string | undefined
-    try {
-      const body = await resp.json()
-      if (typeof body?.detail === 'string') {
-        detail = body.detail
-      } else if (body?.detail && typeof body.detail === 'object') {
-        rawDetail = body.detail
-        // 结构化 detail：取 .message 作为可读字符串；callsite 想拿完整结构走 e.detail
-        detail = (body.detail as { message?: string }).message ?? JSON.stringify(body.detail)
-      }
-      // ADR-0009 dual-write envelope: body.error.trace_id 优先
-      const errStruct = (body as { error?: { trace_id?: string } } | undefined)?.error
-      if (errStruct?.trace_id) {
-        traceId = errStruct.trace_id
-      }
-    } catch {
-      // body 不是 JSON / 解析失败：保持 statusText 默认
-    }
-    // header 兜底（DomainError dual-write 路径或 HTTPException 路径都有）
-    if (!traceId) {
-      traceId = resp.headers.get('X-Trace-Id') ?? undefined
-    }
-    if (traceId) {
-      // 写入 atom 给 ErrorBoundary / window.onerror 上报时附带
-      setLastApiTraceId(traceId)
-    }
-    const err = new Error(detail) as ApiError
-    err.status = resp.status
-    err.detail = rawDetail
-    err.traceId = traceId
-    throw err
+    const body = await resp.json().catch(() => null)
+    throw makeApiError(resp.status, resp.statusText, body, resp.headers.get('X-Trace-Id'))
   }
   if (resp.status === 204) return undefined as T
   return (await resp.json()) as T
@@ -1453,37 +1877,87 @@ async function xhrUpload<T>(
         }
         return
       }
-      let detail = `${xhr.status} ${xhr.statusText}`
-      let rawDetail: unknown = null
-      let traceId: string | undefined
+      let parsed: unknown = null
       try {
-        const j = JSON.parse(text)
-        if (typeof j?.detail === 'string') {
-          detail = j.detail
-        } else if (j?.detail && typeof j.detail === 'object') {
-          rawDetail = j.detail
-          detail = (j.detail as { message?: string }).message ?? JSON.stringify(j.detail)
-        }
-        // ADR-0009 PR-3 C3: dual-write envelope body.error.trace_id
-        const errStruct = (j as { error?: { trace_id?: string } })?.error
-        if (errStruct?.trace_id) traceId = errStruct.trace_id
+        parsed = JSON.parse(text)
       } catch {
-        /* body 不是 JSON：保持 statusText */
+        /* body 不是 JSON：makeApiError 用 statusText 兜底 */
       }
-      // header 兜底
-      if (!traceId) {
-        traceId = xhr.getResponseHeader('X-Trace-Id') ?? undefined
-      }
-      if (traceId) setLastApiTraceId(traceId)
-      const err = new Error(detail) as ApiError
-      err.status = xhr.status
-      err.detail = rawDetail
-      err.traceId = traceId
-      reject(err)
+      reject(
+        makeApiError(xhr.status, xhr.statusText, parsed, xhr.getResponseHeader('X-Trace-Id')),
+      )
     }
     xhr.onerror = () => reject(new Error('network error'))
     xhr.send(body)
   })
+}
+
+/** studio_data 存储位置：当前/默认 + 全量扫描（迁移确认 modal 显示用）。 */
+export interface StudioDataScanEntry {
+  name: string
+  is_dir: boolean
+  files: number
+  bytes: number
+}
+
+export interface StudioDataInfo {
+  current: string
+  default: string
+  is_custom: boolean
+  /** 请求带 scan=false 时为 null（Settings 页仅显示路径，免扫盘） */
+  scan: {
+    total_files: number
+    total_bytes: number
+    entries: StudioDataScanEntry[]
+  } | null
+}
+
+/** 迁移状态快照（modal 重开 / SSE 漏事件兜底；实时进度走 SSE
+ *  `studio_data_migrate_progress` / `_done` 事件）。 */
+export interface StudioDataMigrateStatus {
+  state: 'idle' | 'running' | 'done' | 'error'
+  target: string
+  total_files: number
+  total_bytes: number
+  done_files: number
+  done_bytes: number
+  current_file: string
+  error: string
+}
+
+/** 模型根目录存储位置：和 studio_data 同结构（迁移确认 modal 复用展示）。 */
+export interface ModelsRootInfo {
+  current: string
+  default: string
+  is_custom: boolean
+  /** 请求带 scan=false 时为 null（Settings 页仅显示路径，免扫盘） */
+  scan: {
+    total_files: number
+    total_bytes: number
+    entries: StudioDataScanEntry[]
+  } | null
+}
+
+/** 模型根目录迁移状态快照（实时进度走 SSE `models_root_migrate_progress` / `_done`）。 */
+export interface ModelsRootMigrateStatus {
+  state: 'idle' | 'running' | 'done' | 'error'
+  target: string
+  total_files: number
+  total_bytes: number
+  done_files: number
+  done_bytes: number
+  current_file: string
+  error: string
+}
+
+export interface AnnouncementPost {
+  id: string
+  date: string
+  tag: 'release' | 'notice' | 'migration'
+  title: { zh: string; en: string }
+  body: { zh: string; en: string }
+  pin: boolean
+  version: string | null
 }
 
 export const api = {
@@ -1539,23 +2013,28 @@ export const api = {
     fd.append('file', file, file.name)
     const resp = await fetch('/api/presets/import', { method: 'POST', body: fd })
     if (!resp.ok) {
-      let message = `${resp.status} ${resp.statusText}`
-      let rawDetail: unknown = null
-      try {
-        const body = await resp.json()
-        if (typeof body?.detail === 'string') {
-          message = body.detail
-        } else if (body?.detail && typeof body.detail === 'object') {
-          rawDetail = body.detail
-          message = (body.detail as { message?: string }).message ?? JSON.stringify(body.detail)
-        }
-      } catch { /* body 非 JSON,保留 statusText */ }
-      const err = new Error(message) as ApiError
-      err.status = resp.status
-      err.detail = rawDetail
-      throw err
+      const body = await resp.json().catch(() => null)
+      throw makeApiError(resp.status, resp.statusText, body, resp.headers.get('X-Trace-Id'))
     }
     return (await resp.json()) as { name: string; path: string }
+  },
+
+  /** WandB preset yaml 下载直链（**含真实 api_key**，服务端显式导出端点）。
+   *  <a href={...} download> 触发即可，不发 fetch。 */
+  wandbPresetExportUrl: (id: string) =>
+    `/api/secrets/wandb/presets/${encodeURIComponent(id)}/export`,
+  /** 上传 yaml/json 导入 wandb preset；返回新 preset 标识 + 最新 masked secrets。 */
+  importWandbPreset: async (
+    file: File,
+  ): Promise<{ id: string; label: string; secrets: Secrets }> => {
+    const fd = new FormData()
+    fd.append('file', file, file.name)
+    const resp = await fetch('/api/secrets/wandb/presets/import', { method: 'POST', body: fd })
+    if (!resp.ok) {
+      const body = await resp.json().catch(() => null)
+      throw makeApiError(resp.status, resp.statusText, body, resp.headers.get('X-Trace-Id'))
+    }
+    return (await resp.json()) as { id: string; label: string; secrets: Secrets }
   },
 
   // 兼容别名：PP0 之前叫 listConfigs / getConfig / ...。保留一段时间。
@@ -1591,20 +2070,8 @@ export const api = {
     fd.append('file', file, file.name)
     const resp = await fetch('/api/tag-dictionary/upload', { method: 'POST', body: fd })
     if (!resp.ok) {
-      let message = `${resp.status} ${resp.statusText}`
-      let rawDetail: unknown = null
-      try {
-        const body = await resp.json()
-        if (typeof body?.detail === 'string') message = body.detail
-        else if (body?.detail && typeof body.detail === 'object') {
-          rawDetail = body.detail
-          message = (body.detail as { message?: string }).message ?? JSON.stringify(body.detail)
-        }
-      } catch { /* 非 JSON，保留 statusText */ }
-      const err = new Error(message) as ApiError
-      err.status = resp.status
-      err.detail = rawDetail
-      throw err
+      const body = await resp.json().catch(() => null)
+      throw makeApiError(resp.status, resp.statusText, body, resp.headers.get('X-Trace-Id'))
     }
     return (await resp.json()) as TagDictionaryMetaResponse
   },
@@ -1616,19 +2083,45 @@ export const api = {
   getModelsCatalog: () => req<ModelsCatalog>('/api/models/catalog'),
   /** 当前 Settings 算出的 4 个模型字段绝对路径。预设页 reset / 新建用。 */
   getModelPathDefaults: () => req<Record<string, string>>('/api/models/path-defaults'),
+  /** YAML 预览（R4）：当前表单 config → 与保存后落盘文件同一序列化路径的
+   * yaml 文本。纯计算不落盘；tolerant 修复语义与保存一致。 */
+  previewConfigYaml: (config: ConfigData) =>
+    req<{ yaml: string }>('/api/schema/preview-yaml', {
+      method: 'POST',
+      body: JSON.stringify({ config }),
+    }),
+  /** 训练配置切换模型族的预览计算（多模型 P4-3）。纯计算不落盘：返回
+   * 重算路径 + 重置族风味字段后的完整 config 与变更清单，前端确认后走
+   * 正常保存链路。 */
+  switchModelFamily: (target: string, config: ConfigData) =>
+    req<FamilySwitchResponse>('/api/models/family-switch', {
+      method: 'POST',
+      body: JSON.stringify({ target, config }),
+    }),
   startModelDownload: (body: { model_id: string; variant?: string }) =>
     req<{ key: string; status: string }>('/api/models/download', {
       method: 'POST',
       body: JSON.stringify(body),
     }),
-  startUpscalerCustomDownload: (body: {
-    source: 'hf' | 'ms'
-    repo_id: string
-    filename: string
-  }) =>
-    req<{ key: string; status: string }>('/api/upscalers/download_custom', {
+  /** 删除一个已下载资产（下载的逆操作：先删除、再重新下载）。路径由
+   *  服务端解析；下载中 / 文件被占用时 409。返回删除后的 catalog。 */
+  deleteModelAsset: (model_id: string, variant?: string) =>
+    req<ModelsCatalog>(
+      `/api/models/asset?model_id=${encodeURIComponent(model_id)}`
+      + (variant ? `&variant=${encodeURIComponent(variant)}` : ''),
+      { method: 'DELETE' },
+    ),
+  /** 添加一条统一来源候选（下载型 / 本地文件），返回新 catalog。 */
+  addModelSource: (domain: string, cand: ModelSourceCandidate) =>
+    req<ModelsCatalog>(`/api/model-sources/${domain}`, {
       method: 'POST',
-      body: JSON.stringify(body),
+      body: JSON.stringify(cand),
+    }),
+  /** 移除一条候选（不动磁盘；移除当前选中项时服务端回退默认）。 */
+  removeModelSource: (domain: string, cand: ModelSourceCandidate) =>
+    req<ModelsCatalog>(`/api/model-sources/${domain}`, {
+      method: 'DELETE',
+      body: JSON.stringify(cand),
     }),
   selectUpscaler: (label: string) =>
     req<{ selected: string }>('/api/upscalers/select', {
@@ -1689,6 +2182,11 @@ export const api = {
     }),
   deleteProject: (pid: number) =>
     req<{ deleted: number }>(`/api/projects/${pid}`, { method: 'DELETE' }),
+  /** 归档（软隐藏，可逆）：目录 / versions / 任务全部原样。 */
+  archiveProject: (pid: number) =>
+    req<ProjectDetail>(`/api/projects/${pid}/archive`, { method: 'POST' }),
+  unarchiveProject: (pid: number) =>
+    req<ProjectDetail>(`/api/projects/${pid}/unarchive`, { method: 'POST' }),
 
   listVersions: (pid: number) =>
     req<{ items: Version[] }>(`/api/projects/${pid}/versions`).then(
@@ -1727,7 +2225,7 @@ export const api = {
       method: 'DELETE',
     }),
   activateVersion: (pid: number, vid: number) =>
-    req<ProjectDetail>(
+    req<{ active_version_id: number }>(
       `/api/projects/${pid}/versions/${vid}/activate`,
       { method: 'POST' }
     ),
@@ -1898,16 +2396,66 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ crops }),
     }),
-
-  getJob: (jid: number) => req<Job>(`/api/jobs/${jid}`),
-  getJobLog: (jid: number, tail?: number) => {
-    const qs = tail ? `?tail=${tail}` : ''
-    return req<{ job_id: number; content: string; size: number }>(
-      `/api/jobs/${jid}/log${qs}`
+  /** 涂抹整图保存（同步，无 job）：canvas 导出 PNG 覆盖 train/{name}。
+   *  multipart 绕过 req() 的 JSON header，让浏览器自加 boundary。 */
+  saveInpaintTrain: async (
+    pid: number,
+    vid: number,
+    name: string,
+    blob: Blob,
+  ): Promise<InpaintSaveResult> => {
+    const fd = new FormData()
+    fd.append('name', name)
+    fd.append('file', blob, 'inpaint.png')
+    const resp = await fetch(
+      `/api/projects/${pid}/versions/${vid}/preprocess/inpaint/save`,
+      { method: 'POST', body: fd },
     )
+    if (!resp.ok) {
+      const body = await resp.json().catch(() => null)
+      throw makeApiError(resp.status, resp.statusText, body, resp.headers.get('X-Trace-Id'))
+    }
+    return (await resp.json()) as InpaintSaveResult
   },
+  /** 训练 mask 文件 URL（灰度 PNG，尺寸=源图）。无 mask → 404。 */
+  maskUrl: (pid: number, vid: number, name: string) =>
+    `/api/projects/${pid}/versions/${vid}/preprocess/mask?name=${encodeURIComponent(name)}`,
+  /** 写入训练 mask（前端 mask 层导出的灰度 PNG）。 */
+  saveMaskTrain: async (
+    pid: number,
+    vid: number,
+    name: string,
+    blob: Blob,
+  ): Promise<{ name: string; mtime: number; size: number }> => {
+    const fd = new FormData()
+    fd.append('name', name)
+    fd.append('file', blob, 'mask.png')
+    const resp = await fetch(
+      `/api/projects/${pid}/versions/${vid}/preprocess/mask`,
+      { method: 'PUT', body: fd },
+    )
+    if (!resp.ok) {
+      const body = await resp.json().catch(() => null)
+      throw makeApiError(resp.status, resp.statusText, body, resp.headers.get('X-Trace-Id'))
+    }
+    return (await resp.json()) as { name: string; mtime: number; size: number }
+  },
+  /** 删除训练 mask（= 该图恢复全图正常学习）。 */
+  deleteMaskTrain: (pid: number, vid: number, name: string) =>
+    req<{ deleted: boolean }>(
+      `/api/projects/${pid}/versions/${vid}/preprocess/mask?name=${encodeURIComponent(name)}`,
+      { method: 'DELETE' },
+    ),
+
+  // R-5 台账合并：/api/jobs* 已删，作业与任务同源 /api/queue（单一 ID 空间）。
+  // getJob / cancelJob 保留函数名给步骤页（Download/Tagging/Reg/Preprocess），
+  // 内部改指 /api/queue；kind 由 task_type 派生。
+  getJob: (jid: number) =>
+    req<Task & { kind?: JobKind }>(`/api/queue/${jid}`).then(
+      (t) => ({ ...t, kind: (t.task_type ?? 'train') as JobKind }) as unknown as Job,
+    ),
   cancelJob: (jid: number) =>
-    req<{ job_id: number; canceled: boolean }>(`/api/jobs/${jid}/cancel`, {
+    req<{ task_id: number; canceled: boolean }>(`/api/queue/${jid}/cancel`, {
       method: 'POST',
     }),
   getLatestVersionJob: (
@@ -1919,6 +2467,9 @@ export const api = {
       `/api/projects/${pid}/versions/${vid}/jobs/latest?kind=${kind}`,
     ),
 
+  // Tagger 就绪检查（reg 辅助打标用；自动打标步骤本 fork 已移除）------------
+  checkTagger: (name: TaggerName) =>
+    req<TaggerStatus>(`/api/tagger/${name}/check`),
   listCaptions: (pid: number, vid: number, folder?: string) => {
     const qs = folder ? `?folder=${encodeURIComponent(folder)}` : ''
     return req<{ folder: string | null; items: CaptionPreview[] }>(
@@ -2018,6 +2569,11 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+  /** 回放最近一次先验生成 task + 日志，用于切页面/刷新后的日志恢复。 */
+  getLatestRegPriorTask: (pid: number, vid: number) =>
+    req<{ task: Task | null; log: string }>(
+      `/api/projects/${pid}/versions/${vid}/reg/generate-prior/latest`,
+    ),
   /** 查询先验生成 task 状态。 */
   getRegPriorTask: (pid: number, vid: number, taskId: number) =>
     req<Task>(`/api/projects/${pid}/versions/${vid}/reg/generate-prior/${taskId}`),
@@ -2047,6 +2603,15 @@ export const api = {
   /** PR-9 — 启动测试出图 task。Phase 2 起：图走 server 内存 cache，关页面即丢。 */
   enqueueGenerate: (body: GenerateRequest) =>
     req<Task>('/api/generate', { method: 'POST', body: JSON.stringify(body) }),
+  /** 落盘历史：扫 studio_data/test/&lt;date&gt;/{single,xy}/image_N.json sidecar，
+   *  按 created_at desc 返回；用于历史栏跨会话回看已落盘的测试图。
+   *  注意路径用 disk/ 子前缀避开 `/api/generate/{task_id}` 的单段 catch-all。 */
+  listDiskGenerateHistory: (limit = 500) =>
+    req<{ entries: DiskGenerateHistoryEntry[] }>(`/api/generate/disk/history?limit=${limit}`),
+  /** 当前 session 加密磁盘 cache 历史（save_test_images=false 时唯一来源）。
+   *  server 重启 / SSE 断连 30s + LRU 后 entry 消失；刷新 / 切路由都拉这里。 */
+  listCacheGenerateHistory: () =>
+    req<{ entries: CacheGenerateHistoryEntry[] }>('/api/generate/cache/index'),
   /** 查询测试 task 状态。 */
   getGenerateTask: (id: number) => req<Task>(`/api/generate/${id}`),
   /** 测试出图单张 URL（task 跑中或刚完成时拉；客户端断连 30s + LRU 后 404）。 */
@@ -2073,6 +2638,10 @@ export const api = {
   // Train config (PP6.2) -------------------------------------------------
   getVersionConfig: (pid: number, vid: number) =>
     req<VersionConfigResponse>(`/api/projects/${pid}/versions/${vid}/config`),
+  getBucketDistribution: (pid: number, vid: number) =>
+    req<BucketDistribution>(
+      `/api/projects/${pid}/versions/${vid}/bucket-distribution`
+    ),
   putVersionConfig: (pid: number, vid: number, data: ConfigData) =>
     req<{ has_config: true; config: ConfigData }>(
       `/api/projects/${pid}/versions/${vid}/config`,
@@ -2099,10 +2668,17 @@ export const api = {
       `/api/projects/${pid}/versions/${vid}/config/save_as_preset`,
       { method: 'POST', body: JSON.stringify({ name, overwrite }) }
     ),
-  enqueueVersionTraining: (pid: number, vid: number) =>
+  /** 0.17 P-B — scheduledAt（unix 秒）给了则建成 scheduled（计划任务），到点
+   *  由 supervisor 提升为 pending；不给立即入队（原行为）。 */
+  enqueueVersionTraining: (pid: number, vid: number, opts?: { scheduledAt?: number }) =>
     req<Task>(
       `/api/projects/${pid}/versions/${vid}/queue`,
-      { method: 'POST' }
+      {
+        method: 'POST',
+        ...(opts?.scheduledAt != null
+          ? { body: JSON.stringify({ scheduled_at: opts.scheduledAt }) }
+          : {}),
+      }
     ),
 
   // Curation (PP3) -------------------------------------------------------
@@ -2135,6 +2711,25 @@ export const api = {
       `/api/projects/${pid}/versions/${vid}/curation/folder`,
       { method: 'POST', body: JSON.stringify(body) }
     ),
+  // 验证集（held-out）手动维护——与 train curation 对称，右栏扁平无文件夹
+  getCurationValidation: (pid: number, vid: number) =>
+    req<CurationValidationView>(
+      `/api/projects/${pid}/versions/${vid}/curation/validation`
+    ),
+  copyToValidation: (pid: number, vid: number, body: { files: string[] }) =>
+    req<CopyResult>(
+      `/api/projects/${pid}/versions/${vid}/curation/validation/copy`,
+      { method: 'POST', body: JSON.stringify(body) }
+    ),
+  removeFromValidation: (
+    pid: number,
+    vid: number,
+    body: { items: { folder: string; name: string }[] }
+  ) =>
+    req<{ removed: string[]; missing: string[] }>(
+      `/api/projects/${pid}/versions/${vid}/curation/validation/remove`,
+      { method: 'POST', body: JSON.stringify(body) }
+    ),
   // ADR 0010 train scope duplicates
   scanDuplicatesTrain: (
     pid: number,
@@ -2157,7 +2752,7 @@ export const api = {
   versionThumbUrl: (
     pid: number,
     vid: number,
-    bucket: 'train' | 'reg' | 'samples',
+    bucket: 'train' | 'reg' | 'samples' | 'validation',
     name: string,
     folder?: string,
     size: number = 256
@@ -2177,6 +2772,34 @@ export const api = {
     const qs = params.length ? `?${params.join('&')}` : ''
     return req<{ items: Task[] }>(`/api/queue${qs}`).then((r) => r.items)
   },
+  // 0.17 P-A/P-C —— 队列页分区数据源。live = 进行中 + 等待（running/paused/pending），
+  // 不分页；q 搜 name/config_name。
+  // 不分页；q 搜 name/config_name；type 按 task_type 过滤（0.17 P-F）。
+  listQueueLive: (q?: string, type?: TaskType, resourceClass?: QueueResourceClass) => {
+    const params = new URLSearchParams({ group: 'live' })
+    if (q) params.set('q', q)
+    if (type) params.set('types', type)
+    if (resourceClass) params.set('resource_class', resourceClass)
+    return req<{ items: Task[] }>(`/api/queue?${params}`).then((r) => r.items)
+  },
+  // 0.17 P-E —— history = 已结束（done/failed/canceled），后端分页。status 传终态
+  // 做子过滤，q 搜 name/config_name，type 按 task_type 过滤（P-F）。返回
+  // { items, total, page, page_size }。
+  listQueueHistory: (opts: {
+    page: number; pageSize: number; q?: string; status?: TaskStatus;
+    type?: TaskType; resourceClass?: QueueResourceClass
+  }) => {
+    const params = new URLSearchParams({
+      group: 'history',
+      page: String(opts.page),
+      page_size: String(opts.pageSize),
+    })
+    if (opts.q) params.set('q', opts.q)
+    if (opts.status) params.set('status', opts.status)
+    if (opts.type) params.set('types', opts.type)
+    if (opts.resourceClass) params.set('resource_class', opts.resourceClass)
+    return req<QueueHistoryPage>(`/api/queue?${params}`)
+  },
   getTask: (id: number) => req<Task>(`/api/queue/${id}`),
   enqueue: (payload: { config_name: string; name?: string; priority?: number }) =>
     req<Task>('/api/queue', {
@@ -2185,6 +2808,11 @@ export const api = {
     }),
   cancelTask: (id: number) =>
     req<{ task_id: number; canceled: boolean }>(`/api/queue/${id}/cancel`, {
+      method: 'POST',
+    }),
+  /** 0.17 P-B — scheduled task 手动提前：立即转 pending 参与调度。非 scheduled 409。 */
+  startTaskNow: (id: number) =>
+    req<{ task_id: number; status: string }>(`/api/queue/${id}/start_now`, {
       method: 'POST',
     }),
   retryTask: (id: number) =>
@@ -2197,8 +2825,9 @@ export const api = {
       `/api/queue/${id}/pause`,
       { method: 'POST' },
     ),
-  /** ADR 0006 PR-3 — 恢复 paused task。pause 文件缺失返 409 引导走
-   *  ResumeFieldPicker 起新 task。 */
+  /** ADR 0006 PR-3 + Addendum 2 — 恢复 paused / failed / canceled task
+   *  （从最近的 epoch 末 auto backup 续训）。恢复点文件缺失返 409 引导走
+   *  ResumeFieldPicker 起新 task。done 不可恢复（走 retry）。 */
   resumeTask: (id: number) =>
     req<{ task_id: number; status: string }>(
       `/api/queue/${id}/resume`,
@@ -2247,7 +2876,7 @@ export const api = {
   /** 当前 onnxruntime 状态：包名 / 版本 / providers / nvidia-smi 检测结果。 */
   getWD14Runtime: () => req<WD14Runtime>('/api/wd14/runtime'),
   /** 切换 onnxruntime（同步 pip，几分钟级；UI 必须带 loading）。 */
-  installWD14Runtime: (target: 'auto' | 'gpu' | 'cpu') =>
+  installWD14Runtime: (target: 'auto' | 'gpu' | 'cpu' | 'directml') =>
     req<WD14InstallResult>('/api/wd14/install', {
       method: 'POST',
       body: JSON.stringify({ target }),
@@ -2303,6 +2932,9 @@ export const api = {
       reg?: boolean
       regCaptions?: boolean
       includeConfig?: boolean
+      trainLatentCache?: boolean
+      regLatentCache?: boolean
+      trainMasks?: boolean
     },
   ): string => {
     const p = new URLSearchParams()
@@ -2311,6 +2943,9 @@ export const api = {
     p.set('reg', opts.reg ? '1' : '0')
     p.set('reg_captions', opts.regCaptions ? '1' : '0')
     p.set('include_config', opts.includeConfig ? '1' : '0')
+    p.set('train_latent_cache', opts.trainLatentCache ? '1' : '0')
+    p.set('reg_latent_cache', opts.regLatentCache ? '1' : '0')
+    p.set('train_masks', opts.trainMasks ? '1' : '0')
     return `/api/projects/${pid}/versions/${vid}/bundle.zip?${p.toString()}`
   },
   exportBundleToDataExports: (
@@ -2322,6 +2957,9 @@ export const api = {
       reg?: boolean
       regCaptions?: boolean
       includeConfig?: boolean
+      trainLatentCache?: boolean
+      regLatentCache?: boolean
+      trainMasks?: boolean
     },
   ) =>
     req<DataExportItem>(`/api/projects/${pid}/versions/${vid}/export-bundle`, {
@@ -2332,6 +2970,9 @@ export const api = {
         reg: opts.reg === true,
         reg_captions: opts.regCaptions === true,
         include_config: opts.includeConfig === true,
+        train_latent_cache: opts.trainLatentCache === true,
+        reg_latent_cache: opts.regLatentCache === true,
+        train_masks: opts.trainMasks === true,
       }),
     }),
   listDataExports: () => req<DataExportItem[]>('/api/data-exports'),
@@ -2390,20 +3031,27 @@ export const api = {
     ),
   sampleImageUrl: (filename: string, taskId: number, w?: number) =>
     `/samples/${filename}?task_id=${taskId}${w ? `&w=${w}` : ''}`,
-
-  // Queue import / export ---------------------------------------------
-  /** 队列导出直链。响应带 Content-Disposition: attachment,<a href download>
-   * 触发就走浏览器原生下载。后端 publish queue_export_ready/_failed SSE
-   * 供前端清 app-side "导出中..." 状态。 */
-  queueExportUrl: (ids?: ReadonlyArray<number>) => {
-    const qs = ids && ids.length ? `?ids=${ids.join(',')}` : ''
-    return `/api/queue/export${qs}`
-  },
-  importQueue: (payload: unknown) =>
-    req<ImportResult>('/api/queue/import', {
-      method: 'POST',
-      body: JSON.stringify({ payload }),
-    }),
+  listEvalMetrics: (pid: number, vid: number, taskId?: number) =>
+    req<EvalMetricsListResponse>(
+      `/api/projects/${pid}/versions/${vid}/eval/metrics?` +
+      (taskId ? `task_id=${taskId}&` : '') +
+      `_=${Date.now()}`,
+    ),
+  /** 列某 task 的训练后/手动评估 job（按 run_id 关联 checkpoint 行 + 取原始日志）。 */
+  listTaskEvalJobs: (pid: number, vid: number, taskId: number) =>
+    req<{ jobs: EvalJobInfo[] }>(
+      `/api/projects/${pid}/versions/${vid}/eval/jobs?task_id=${taskId}`,
+    ),
+  /** 手动评估完成任务的选定 checkpoint（task-scoped，绕过自动评估开关）。 */
+  runTaskEval: (
+    pid: number,
+    vid: number,
+    body: { task_id: number; checkpoints: string[] },
+  ) =>
+    req<{ queued: number }>(
+      `/api/projects/${pid}/versions/${vid}/eval/run`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
 
   // Datasets -----------------------------------------------------------
   listDatasets: (path?: string) => {
@@ -2418,7 +3066,38 @@ export const api = {
     const qs = path ? `?path=${encodeURIComponent(path)}` : ''
     return req<BrowseResult>(`/api/browse${qs}`)
   },
+
+  // studio_data 存储位置 -------------------------------------------------
+  // withScan=true 含全量扫描，大目录可能要数秒 —— 调用方给加载态。
+  getStudioDataInfo: (withScan = true) =>
+    req<StudioDataInfo>(`/api/studio-data/info?scan=${withScan}`),
+  // 422 = 目标不合法 / 有 running task；409 = 已有迁移在跑。
+  startStudioDataMigrate: (target: string) =>
+    req<{ ok: boolean }>('/api/studio-data/migrate', {
+      method: 'POST',
+      body: JSON.stringify({ target }),
+    }),
+  getStudioDataMigrateStatus: () =>
+    req<StudioDataMigrateStatus>('/api/studio-data/migrate_status'),
+
+  // 模型根目录存储位置（镜像 studio_data，但迁移完无需重启，立即生效）----------
+  getModelsRootInfo: (withScan = true) =>
+    req<ModelsRootInfo>(`/api/models-root/info?scan=${withScan}`),
+  // 422 = 目标不合法 / 有 running task；409 code models_root.migration_busy = 已有
+  // 迁移在跑；409 code models_root.target_conflict = 目标已有 models 数据（detail 带
+  // existing_files/existing_bytes/same_name_files，modal 弹「跳过/覆盖/取消」后带
+  // onConflict 重发）。
+  startModelsRootMigrate: (target: string, onConflict?: 'skip' | 'overwrite') =>
+    req<{ ok: boolean }>('/api/models-root/migrate', {
+      method: 'POST',
+      body: JSON.stringify({ target, on_conflict: onConflict ?? null }),
+    }),
+  getModelsRootMigrateStatus: () =>
+    req<ModelsRootMigrateStatus>('/api/models-root/migrate_status'),
+
 }
+
+// 本 fork：System update/announcements API 类型随 in-app updater 移除。
 
 export interface BrowseEntry {
   name: string

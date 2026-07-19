@@ -13,6 +13,7 @@ export type ControlKind =
   | 'textarea'
   | 'code'
   | 'string-list'
+  | 'int-list'
 
 /**
  * 推断字段的控件类型。优先用 schema 里 control 自定义元字段，否则按
@@ -44,7 +45,10 @@ export function controlKind(prop: SchemaProperty): ControlKind {
   if (type === 'boolean') return 'bool'
   if (type === 'integer') return 'int'
   if (type === 'number') return 'float'
-  if (type === 'array') return 'string-list'
+  if (type === 'array') {
+    const itemType = prop.items?.type
+    return itemType === 'integer' || itemType === 'number' ? 'int-list' : 'string-list'
+  }
   return 'string'
 }
 
@@ -60,6 +64,10 @@ export function evalShowWhen(
   if (branches.length > 1) {
     return branches.some((branch) => evalShowWhen(branch, values))
   }
+  const ands = expr.split('&&').map((part) => part.trim()).filter(Boolean)
+  if (ands.length > 1) {
+    return ands.every((clause) => evalShowWhen(clause, values))
+  }
   const eq = expr.split('==')
   if (eq.length === 2) {
     return String(values[eq[0].trim()]) === eq[1].trim()
@@ -70,6 +78,11 @@ export function evalShowWhen(
   }
   return true
 }
+
+// pruneInactiveConfig（后端 config_prune 的前端镜像）已删除（刀 2 / R4，D3）：
+// YAML 预览改走 POST /api/schema/preview-yaml，与落盘同一条序列化路径。
+// evalShowWhen 仍是表单实时可见性的求值器，与后端 config_rules.eval_show_when
+// 保持逐字镜像（跨语言双实现的最后一处）。
 
 /** 字段的人类可读 label：首字母大写 + 下划线变空格。 */
 export function fieldLabel(name: string): string {
@@ -91,15 +104,21 @@ export const SCHEMA_GROUP_LABEL_KEYS: Record<string, string> = {
   system: 'schema.groups.system',
   output: 'schema.groups.output',
   sample: 'schema.groups.sample',
+  eval_validation: 'schema.groups.evalValidation',
   monitor: 'schema.groups.monitor',
-  wandb: 'schema.groups.wandb',
 }
 
 export const SCHEMA_ENUM_LABEL_KEYS: Record<string, Record<string, string>> = {
+  model_family: {
+    anima: 'schema.enums.modelFamily.anima',
+    krea2: 'schema.enums.modelFamily.krea2',
+  },
   lora_type: {
     lora: 'schema.enums.loraType.lora',
     lokr: 'schema.enums.loraType.lokr',
     loha: 'schema.enums.loraType.loha',
+    ortho: 'schema.enums.loraType.ortho',
+    tlora: 'schema.enums.loraType.tlora',
   },
   lr_scheduler: {
     none: 'schema.enums.lrScheduler.none',
@@ -127,6 +146,12 @@ export const SCHEMA_ENUM_LABEL_KEYS: Record<string, Record<string, string>> = {
     detail_inv_t: 'schema.enums.lossWeighting.detailInvT',
     cosmap: 'schema.enums.lossWeighting.cosmap',
   },
+  leap_variant: {
+    original: 'schema.enums.leapVariant.original',
+    sparse: 'schema.enums.leapVariant.sparse',
+    bridge: 'schema.enums.leapVariant.bridge',
+    lagrange: 'schema.enums.leapVariant.lagrange',
+  },
   mixed_precision: {
     bf16: 'schema.enums.mixedPrecision.bf16',
     fp16: 'schema.enums.mixedPrecision.fp16',
@@ -142,27 +167,15 @@ export const SCHEMA_ENUM_LABEL_KEYS: Record<string, Record<string, string>> = {
     offset: 'schema.enums.noiseEnhancementType.offset',
     pyramid: 'schema.enums.noiseEnhancementType.pyramid',
   },
-  wandb_mode: {
-    '': 'field.useGlobal',
-    online: 'schema.enums.wandbMode.online',
-    offline: 'schema.enums.wandbMode.offline',
-    disabled: 'schema.enums.wandbMode.disabled',
+  sample_sampler_name: {
+    er_sde: 'schema.enums.sampler.erSde',
+    dpmpp_3m_sde: 'schema.enums.sampler.dpmpp3mSde',
+    euler: 'schema.enums.sampler.euler',
   },
-  wandb_upload_model_policy: {
-    '': 'field.useGlobal',
-    all: 'schema.enums.wandbPolicy.all',
-    last: 'schema.enums.wandbPolicy.last',
+  sample_scheduler: {
+    simple: 'schema.enums.scheduler.simple',
+    sgm_uniform: 'schema.enums.scheduler.sgmUniform',
   },
-  wandb_upload_state_manual_policy: {
-    '': 'field.useGlobal',
-    all: 'schema.enums.wandbPolicy.all',
-    last: 'schema.enums.wandbPolicy.last',
-  },
-  wandb_upload_state_auto_policy: {
-    '': 'field.useGlobal',
-    all: 'schema.enums.wandbPolicy.all',
-    last: 'schema.enums.wandbPolicy.last',
-  }
 }
 
 export function schemaGroupLabel(key: string, fallback: string, t: TFunction): string {

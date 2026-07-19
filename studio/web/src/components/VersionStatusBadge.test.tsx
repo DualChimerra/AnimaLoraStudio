@@ -46,7 +46,7 @@ describe('VersionStatusBadge', () => {
   // v12 — preparing 时显示 phase 后缀（项目卡片"准备中 · 打标"）
   it('appends phase suffix when preparing', () => {
     const { container } = render(
-      <VersionStatusBadge status="preparing" phase="tagging" />
+      <VersionStatusBadge status="preparing" phase="editing" />
     )
     expect(container.querySelector('.badge')?.textContent).toBe('准备中 · 打标')
   })
@@ -66,7 +66,7 @@ describe('VersionStatusBadge', () => {
 
   it('ignores phase when status is not preparing', () => {
     const { container } = render(
-      <VersionStatusBadge status="training" phase="tagging" />
+      <VersionStatusBadge status="training" phase="editing" />
     )
     expect(container.querySelector('.badge')?.textContent).toBe('训练中')
   })

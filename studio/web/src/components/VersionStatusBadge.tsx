@@ -26,7 +26,6 @@ const STATUS_MAP: Record<VersionStatus, StatusEntry> = {
 const PHASE_SUFFIX_KEY: Record<VersionPhase, string> = {
   curating: 'versionPhase.curating',
   preprocessing: 'versionPhase.preprocessing',
-  tagging: 'versionPhase.tagging',
   editing: 'versionPhase.editing',
   regularizing: 'versionPhase.regularizing',
   ready: 'versionPhase.ready',
