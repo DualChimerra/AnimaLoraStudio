@@ -41,6 +41,9 @@
   --accent-soft:   var(--color-violet-wash);  /* #f5f0ff */
   --accent-veil:   var(--color-violet-veil);  /* #e7e0fe */
   --accent-fg:     var(--color-paper-white);
+  /* 列表选中行（上游 0.20 tailwind selected/selected-soft 类的数据源） */
+  --row-selected-border: var(--color-deep-violet);
+  --row-selected-bg:     var(--color-violet-wash);
 
   /* status — built from the deep tones + washes in the palette */
   --ok:        var(--color-deep-teal);    /* #004d60 */
