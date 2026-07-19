@@ -90,7 +90,7 @@ def test_advance_editing_fails_with_missing_caption(client: TestClient) -> None:
     vdir = versions.version_dir(p["id"], p["slug"], v["label"])
     _put_image(vdir / "train" / "5_concept", "001", with_caption=False)
     _put_image(vdir / "train" / "5_concept", "002", with_caption=True)
-    # cursor 推到 editing（caption 兜底校验同旧 tagging）
+    # 本 fork：tagging phase 已移除 —— cursor 推到 editing（caption 校验兜底相同）
     with db.connection_for() as conn:
         versions.update_version(conn, v["id"], phase="editing")
 
@@ -135,12 +135,11 @@ def test_skip_regularizing_blocked_by_running_job(client: TestClient) -> None:
     p, v = _make_pv(client)
     with db.connection_for() as conn:
         versions.update_version(conn, v["id"], phase="regularizing")
-        conn.execute(
-            "INSERT INTO project_jobs(project_id, version_id, kind, params, status) "
-            "VALUES (?, ?, 'reg_build', '{}', 'running')",
-            (p["id"], v["id"]),
+        job = project_jobs.create_job(
+            conn, project_id=p["id"], version_id=v["id"],
+            kind="reg_build", params={},
         )
-        conn.commit()
+        project_jobs.update_status(conn, job["id"], "running")
     resp = client.post(f"/api/projects/{p['id']}/versions/{v['id']}/skip-phase")
     body = resp.json()
     assert body["advanced"] is False

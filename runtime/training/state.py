@@ -11,7 +11,9 @@
 from __future__ import annotations
 
 import logging
+import os
 import random
+from pathlib import Path
 
 import torch
 
@@ -23,6 +25,7 @@ def save_training_state(
     path, injector, optimizer, epoch, global_step,
     loss_history=None, rng_state=None, monitor_state=None,
     scheduler=None, timestep_sampler=None, sra_aligner=None,
+    scaler=None, model_family=None,
 ):
     """保存完整训练状态，支持断点续训。
 
@@ -41,6 +44,8 @@ def save_training_state(
             "random": random.getstate(),
         },
         "monitor_state": monitor_state,  # 保存监控面板数据（用于恢复 loss 曲线）
+        # 多模型 D13：族标记；load 侧跨族 fail-fast（strict=False 会静默冷启动）
+        "model_family": str(model_family or "anima"),
     }
     if scheduler is not None:
         state["scheduler_state_dict"] = scheduler.state_dict()
@@ -59,11 +64,25 @@ def save_training_state(
             sampler_state = None
         if sampler_state:  # 空 dict（baseline）不存
             state["timestep_sampler_state"] = sampler_state
-    torch.save(state, path)
+    if scaler is not None:
+        # fp16 GradScaler 的 scale 因子 / growth tracker。resume 不带 → 重置成默认 2^16，
+        # 头几步重新溢出空跳直到收敛。bf16/fp32 时 ctx.scaler 为 None，跳过不存。
+        state["scaler_state"] = scaler.state_dict()
+    # ADR 0006 Addendum 2：tmp + os.replace 原子落盘。auto_epoch_state.pt 是
+    # 覆盖式单文件恢复点，直接 torch.save 在断电 / 强杀砸中写盘窗口时会把
+    # 唯一恢复点写成半截；先写 sibling tmp 再 rename，旧文件要么完整保留
+    # 要么被完整新文件替换。
+    path = Path(path)
+    tmp_path = path.with_name(path.name + ".tmp")
+    try:
+        torch.save(state, tmp_path)
+        os.replace(tmp_path, path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
     logger.info(f"训练状态已保存: {path} (epoch={epoch}, step={global_step})")
 
 
-def load_training_state(path, injector, optimizer, scheduler=None, timestep_sampler=None, sra_aligner=None):
+def load_training_state(path, injector, optimizer, scheduler=None, timestep_sampler=None, sra_aligner=None, scaler=None, expected_family=None):
     """加载训练状态，返回 (epoch, global_step, loss_history, monitor_state)。
 
     timestep_sampler（ADR 0006 Addendum 1）：如 ckpt 含 timestep_sampler_state 且 sampler
@@ -71,6 +90,15 @@ def load_training_state(path, injector, optimizer, scheduler=None, timestep_samp
     """
     logger.info(f"加载训练状态: {path}")
     state = torch.load(path, map_location="cpu", weights_only=False)
+
+    # 多模型 D13：跨族 resume fail-fast。无标记的存量 state grandfather 为 anima。
+    saved_family = str(state.get("model_family") or "anima")
+    if expected_family is not None and saved_family != str(expected_family):
+        raise RuntimeError(
+            f"跨模型族 resume 被拒绝：恢复点属于 '{saved_family}'，"
+            f"当前 model_family='{expected_family}'。"
+            f"（strict=False 加载会静默变成全 missing 冷启动，比崩溃更糟）"
+        )
 
     # 加载 LoRA 权重（lycoris-lora backend）— 一次性导入 state_dict
     # 旧自实现 ckpt 在 Stage 4 plan 决策中**不做迁移**，strict=False 让缺失键
@@ -105,6 +133,14 @@ def load_training_state(path, injector, optimizer, scheduler=None, timestep_samp
             scheduler.load_state_dict(state["scheduler_state_dict"])
         except Exception as e:
             logger.warning(f"调度器状态恢复失败（将从头开始）: {e}")
+
+    # 恢复 GradScaler（fp16）。老 ckpt / bf16·fp32 run 无此 key → 保持默认 scale 冷启动。
+    if scaler is not None and "scaler_state" in state:
+        try:
+            scaler.load_state_dict(state["scaler_state"])
+            logger.info("GradScaler 状态已恢复")
+        except Exception as e:
+            logger.warning(f"GradScaler 状态恢复失败（按默认 scale 冷启动）: {e}")
 
     # 恢复随机数状态
     if "rng_state" in state:

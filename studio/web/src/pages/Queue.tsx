@@ -11,23 +11,11 @@ import { useToast } from '../components/Toast'
 import { useEventStream } from '../lib/useEventStream'
 import { useMonitorProgress } from '../lib/useMonitorProgress'
 
-async function pickJsonFile(jsonErrorMsg: string): Promise<unknown | null> {
-  return new Promise((resolve, reject) => {
-    const input = document.createElement('input')
-    input.type = 'file'; input.accept = '.json,application/json'
-    input.onchange = async () => {
-      const f = input.files?.[0]
-      if (!f) { resolve(null); return }
-      try { resolve(JSON.parse(await f.text())) }
-      catch { reject(new Error(jsonErrorMsg)) }
-    }
-    input.click()
-  })
-}
 
 type TaskKind = 'train' | 'tag' | 'reg' | 'download' | 'curate' | 'unknown'
 
 const STATUS_TONE: Record<TaskStatus, string> = {
+  scheduled: 'neutral',
   pending:   'neutral',
   running:   'accent',
   done:      'ok',
@@ -83,6 +71,7 @@ export default function QueuePage() {
   const navigate = useNavigate()
 
   const STATUS_LABEL: Record<TaskStatus, string> = {
+    scheduled: t('status.queued'),
     pending:   t('status.queued'),
     running:   t('status.running'),
     done:      t('status.done'),
@@ -358,41 +347,8 @@ export default function QueuePage() {
               {t('queue.releaseQueue')}
             </button>
           )}
-          <button
-            disabled={busy || exporting || tasks.length === 0}
-            onClick={() => {
-              if (exporting) return
-              setExporting(true)
-              // <a download> 直链 —— 浏览器原生接管下载。文件名以后端响应头
-              // Content-Disposition.filename 为准（带服务端时间戳）,download
-              // 属性是兜底。app-side "导出中..." 由 queue_export_ready/_failed SSE 清。
-              const a = document.createElement('a')
-              a.href = api.queueExportUrl()
-              a.download = `queue_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.json`
-              document.body.appendChild(a)
-              a.click()
-              document.body.removeChild(a)
-            }}
-            className="btn btn-ghost btn-sm"
-          >{exporting ? t('queue.exporting') : t('common.export')}</button>
-          <button
-            disabled={busy}
-            onClick={async () => {
-              let payload: unknown
-              try { payload = await pickJsonFile(t('queue.jsonError')) }
-              catch (e) { toast(String(e), 'error'); return }
-              if (!payload) return
-              setBusy(true)
-              try {
-                const r = await api.importQueue(payload)
-                const renamedCount = Object.keys(r.renamed).length
-                toast(t('queue.imported', { n: r.imported_count, renamed: renamedCount ? ` (${renamedCount} renamed)` : '' }), 'success')
-                await reload()
-              } catch (e) { setError(String(e)) }
-              finally { setBusy(false) }
-            }}
-            className="btn btn-ghost btn-sm"
-          >{t('common.import')}</button>
+          {/* 队列 JSON 导入/导出已随上游 0.20 下线（现代任务 config 是 version
+              私有：导出恒空、导入恒跳过，后端 route 已移除）。 */}
           <button onClick={() => void reload()} className="btn btn-ghost btn-sm">{t('common.refresh')}</button>
         </>
       }

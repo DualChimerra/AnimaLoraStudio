@@ -238,6 +238,9 @@ def test_run_passes_host_port(
     fake_dist = tmp_path / "dist"
     fake_dist.mkdir()
     monkeypatch.setattr(cli, "WEB_DIST", fake_dist)
+    # 本测试只验证 host/port 透传；前端新鲜度另有专项测试。若不隔离，结果会
+    # 依赖 checkout src mtime 与本机 npm 是否安装，违反测试卫生。
+    monkeypatch.setattr(cli, "_web_dist_is_stale", lambda: False)
     cli.main(["run", "--host", "0.0.0.0", "--port", "9999"])
     server_call = next(
         c for c in fake_calls if "studio.server" in " ".join(c)
@@ -522,10 +525,12 @@ def _stub_run_bootstrap(
     monkeypatch.setattr(cli, "WEB_DIST", dist)
     monkeypatch.setattr(cli, "_web_dist_is_stale", lambda: False)
     monkeypatch.setattr(cli, "_ensure_python_deps", lambda: 0)
+    # 本 fork：in-app updater 移除 —— cli 无 _apply_update_pending；raising=False 兼容
+    monkeypatch.setattr(cli, "_apply_update_pending", lambda: None, raising=False)
     monkeypatch.setattr(cli, "_apply_pending_install", lambda: None)
     monkeypatch.setattr(cli, "_check_torch_cuda", lambda: None)
     monkeypatch.setattr(cli, "_try_enable_flash_attn", lambda: None)
-    monkeypatch.setattr(cli, "_bootstrap_onnxruntime", lambda: None)
+    monkeypatch.setattr(cli, "_check_onnxruntime", lambda: None)
     monkeypatch.setattr(cli, "_spawn_browser_opener", lambda *a, **k: None)
     return dist
 
@@ -584,6 +589,25 @@ def test_cmd_run_normal_restart_when_installer_unchanged(
     assert rc == 0
     assert not fake_flag.exists(), "normal restart 走完后 flag 应被删"
     assert server_calls[0] == 2, "正常 restart 应当 loop 两次"
+
+
+def test_cmd_run_ctrl_c_returns_130_without_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """终端 Ctrl+C：父进程在 subprocess.call 等 server 期间收到的
+    KeyboardInterrupt 会在子进程退出后才抛出 —— 应按用户主动停机处理
+    （return 130），不冒 traceback。"""
+    _stub_run_bootstrap(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_RESTART_FLAG", tmp_path / "restart")
+
+    def fake(cmd, **_: Any) -> int:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli.subprocess, "call", fake)
+
+    rc = cli.main(["run", "--no-browser"])
+    assert rc == 130
+    assert "Ctrl+C" in capsys.readouterr().out
 
 
 def test_cmd_run_no_flag_no_dispatch(

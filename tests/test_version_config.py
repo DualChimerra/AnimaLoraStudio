@@ -12,6 +12,17 @@ from studio.services.projects import projects, versions
 from studio.services import presets as preset_flow, version_config
 
 
+@pytest.fixture(autouse=True)
+def _fixed_selected(monkeypatch):
+    """隔离真实 secrets：多个断言硬编码官方文件名（krea2-raw-bf16 等），
+    开发机 selected 切成 raw_fp8 / custom 会让 default_paths 变值假红。"""
+    from studio import secrets
+
+    monkeypatch.setattr(secrets, "load", lambda: secrets.Secrets(models={
+        "selected": {"anima": "1.0", "krea2": "raw"},
+    }))
+
+
 @pytest.fixture
 def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     dbfile = tmp_path / "studio.db"
@@ -84,17 +95,36 @@ def test_write_then_read(env) -> None:
     assert cfg_out["lora_rank"] == 64
 
 
+def test_write_prunes_inactive_fields(env) -> None:
+    """config.yaml 只落 show_when 生效的字段；GET 读回时缺失字段补默认值。"""
+    p, v = _make_pv(env)
+    cfg_in = _minimal_config(optimizer_type="came", came_beta1=0.5)
+    version_config.write_version_config(p, v, cfg_in)
+
+    raw = yaml.safe_load(
+        version_config.version_config_path(p, v).read_text(encoding="utf-8")
+    )
+    assert raw["came_beta1"] == 0.5  # active 字段照写
+    assert "lion_beta1" not in raw  # 未启用 optimizer 的子参数不落盘
+    assert "infonoise_K" not in raw
+    assert "lr_scheduler" in raw  # disable_when 字段保留
+
+    cfg_out = version_config.read_version_config(p, v)
+    assert cfg_out["came_beta1"] == 0.5
+    assert "lion_beta1" in cfg_out  # 读回时补默认值，前端表单拿到完整 config
+
+
 def test_write_tolerates_stale_preset_fields(env) -> None:
     p, v = _make_pv(env)
     cfg_in = _minimal_config(
         lora_rank=64,
-        optimizer_type="nonexistent_opt",
+        optimizer_type="made_up_optim",
         future_field_from_other_branch=True,
     )
     version_config.write_version_config(p, v, cfg_in)
     cfg_out = version_config.read_version_config(p, v)
     assert cfg_out["lora_rank"] == 64
-    assert cfg_out["optimizer_type"] != "nonexistent_opt"
+    assert cfg_out["optimizer_type"] != "made_up_optim"
     assert "future_field_from_other_branch" not in cfg_out
 
 
@@ -102,7 +132,7 @@ def test_read_tolerates_stale_version_config(env) -> None:
     p, v = _make_pv(env)
     raw = _minimal_config(
         lora_rank=96,
-        optimizer_type="nonexistent_opt",
+        optimizer_type="made_up_optim",
         future_field_from_other_branch=True,
     )
     path = version_config.version_config_path(p, v)
@@ -111,7 +141,7 @@ def test_read_tolerates_stale_version_config(env) -> None:
 
     cfg_out = version_config.read_version_config(p, v)
     assert cfg_out["lora_rank"] == 96
-    assert cfg_out["optimizer_type"] != "nonexistent_opt"
+    assert cfg_out["optimizer_type"] != "made_up_optim"
     assert "future_field_from_other_branch" not in cfg_out
 
 
@@ -172,7 +202,7 @@ def test_fork_preset_for_version_reports_warnings(env) -> None:
     p, v = _make_pv(env)
     raw = _minimal_config(
         lora_rank=128,
-        optimizer_type="nonexistent_opt",
+        optimizer_type="made_up_optim",
         future_field_from_other_branch=True,
     )
     (env["presets"] / "stale.yaml").write_text(
@@ -186,14 +216,14 @@ def test_fork_preset_for_version_reports_warnings(env) -> None:
     assert cfg["lora_rank"] == 128
     assert dropped == ["future_field_from_other_branch"]
     assert "optimizer_type" in defaulted
-    assert presets_io.read_preset("stale")["optimizer_type"] != "nonexistent_opt"
+    assert presets_io.read_preset("stale")["optimizer_type"] != "made_up_optim"
 
 
 def test_fork_preset_endpoint_returns_warnings(env) -> None:
     p, v = _make_pv(env)
     raw = _minimal_config(
         lora_rank=128,
-        optimizer_type="nonexistent_opt",
+        optimizer_type="made_up_optim",
         future_field_from_other_branch=True,
     )
     (env["presets"] / "stale.yaml").write_text(
@@ -309,6 +339,31 @@ def test_fork_with_toggle_off_respects_preset(env, monkeypatch) -> None:
     _seed_preset(env, "tpl", transformer_path=custom)
     cfg = preset_flow.fork_preset_for_version("tpl", p, v)
     assert cfg["transformer_path"] == custom
+
+
+def test_fork_krea2_preset_syncs_krea2_paths(env, monkeypatch) -> None:
+    """toggle ON + krea2 preset：路径按 preset 声明的族解析，不再覆成 anima 值。
+
+    回归保护（多模型 P4-1）：派发化之前这里无条件发 anima 路径——krea2 版本
+    一「换预设」，model_family: krea2 + anima transformer 的坏 config 就落盘了。
+    """
+    from studio.services import models as model_downloader
+    monkeypatch.setattr(preset_flow, "_auto_sync_paths", lambda: True)
+    p, v = _make_pv(env)
+    # krea2 preset 必须是自洽的族内值：shuffle_caption 关（anima-only 能力）、
+    # sampler/scheduler 用族白名单值（跨族值在 P4-2 起报错而非静默改写）
+    _seed_preset(env, "tpl", model_family="krea2", shuffle_caption=False,
+                 sample_sampler_name="euler", sample_scheduler="simple",
+                 transformer_path=_custom_path())
+    cfg = preset_flow.fork_preset_for_version("tpl", p, v)
+    assert cfg["model_family"] == "krea2"
+    expected = _normalize_default(
+        model_downloader.default_paths_for_new_version(family="krea2")
+        ["transformer_path"]
+    )
+    assert _normalize_default(cfg["transformer_path"]) == expected
+    assert cfg["transformer_path"].endswith("krea2-raw-bf16.safetensors")
+    assert "Qwen_Qwen3-VL-4B-Instruct" in cfg["text_encoder_path"]
 
 
 def test_save_as_preset_toggle_on_clears_model_paths(env, monkeypatch) -> None:

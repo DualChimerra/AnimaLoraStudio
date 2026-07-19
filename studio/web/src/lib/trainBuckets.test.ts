@@ -52,6 +52,28 @@ describe('generateBuckets', () => {
     }
   })
 
+  it('derives bounds from (baseReso, R) — small base keeps AR variety', () => {
+    // base=512 with the old hard-wired minReso=512 collapsed to the 512×512
+    // square only. Derived bounds restore non-square buckets. Mirrors the
+    // Python regression in tests/test_bucket_manager.py.
+    const bs = generateBuckets({ baseReso: 512 })
+    expect(bs.length).toBeGreaterThan(1)
+    expect(bs.some((b) => b.w !== b.h)).toBe(true)
+    expect(bs.some((b) => b.w > b.h)).toBe(true)
+    expect(bs.some((b) => b.h > b.w)).toBe(true)
+  })
+
+  it('maxArRatio (R) widens the bucket set symmetrically', () => {
+    const narrow = generateBuckets({ maxArRatio: 2.0 })
+    const wide = generateBuckets({ maxArRatio: 3.0 })
+    const widest = (bs: { w: number; h: number }[]) =>
+      Math.max(...bs.map((b) => Math.max(b.w / b.h, b.h / b.w)))
+    expect(widest(narrow)).toBeLessThanOrEqual(2.0 + 1e-9)
+    expect(widest(wide)).toBeGreaterThan(2.0)
+    expect(widest(wide)).toBeLessThanOrEqual(3.0 + 1e-9)
+    expect(wide.length).toBeGreaterThan(narrow.length)
+  })
+
   it('contains expected canonical anchors derived from sd-scripts-style buckets', () => {
     // These specific (w, h) pairs are widely cited training buckets at base 1024
     // and exist in the Python BucketManager output. If this test ever changes,
@@ -91,6 +113,17 @@ describe('snapToBucket', () => {
     for (const b of bs) {
       expect(Math.abs(target - b.aspect)).toBeGreaterThanOrEqual(snappedDiff - 1e-12)
     }
+  })
+
+  it('uses area as tie-breaker for same-AR buckets', () => {
+    const highResBuckets = generateBuckets({ baseReso: 1536, maxArRatio: 2.0 })
+    expect(highResBuckets.some((b) => b.w === 1472 && b.h === 1472)).toBe(true)
+    expect(highResBuckets.some((b) => b.w === 1536 && b.h === 1536)).toBe(true)
+    expect(highResBuckets.some((b) => b.w === 1600 && b.h === 1600)).toBe(true)
+
+    const b = snapToBucket(1.0, highResBuckets, 1536)
+    expect(b.w).toBe(1536)
+    expect(b.h).toBe(1536)
   })
 
   it('handles extreme wide → snaps to the widest bucket', () => {

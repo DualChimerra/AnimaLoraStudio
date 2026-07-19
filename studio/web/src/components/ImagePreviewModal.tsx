@@ -1,5 +1,7 @@
 import { useEffect } from 'react'
 
+import ZoomableImage from './ZoomableImage'
+
 interface Props {
   src: string
   /** 对比图：传了就改成左右 split 布局（左 src + 右 compareSrc）。窄屏时垂直堆叠。 */
@@ -9,6 +11,9 @@ interface Props {
   /** Split 布局时右侧图顶部的小 label（如 "处理后"）。 */
   compareLabel?: string
   caption?: string
+  /** 列表中的 0-based 位置；与 total 同传时底部显示 "index+1 / total" 计数。 */
+  index?: number
+  total?: number
   hasPrev?: boolean
   hasNext?: boolean
   onClose: () => void
@@ -25,6 +30,8 @@ export default function ImagePreviewModal({
   srcLabel,
   compareLabel,
   caption,
+  index,
+  total,
   hasPrev,
   hasNext,
   onClose,
@@ -56,6 +63,8 @@ export default function ImagePreviewModal({
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
   }, [hasPrev, hasNext, onPrev, onNext, onClose, onAccept, onDelete])
+
+  const counter = index != null && total != null ? `${index + 1} / ${total}` : null
 
   return (
     <div
@@ -105,16 +114,16 @@ export default function ImagePreviewModal({
             <SplitPane src={compareSrc} label={compareLabel} altFallback={caption} />
           </div>
         ) : (
-          <img
-            src={src}
-            alt={caption ?? 'preview'}
-            onClick={(e) => e.stopPropagation()}
-            className="max-w-full max-h-full object-contain"
-          />
+          // 单图：可缩放视口（滚轮 / 拖拽 / 双击，useZoomPan）。点视口不关闭
+          // （拖拽平移与点击无法两全）—— × 按钮 / ESC / 边缘遮罩仍可关。
+          <div className="w-full h-full" onClick={(e) => e.stopPropagation()}>
+            <ZoomableImage src={src} alt={caption ?? 'preview'} />
+          </div>
         )}
       </div>
-      {(caption || shortcutHint) && (
+      {(counter || caption || shortcutHint) && (
         <div className="shrink-0 border-t border-white/10 bg-black px-4 py-2 flex flex-wrap items-center justify-center gap-x-4 gap-y-1 text-xs text-slate-400">
+          {counter && <div className="font-mono text-slate-300">{counter}</div>}
           {caption && <div className="font-mono text-slate-300">{caption}</div>}
           {shortcutHint && <div>{shortcutHint}</div>}
         </div>

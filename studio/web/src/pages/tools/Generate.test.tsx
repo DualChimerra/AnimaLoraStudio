@@ -5,6 +5,14 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ToastProvider } from '../../components/Toast'
 import GeneratePage from './Generate'
+import { useMonitorProgress } from '../../lib/useMonitorProgress'
+
+// monitorState 来自 SSE，smoke 里不驱动 —— 默认返回空 state（samples=[]，等同
+// 既有行为）。#1 冻结用例单独 mockReturnValue 注入 XY samples。
+vi.mock('../../lib/useMonitorProgress', () => {
+  const NULL_MONITOR = { state: null }
+  return { useMonitorProgress: vi.fn(() => NULL_MONITOR) }
+})
 
 const fetchMock = vi.fn()
 let lastEnqueueBody: Record<string, unknown> | null = null
@@ -12,10 +20,12 @@ let lastEnqueueBody: Record<string, unknown> | null = null
 beforeEach(() => {
   lastEnqueueBody = null
   window.localStorage.clear()
+  // 每个用例重置 monitor mock 到默认空 state（隔离 #1 用例注入的 samples）
+  vi.mocked(useMonitorProgress).mockReturnValue({ state: null } as never)
   vi.stubGlobal('fetch', fetchMock)
   fetchMock.mockReset()
   fetchMock.mockImplementation((url: string, init?: RequestInit) => {
-    // useProjectLoras 启动时 listProjects → 返回空（no LoRAs in picker）
+    // catalog 懒级联：picker mount 时才拉 /api/projects（这里返回空 = no LoRAs）
     if (url.endsWith('/api/projects') && (init?.method ?? 'GET') === 'GET') {
       return Promise.resolve({
         ok: true, status: 200,
@@ -70,10 +80,17 @@ function setup() {
   )
 }
 
+// LoRA 数据现在懒级联（catalog）：/api/projects 只在 picker mount 时才发，不再
+// 是 mount 必发。所以这里改成等页面渲染出生成按钮作为「页面就绪」信号；需要
+// picker 内容的用例自己再 waitFor 对应 chip（懒加载到位）。
 async function waitForInitialLorasLoad() {
-  await waitFor(() =>
-    expect(fetchMock.mock.calls.some(([url]) => url === '/api/projects')).toBe(true)
-  )
+  await screen.findByRole('button', { name: /开始生成/ })
+}
+
+// 正向 / 负向 textarea 现在归到左侧「提示词」分页 tab（默认 tab 是 LoRA）；
+// 要操作 prompt 的用例先切到这一页。
+async function openPromptsTab(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(screen.getByRole('button', { name: '提示词' }))
 }
 
 describe('GeneratePage 端到端 smoke', () => {
@@ -91,6 +108,37 @@ describe('GeneratePage 端到端 smoke', () => {
     expect(body.count).toBe(1)
     // commit C: attention_backend 从 Generate 页移到 Settings；不再随 enqueue 发
     expect(body.attention_backend).toBeUndefined()
+  })
+
+  it('多任务（P-I）：running + pending → 排队列表带取消，提交按钮不禁用', async () => {
+    const genTask = (id: number, status: string) => ({
+      id, name: 'generate', config_name: 'generate', status, priority: 0,
+      created_at: 0, started_at: status === 'running' ? 1 : null, finished_at: null,
+      pid: null, exit_code: null, output_dir: null, error_msg: null,
+    })
+    const jsonOk = (body: unknown) => Promise.resolve({
+      ok: true, status: 200, json: async () => body,
+      text: async () => JSON.stringify(body),
+      headers: new Headers({ 'content-type': 'application/json' }),
+    } as Response)
+    fetchMock.mockImplementation((url: string) => {
+      if (url.endsWith('/api/projects')) return jsonOk({ items: [] })
+      // group=live&types=generate → running #5 + pending #6,#7
+      if (url.includes('group=live')) {
+        return jsonOk({ items: [genTask(5, 'running'), genTask(6, 'pending'), genTask(7, 'pending')] })
+      }
+      // listQueue('running')（无 group，训练阻塞检测）→ 无阻塞
+      if (url.startsWith('/api/queue')) return jsonOk({ items: [] })
+      return Promise.resolve({ ok: false, status: 404, json: async () => null, text: async () => '', headers: new Headers() } as Response)
+    })
+
+    setup()
+    // 右栏时间线出现 pending #6/#7（各带取消），running #5 也在（同为 live 项、可取消）
+    await waitFor(() => expect(screen.getByTestId('timeline-cancel-6')).toBeInTheDocument())
+    expect(screen.getByTestId('timeline-cancel-7')).toBeInTheDocument()
+    expect(screen.getByTestId('timeline-cancel-5')).toBeInTheDocument()
+    // 正在出图时提交按钮仍可点（能继续入队）
+    expect(screen.getByRole('button', { name: /开始生成/ })).not.toBeDisabled()
   })
 
   it('mode=xy 默认 X=steps 20,25,30：按钮显示「开始生成 · 3 张」并 enqueue 正确 xy_matrix', async () => {
@@ -118,8 +166,10 @@ describe('GeneratePage 端到端 smoke', () => {
   })
 
   it('多 prompt 轮换功能已隐藏：只有一个 textarea，"添加 prompt"按钮不存在', async () => {
+    const user = userEvent.setup()
     setup()
     await waitForInitialLorasLoad()
+    await openPromptsTab(user)
     // 单 textarea
     const promptInputs = screen.getAllByPlaceholderText('输入正向提示词…')
     expect(promptInputs.length).toBe(1)
@@ -130,6 +180,7 @@ describe('GeneratePage 端到端 smoke', () => {
   it('切到 xy 再切回 single：sidebar 已填的 prompts/seed 等保留', async () => {
     const user = userEvent.setup()
     setup()
+    await openPromptsTab(user)
 
     const promptArea = screen.getAllByPlaceholderText('输入正向提示词…')[0]
     await user.clear(promptArea)
@@ -141,13 +192,18 @@ describe('GeneratePage 端到端 smoke', () => {
     expect(promptArea).toHaveValue('my custom prompt')
   })
 
-  it('训练 / reg-ai 等任务在跑时，禁用生成按钮 + 鼠标 hover tooltip 说明原因', async () => {
+  it('训练 / reg-ai 等任务在跑时，按钮可用（提交排队）+ tooltip 说明会排队', async () => {
     // listQueue('running') 默认返 [] —— 覆盖这次返回 1 个 running task。
     // /api/queue 默认排除 generate task（client.ts:1918），所以这里返的就是
     // train / reg-ai 等抢 GPU 的任务。
     const previousImpl = fetchMock.getMockImplementation()
     fetchMock.mockImplementation((url: string, init?: RequestInit) => {
-      if (url.startsWith('/api/queue') && (init?.method ?? 'GET') === 'GET') {
+      // 只覆盖 listQueue('running')（阻塞检测）；group=live&types=generate 走
+      // previousImpl 返 [] —— 后端会按 types=generate 过滤掉 train，本用例没提交 generate。
+      if (
+        url.startsWith('/api/queue') && !url.includes('group=live')
+        && (init?.method ?? 'GET') === 'GET'
+      ) {
         const running = {
           id: 42, name: 'train', config_name: 'train', status: 'running',
           priority: 0, created_at: 0, started_at: 0, finished_at: null,
@@ -169,9 +225,12 @@ describe('GeneratePage 端到端 smoke', () => {
     setup()
 
     const btn = await screen.findByRole('button', { name: /开始生成/ })
-    await waitFor(() => expect(btn).toBeDisabled())
-    expect(btn).toHaveAttribute('title', expect.stringContaining('#42'))
-    expect(screen.getByText(/等队列 #42 完成/)).toBeInTheDocument()
+    // R-5：后端准入（R-1）已保证互斥，前端不再硬禁用——提交只是入队排队；
+    // tooltip 说明当前 GPU 被 #42 占用、提交会排队。
+    await waitFor(() =>
+      expect(btn).toHaveAttribute('title', expect.stringContaining('#42')),
+    )
+    expect(btn).not.toBeDisabled()
   })
 
   it('URL ?lora= 进入时 replace 缓存 LoRA list + clamp xDraft.loraIndex', async () => {
@@ -226,6 +285,7 @@ describe('GeneratePage 端到端 smoke', () => {
     const user = userEvent.setup()
     const first = setup()
     await waitForInitialLorasLoad()
+    await openPromptsTab(user)
 
     const promptArea = screen.getAllByPlaceholderText('输入正向提示词…')[0]
     await user.clear(promptArea)
@@ -304,5 +364,191 @@ describe('GeneratePage 端到端 smoke', () => {
     const stored = JSON.parse(window.localStorage.getItem('studio:generate:params:v1')!)
     expect(stored.singleLoras).toEqual([A])
     expect(stored.xyLoras).toEqual([A])
+  })
+
+  // ---- 点击 XY 历史 entry 回填 sidebar 参数（含 xDraft）----
+  it('点击 XY 落盘历史 → 左侧 XY 轴 dropdown 切到 LoRA + raw 写入', async () => {
+    // 用户场景：当前 sidebar 在 XY mode 默认 X=steps；点 XY plot 1 历史 entry
+    // 回填后 X 轴应切到 lora_ckpt + raw=basenames（picker 后续会按 basename 升级
+    // 成全 path 给 daemon；这里只验 xDraft 同步进 prefs 这一步）。
+    seedPrefs({ mode: 'xy' })  // 起步默认 X=steps
+    const xySnapshotParams = {
+      schema_version: 1,
+      mode: 'xy',
+      prompts: ['recall-prompt'],
+      negative_prompt: 'recall-neg',
+      width: 768, height: 1344,
+      steps: 25, cfg_scale: 5, count: 1, seed: 7,
+      loras: [
+        { name: 'chen-bin_V3.7_step5500.safetensors', scale: 1,
+          project_id: 19, version_id: 44 },
+      ],
+      xy_draft: {
+        x: {
+          axis: 'lora_ckpt',
+          raw: 'epoch40.safetensors, epoch38.safetensors, epoch24.safetensors',
+          loraIndex: 0,
+        },
+        y: null,
+      },
+      dataset_pick: null,
+    }
+    const diskEntry = {
+      id: 'disk:abc123',
+      date: '2026-06-09',
+      mode: 'xy',
+      folder: 'xy plot 1',
+      path: '/tmp/test/2026-06-09/xy/xy plot 1',
+      image_url: '/api/generate/disk/image/2026-06-09/xy/xy%20plot%201/xy%20plot.png',
+      thumb_url: '/api/generate/disk/thumb/2026-06-09/xy/xy%20plot%201/xy%20plot.png?w=128',
+      created_at: 1717900000,
+      schema_version: 2,
+      params: xySnapshotParams,
+      xy_meta: {
+        x_axis: 'lora_ckpt',
+        y_axis: null,
+        x_values: ['epoch40.safetensors', 'epoch38.safetensors', 'epoch24.safetensors'],
+        y_values: [null],
+        samples: [],
+      },
+    }
+    const previousImpl = fetchMock.getMockImplementation()
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url.endsWith('/api/generate/disk/history') && (init?.method ?? 'GET') === 'GET') {
+        return Promise.resolve({
+          ok: true, status: 200,
+          json: async () => ({ entries: [diskEntry] }),
+          text: async () => JSON.stringify({ entries: [diskEntry] }),
+          headers: new Headers({ 'content-type': 'application/json' }),
+        } as Response)
+      }
+      return previousImpl ? previousImpl(url, init) : Promise.resolve({
+        ok: false, status: 404, json: async () => null, text: async () => '',
+        headers: new Headers(),
+      } as Response)
+    })
+
+    const user = userEvent.setup()
+    setup()
+    await waitForInitialLorasLoad()
+
+    // 默认 X 轴是 steps —— 文本输入框显示 "20, 25, 30"
+    const initialAxisInput = await screen.findByDisplayValue(/20, 25, 30/)
+    expect(initialAxisInput).toBeInTheDocument()
+
+    // 等历史栏的 thumbnail 出现（HistoryItem div 的 title 含 folder 名）
+    const thumb = await screen.findByTitle(/xy plot 1 ·/)
+    await user.click(thumb)
+
+    // 回填后：X 轴 dropdown 切到 LoRA，raw 写入新值。
+    // 因为 axis=lora_ckpt 渲染的是 AxisLoraCkptPicker（不是 text input）—— 直接
+    // 看 X 轴 select 的 value（一行 select 元素，AxisCard.label='X'）。
+    await waitFor(() => {
+      const xLabel = screen.getAllByText('X 轴')[0]
+      // AxisCard 外框跟 LoRA 槽对齐用 bg-overlay（原 bg-sunken 在 dark 下近黑显突兀）
+      const card = xLabel.closest('div.bg-overlay')!
+      const axisSelect = card.querySelector('select') as HTMLSelectElement
+      expect(axisSelect.value).toBe('lora_ckpt')
+    })
+    // 原 "20, 25, 30" 文本框该消失（切到 lora_ckpt 渲染的是 picker）
+    expect(screen.queryByDisplayValue(/20, 25, 30/)).not.toBeInTheDocument()
+  })
+
+  // ---- #1：XY 开始后改轴只影响下次，不串改右侧已出结果 ----
+  it('XY 开始后改 X 轴：sidebar 改了但右侧结果网格冻结（30 列仍在）', async () => {
+    // 注入 3 个 cell 的 XY samples（X=steps 20/25/30，无 Y 轴）
+    vi.mocked(useMonitorProgress).mockReturnValue({
+      state: {
+        samples: [
+          { path: 'cell x0 y0.png', xy: { xi: 0, yi: 0, xv: 20, yv: null } },
+          { path: 'cell x1 y0.png', xy: { xi: 1, yi: 0, xv: 25, yv: null } },
+          { path: 'cell x2 y0.png', xy: { xi: 2, yi: 0, xv: 30, yv: null } },
+        ],
+      },
+    } as never)
+    seedPrefs({ mode: 'xy' })  // 默认 X=steps raw "20, 25, 30"
+    const user = userEvent.setup()
+    setup()
+    await waitForInitialLorasLoad()
+
+    // 开始生成（3 张）→ dispatch 定格本次运行态 run
+    await user.click(await screen.findByRole('button', { name: /开始生成 · 3 张/ }))
+    await waitFor(() => expect(lastEnqueueBody).not.toBeNull())
+
+    // 网格渲染出 steps 三档表头（20/25/30）
+    await waitFor(() => expect(screen.getByText('30')).toBeInTheDocument())
+
+    // 取消 30 那一档：X 轴 raw "20, 25, 30" → "20, 25"
+    const axisInput = screen.getByDisplayValue('20, 25, 30')
+    await user.clear(axisInput)
+    await user.type(axisInput, '20, 25')
+
+    // live sidebar 确实改成了 "20, 25"（下次生成会用它）……
+    await waitFor(() => expect(axisInput).toHaveValue('20, 25'))
+    // ……但右侧已出结果网格冻结：仍含 "30" 表头，未被 live 编辑串改
+    expect(screen.getByText('30')).toBeInTheDocument()
+  })
+
+  // ---- 回看历史 XY 时点「开始生成」→ 回到实时视图（P-I 回归修复）----
+  it('回看 XY 历史时点开始生成：清掉历史 override，结果区回到实时新任务', async () => {
+    // 修前（P-I 删了「currentTask.id 变自动清 override」的 effect）：点开始生成不清
+    // override，结果区停留在正回看的老 XY 图，看不到新入队/正在跑的这次。
+    // 修后：提交即清 override，回到实时视图。
+    vi.mocked(useMonitorProgress).mockReturnValue({
+      state: {
+        samples: [{ path: 'cell x0 y0.png', xy: { xi: 0, yi: 0, xv: 20, yv: null } }],
+      },
+    } as never)
+    seedPrefs({ mode: 'xy' })  // 默认 X=steps raw "20, 25, 30"
+    const xySnapshotParams = {
+      schema_version: 1, mode: 'xy',
+      prompts: ['recall'], negative_prompt: '',
+      width: 1024, height: 1024, steps: 25, cfg_scale: 4, count: 1, seed: 0,
+      loras: [],
+      // 用 steps 轴（非 lora_ckpt）→ 回填后按钮仍是「· 3 张」，不引入 picker 异步
+      xy_draft: { x: { axis: 'steps', raw: '20, 25, 30', loraIndex: null }, y: null },
+      dataset_pick: null,
+    }
+    const diskEntry = {
+      id: 'disk:xy1', date: '2026-06-09', mode: 'xy', folder: 'xy plot 1',
+      path: '/tmp/test/2026-06-09/xy/xy plot 1',
+      image_url: '/api/generate/disk/image/2026-06-09/xy/xy%20plot%201/xy%20plot.png',
+      thumb_url: '/api/generate/disk/thumb/2026-06-09/xy/xy%20plot%201/xy%20plot.png?w=128',
+      created_at: 1717900000, schema_version: 2,
+      params: xySnapshotParams,
+      xy_meta: {
+        x_axis: 'steps', y_axis: null,
+        x_values: ['20', '25', '30'], y_values: [null], samples: [],
+      },
+    }
+    const previousImpl = fetchMock.getMockImplementation()
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url.endsWith('/api/generate/disk/history') && (init?.method ?? 'GET') === 'GET') {
+        return Promise.resolve({
+          ok: true, status: 200,
+          json: async () => ({ entries: [diskEntry] }),
+          text: async () => JSON.stringify({ entries: [diskEntry] }),
+          headers: new Headers({ 'content-type': 'application/json' }),
+        } as Response)
+      }
+      return previousImpl ? previousImpl(url, init) : Promise.resolve({
+        ok: false, status: 404, json: async () => null, text: async () => '',
+        headers: new Headers(),
+      } as Response)
+    })
+
+    const user = userEvent.setup()
+    setup()
+    await waitForInitialLorasLoad()
+
+    // 点历史缩略图进入回看：结果区底部显示文件夹名 "xy plot 1"（override 生效标志）
+    const thumb = await screen.findByTitle(/xy plot 1 ·/)
+    await user.click(thumb)
+    await waitFor(() => expect(screen.getByText('xy plot 1')).toBeInTheDocument())
+
+    // 点开始生成 → 清掉 override，结果区回到实时任务：底部 "xy plot 1" 文本消失
+    await user.click(screen.getByRole('button', { name: /开始生成 · 3 张/ }))
+    await waitFor(() => expect(lastEnqueueBody).not.toBeNull())
+    await waitFor(() => expect(screen.queryByText('xy plot 1')).not.toBeInTheDocument())
   })
 })

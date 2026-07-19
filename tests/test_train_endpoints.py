@@ -215,7 +215,9 @@ def test_fork_preset_still_forces_project_overrides(
     assert cfg["output_name"] != "wrong_name"
 
 
-def test_put_config_invalid_data_400(client: TestClient, env) -> None:
+def test_put_config_tolerates_invalid_values(client: TestClient, env) -> None:
+    """PR #146 之后 write_version_config 走 _tolerant_validate：非法字段
+    静默回退默认值（不再 400）。和 preset 导入路径行为一致。"""
     pid, vid = _make(client)
     _seed_preset(env, "tpl")
     client.post(
@@ -223,9 +225,10 @@ def test_put_config_invalid_data_400(client: TestClient, env) -> None:
         json={"name": "tpl"},
     )
     cfg = client.get(f"/api/projects/{pid}/versions/{vid}/config").json()["config"]
-    cfg["lora_rank"] = 0  # ge=4 → 下限越界（lora_rank 故意没设上限，LoKr 全维度走大数）
+    cfg["lora_rank"] = 0  # ge=4 越界 → 回退默认 32
     r = client.put(f"/api/projects/{pid}/versions/{vid}/config", json=cfg)
-    assert r.status_code == 400
+    assert r.status_code == 200
+    assert r.json()["config"]["lora_rank"] == 32
 
 
 # ---------------------------------------------------------------------------
@@ -267,7 +270,8 @@ def test_save_as_preset_existing_409(client: TestClient, env) -> None:
         f"/api/projects/{pid}/versions/{vid}/config/save_as_preset",
         json={"name": "tpl"},  # 同名 + 不带 overwrite
     )
-    assert r.status_code == 400  # presets_io.PresetError("已存在") → _err_code 400
+    assert r.status_code == 409  # preset.exists → ConflictError (CATALOG 改 400→409)
+    assert r.json()["error"]["code"] == "preset.exists"
     # overwrite=True 应允许
     r2 = client.post(
         f"/api/projects/{pid}/versions/{vid}/config/save_as_preset",
@@ -327,3 +331,49 @@ def test_enqueue_rejects_active_task(client: TestClient, env) -> None:
     assert r1.status_code == 200
     r2 = client.post(f"/api/projects/{pid}/versions/{vid}/queue")
     assert r2.status_code == 409
+
+
+def test_enqueue_with_schedule_creates_scheduled_task(
+    client: TestClient, env
+) -> None:
+    """0.17 P-B：body 带 scheduled_at → task 建成 scheduled。"""
+    import time as _time
+    pid, vid = _make(client)
+    _seed_preset(env, "tpl")
+    client.post(
+        f"/api/projects/{pid}/versions/{vid}/config/from_preset",
+        json={"name": "tpl"},
+    )
+    future = _time.time() + 3600
+    r = client.post(
+        f"/api/projects/{pid}/versions/{vid}/queue",
+        json={"scheduled_at": future},
+    )
+    assert r.status_code == 200, r.text
+    task = r.json()
+    assert task["status"] == "scheduled"
+    assert task["scheduled_at"] == pytest.approx(future)
+    assert task["project_id"] == pid
+    assert task["config_path"] and task["config_path"].endswith("config.yaml")
+
+
+def test_enqueue_rejects_when_scheduled_active(client: TestClient, env) -> None:
+    """0.17 P-B：version 已有 scheduled task → 再入队（含定时）都 409。"""
+    import time as _time
+    pid, vid = _make(client)
+    _seed_preset(env, "tpl")
+    client.post(
+        f"/api/projects/{pid}/versions/{vid}/config/from_preset",
+        json={"name": "tpl"},
+    )
+    r1 = client.post(
+        f"/api/projects/{pid}/versions/{vid}/queue",
+        json={"scheduled_at": _time.time() + 3600},
+    )
+    assert r1.status_code == 200
+    assert client.post(f"/api/projects/{pid}/versions/{vid}/queue").status_code == 409
+    r3 = client.post(
+        f"/api/projects/{pid}/versions/{vid}/queue",
+        json={"scheduled_at": _time.time() + 7200},
+    )
+    assert r3.status_code == 409

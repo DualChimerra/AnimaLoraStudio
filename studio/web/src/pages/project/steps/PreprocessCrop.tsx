@@ -8,8 +8,8 @@ import {
   type ProjectDetail,
   type Version,
 } from '../../../api/client'
+import Filmstrip from '../../../components/preprocess/Filmstrip'
 import FreeCropEditor, { type CropRect } from '../../../components/preprocess/FreeCropEditor'
-import PreprocessJobStrip from '../../../components/preprocess/PreprocessJobStrip'
 import PreprocessToolsBar from '../../../components/preprocess/PreprocessToolsBar'
 import StepShell from '../../../components/StepShell'
 import BarHistogram from '../../../components/BarHistogram'
@@ -93,6 +93,8 @@ export default function PreprocessCropPage() {
     maxCropFraction: 0.10, kMin: 3, kMax: 6,
   })
   const [lastClusterK, setLastClusterK] = useState<number | null>(null)
+  // 自动聚类参数改由 header 按钮弹出的 modal 承载（不再占裁剪参数区）。
+  const [clusterModalOpen, setClusterModalOpen] = useState(false)
 
   // ────── Editor state ──────
   const [activeName, setActiveName] = useState<string | null>(null)
@@ -117,13 +119,35 @@ export default function PreprocessCropPage() {
   const [busy, setBusy] = useState(false)
   const jobIdRef = useRef<number | null>(null)
   jobIdRef.current = job?.id ?? null
-  const isLive = job?.status === 'running' || job?.status === 'pending'
+
+  // 回放（issue #251）：crop 与放大共用 kind=preprocess，走同一 status 端点
+  // 恢复最近一次 preprocess job + log_tail；同一 job 本地已有 SSE 积累时不覆盖。
+  const refreshJobStatus = useCallback(async () => {
+    if (!vid) return
+    try {
+      const r = await api.getPreprocessStatusTrain(project.id, vid)
+      const rid = r.job?.id ?? null
+      setJob(r.job)
+      setLogs((prev) =>
+        rid !== null && rid === jobIdRef.current && prev.length > 0
+          ? prev
+          : r.log_tail
+            ? r.log_tail.split('\n')
+            : [],
+      )
+    } catch {
+      /* ignore */
+    }
+  }, [project.id, vid])
+
+  useEffect(() => { void refreshJobStatus() }, [refreshJobStatus])
+
   useEventStream((evt) => {
     const jid = jobIdRef.current
     if (evt.type === 'job_log_appended' && jid && evt.job_id === jid) {
       setLogs((prev) => [...prev, String(evt.text ?? '')])
     } else if (evt.type === 'job_state_changed' && jid && evt.job_id === jid) {
-      // mirror status change in our job object so JobStrip renders the new badge
+      // mirror status change in our job object so the log drawer renders the new badge
       setJob((prev) =>
         prev ? { ...prev, status: evt.status as Job['status'] } : prev,
       )
@@ -137,7 +161,7 @@ export default function PreprocessCropPage() {
       // Backend throttles crop_progress to ≥1Hz; safe to refresh per event here
       if (evt.status === 'done') void refreshWorkspace()
     }
-  })
+  }, { onOpen: () => void refreshJobStatus() })
 
   const cancelJob = useCallback(async () => {
     if (!job) return
@@ -280,7 +304,10 @@ export default function PreprocessCropPage() {
     setCropsByImage(newCrops)
     setSelectedRectId(null)
     setLastClusterK(summary.kUsed)
-  }, [images, autoParams])
+    const n = summary.assignments.filter((a) => !a.skipped).length
+    toast(t('preprocessCrop.clusterToast', { k: summary.kUsed, n }), 'success')
+    setClusterModalOpen(false)
+  }, [images, autoParams, toast, t])
 
   // ────── Submit crop job ──────
   const submitCrop = useCallback(async (onlySelected = false) => {
@@ -327,38 +354,55 @@ export default function PreprocessCropPage() {
       eyebrow={`Step 2 · ${project.title} / ${activeVersion?.label ?? '—'}`}
       title={t('steps.preprocess.title')}
       subtitle={t('preprocessCrop.subtitle')}
+      actions={
+        <>
+          {/* 次操作 = ghost（对齐正则/打标页 header 范式）；主操作「裁剪当前图」= primary + icon，放最右 */}
+          <button
+            type="button"
+            onClick={() => setClusterModalOpen(true)}
+            disabled={busy || images.length === 0}
+            className="btn btn-ghost btn-sm"
+          >
+            {t('preprocessCrop.autoCluster')}
+          </button>
+          <button
+            type="button"
+            onClick={() => void submitCrop(false)}
+            disabled={busy || totalRects === 0}
+            className="btn btn-ghost btn-sm"
+          >
+            {t('preprocessCrop.cropAll', { n: totalRects })}
+          </button>
+          <button
+            type="button"
+            onClick={() => void submitCrop(true)}
+            disabled={busy || activeCrops.length === 0}
+            className="btn btn-primary btn-sm"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M8 5v14l11-7z" />
+            </svg>
+            <span>{t('preprocessCrop.cropActive')}</span>
+          </button>
+        </>
+      }
+      belowHeader={<PreprocessToolsBar current="crop" projectId={project.id} versionId={vid} />}
+      logSources={[
+        job && {
+          key: 'preprocess',
+          label: t('logDrawer.preprocess'),
+          status: job.status,
+          lines: logs,
+          startedAt: job.started_at,
+          finishedAt: job.finished_at,
+          onCancel: () => void cancelJob(),
+        },
+      ]}
     >
       <div className="flex flex-col h-full gap-3 min-h-0">
         <div className="grid gap-3 flex-1 min-h-0" style={{ gridTemplateColumns: '1fr 260px' }}>
-          {/* 左栏 */}
+          {/* 左栏 —— 裁剪参数区已删，工作区占满高度；长宽比锁定移到工作区底部固定栏 */}
           <div className="flex flex-col gap-2 min-h-0 min-w-0">
-            <PreprocessToolsBar current="crop" projectId={project.id} versionId={vid} />
-            <OperationPanel
-              arSel={arSel} setArSel={setArSel}
-              customAR={customAR} setCustomAR={setCustomAR}
-              autoParams={autoParams} setAutoParams={setAutoParams}
-              lastClusterK={lastClusterK}
-              totalRects={totalRects}
-              configuredImages={configuredImages}
-              totalImages={images.length}
-              activeHasCrops={(cropsByImage[activeName ?? ''] ?? []).length > 0}
-              busy={busy}
-              onApplyAll={() => void submitCrop(false)}
-              onApplySelected={() => void submitCrop(true)}
-              onRunCluster={runClustering}
-            />
-            {/* Job log below OperationPanel — same place as upscale page so the
-                two tools have identical UX. Hide entirely when there's no
-                live job AND no current-session logs (stale terminal job from
-                refresh would otherwise show empty). */}
-            {job && (isLive || logs.length > 0) && (
-              <PreprocessJobStrip
-                job={job}
-                logs={logs}
-                onCancel={isLive ? () => void cancelJob() : undefined}
-              />
-            )}
-
             <section className="flex flex-col flex-1 min-h-0 rounded-md border border-subtle bg-surface overflow-hidden">
               <header className="flex items-center gap-2 shrink-0 px-2.5 py-1.5 border-b border-subtle text-sm flex-wrap">
                 <div className="flex items-center gap-1">
@@ -420,7 +464,6 @@ export default function PreprocessCropPage() {
                     <Filmstrip
                       items={filteredImages}
                       activeName={activeName}
-                      cropsByImage={cropsByImage}
                       onSelect={(name) => {
                         setActiveName(name)
                         setSelectedRectId(null)
@@ -434,6 +477,28 @@ export default function PreprocessCropPage() {
                         ) + `&_=${im.mtime}`
                       }}
                       emptyHint={t(`preprocessCrop.filmstripEmpty.${filter}`)}
+                      renderOverlay={(im) => {
+                        const crops = cropsByImage[im.name] ?? []
+                        if (crops.length === 0) return null
+                        return (
+                          <>
+                            {crops.map((c, i) => (
+                              <div
+                                key={c.id}
+                                className={'fs-overlay ' + (crops.length > 1 ? 'is-multi' : '')}
+                                style={{
+                                  left: `${c.x * 100}%`,
+                                  top: `${c.y * 100}%`,
+                                  width: `${c.w * 100}%`,
+                                  height: `${c.h * 100}%`,
+                                }}
+                                aria-label={`crop ${i + 1}`}
+                              />
+                            ))}
+                            {crops.length > 1 && <span className="fs-badge">×{crops.length}</span>}
+                          </>
+                        )
+                      }}
                     />
 
                     <div className="min-w-0 min-h-0 overflow-hidden">
@@ -466,6 +531,11 @@ export default function PreprocessCropPage() {
                       crops={activeCrops}
                       selectedId={selectedRectId}
                       arLock={arLock}
+                      arSel={arSel}
+                      setArSel={setArSel}
+                      customAR={customAR}
+                      setCustomAR={setCustomAR}
+                      busy={busy}
                       onSelect={setSelectedRectId}
                       onLabelChange={(id, label) => {
                         const r = activeCrops.find((c) => c.id === id)
@@ -490,195 +560,120 @@ export default function PreprocessCropPage() {
             images={images}
           />
         </div>
+
+        {clusterModalOpen && (
+          <ClusterModal
+            autoParams={autoParams}
+            setAutoParams={setAutoParams}
+            lastClusterK={lastClusterK}
+            busy={busy}
+            totalImages={images.length}
+            onRun={runClustering}
+            onClose={() => setClusterModalOpen(false)}
+          />
+        )}
       </div>
     </StepShell>
   )
 }
 
 // ---------------------------------------------------------------------------
-// OperationPanel
+// 自动聚类 modal —— header 按钮弹出。按长宽比给所有图预填裁剪框（之后可手动微调）。
+// 参数用数字 input 框（原来是左右拉 slider）。
 // ---------------------------------------------------------------------------
 
-interface OperationPanelProps {
-  arSel: string
-  setArSel: (s: string) => void
-  customAR: { w: number; h: number }
-  setCustomAR: (v: { w: number; h: number }) => void
+function ClusterModal({
+  autoParams, setAutoParams, lastClusterK, busy, totalImages, onRun, onClose,
+}: {
   autoParams: AutoParams
   setAutoParams: (v: AutoParams) => void
   lastClusterK: number | null
-  totalRects: number
-  configuredImages: number
-  totalImages: number
-  activeHasCrops: boolean
   busy: boolean
-  onApplyAll: () => void
-  onApplySelected: () => void
-  onRunCluster: () => void
-}
-
-function OperationPanel({
-  arSel, setArSel, customAR, setCustomAR,
-  autoParams, setAutoParams,
-  lastClusterK,
-  totalRects, configuredImages, totalImages, activeHasCrops,
-  busy,
-  onApplyAll, onApplySelected, onRunCluster,
-}: OperationPanelProps) {
+  totalImages: number
+  onRun: () => void
+  onClose: () => void
+}) {
   const { t } = useTranslation()
-  // Cluster section is collapsed by default — it's an optional helper, not
-  // something most users need every visit. Saves vertical space for the canvas.
-  const [clusterOpen, setClusterOpen] = useState(false)
   return (
-    <section className="flex flex-col gap-1.5 rounded-md border border-subtle bg-surface px-3 py-2.5 shrink-0">
-      <h3 className="caption flex items-center gap-1.5">
-        <span className="inline-block w-1.5 h-1.5 rounded-full shrink-0 bg-accent" />
-        {t('preprocessCrop.panelTitle')}
-      </h3>
-
-      {/* Row 1 — AR config + primary actions. AR options + actions always
-          visible; cropping is one feature, no manual-vs-cluster mode split. */}
-      <div className="flex items-center gap-2 text-sm flex-wrap">
-        <label className="flex items-center gap-1.5">
-          <span className="text-fg-tertiary">{t('preprocessCrop.aspectRatio')}</span>
-          <select
-            value={arSel}
-            onChange={(e) => setArSel(e.target.value)}
-            disabled={busy}
-            className="input text-sm"
-            style={{ width: 'auto', padding: '2px 6px' }}
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="cluster-modal-title"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-md"
+      onClick={onClose}
+    >
+      <div
+        className="w-[90%] max-w-[460px] flex flex-col gap-5 p-6 bg-elevated border border-dim rounded-lg shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h2 id="cluster-modal-title" className="m-0 text-lg font-semibold text-fg-primary">
+          {t('preprocessCrop.autoCluster')}
+        </h2>
+        <p className="m-0 text-sm text-fg-secondary leading-relaxed">
+          {t('preprocessCrop.clusterModalDesc')}
+        </p>
+        <div className="grid grid-cols-3 gap-3">
+          <ClusterField
+            label={t('preprocessCrop.clusterMaxCrop')}
+            value={autoParams.maxCropFraction}
+            min={0} max={0.3} step={0.01}
+            onChange={(v) => setAutoParams({ ...autoParams, maxCropFraction: Math.max(0, Math.min(0.3, v)) })}
+          />
+          <ClusterField
+            label={t('preprocessCrop.clusterKMin')}
+            value={autoParams.kMin}
+            min={1} max={10} step={1}
+            onChange={(v) => setAutoParams({ ...autoParams, kMin: Math.min(v, autoParams.kMax) })}
+          />
+          <ClusterField
+            label={t('preprocessCrop.clusterKMax')}
+            value={autoParams.kMax}
+            min={2} max={15} step={1}
+            onChange={(v) => setAutoParams({ ...autoParams, kMax: Math.max(v, autoParams.kMin) })}
+          />
+        </div>
+        {lastClusterK !== null && (
+          <p className="m-0 text-xs text-ok font-mono">
+            ✓ {t('preprocessCrop.clusterDone')} {t('preprocessCrop.clusterUsed', { k: lastClusterK })}
+          </p>
+        )}
+        <div className="flex justify-end gap-2 pt-1">
+          <button type="button" onClick={onClose} className="btn btn-secondary">
+            {t('common.cancel', { defaultValue: '取消' })}
+          </button>
+          <button
+            type="button"
+            onClick={onRun}
+            disabled={busy || totalImages === 0}
+            className="btn btn-primary"
           >
-            {AR_OPTIONS.map((o) => (
-              <option key={o.id} value={o.id}>{o.label}</option>
-            ))}
-          </select>
-        </label>
-        {arSel === 'custom' && (
-          <label className="flex items-center gap-1.5">
-            <span className="text-fg-tertiary">W : H</span>
-            <input
-              type="number" min={1} max={64}
-              value={customAR.w}
-              onChange={(e) => setCustomAR({ ...customAR, w: Number(e.target.value) || 1 })}
-              className="input input-mono text-sm"
-              style={{ width: 56, padding: '2px 6px' }}
-            />
-            <span className="text-fg-tertiary">:</span>
-            <input
-              type="number" min={1} max={64}
-              value={customAR.h}
-              onChange={(e) => setCustomAR({ ...customAR, h: Number(e.target.value) || 1 })}
-              className="input input-mono text-sm"
-              style={{ width: 56, padding: '2px 6px' }}
-            />
-          </label>
-        )}
-        <span className="text-dim">·</span>
-        <span className="text-fg-secondary text-xs">
-          {arSel === 'free'
-            ? t('preprocessCrop.hintFree')
-            : t('preprocessCrop.hintLocked', { ar: arSel === 'custom' ? `${customAR.w}:${customAR.h}` : arSel })}
-        </span>
-        <span className="flex-1" />
-        <span className="font-mono text-xs text-fg-tertiary mr-1">
-          {t('preprocessCrop.summary', { rects: totalRects, configured: configuredImages, total: totalImages })}
-        </span>
-        <button
-          onClick={onApplySelected}
-          disabled={busy || !activeHasCrops}
-          className="btn btn-secondary btn-sm"
-        >{t('preprocessCrop.cropActive')}</button>
-        <button
-          onClick={onApplyAll}
-          disabled={busy || totalRects === 0}
-          className="btn btn-primary btn-sm"
-        >▶ {t('preprocessCrop.cropAll', { n: totalRects })}</button>
+            ▶ {t('preprocessCrop.runCluster')}
+          </button>
+        </div>
       </div>
-
-      {/* Row 2 — 智能聚类 as an optional helper. Collapsed by default to keep
-          OperationPanel compact (most sessions don't use it). Expand with the
-          ▸ toggle to reveal sliders + Run button. */}
-      <div className="flex flex-col gap-1.5 rounded-sm bg-sunken/40 border border-subtle px-2.5 py-1.5">
-        <button
-          type="button"
-          onClick={() => setClusterOpen((v) => !v)}
-          className="flex items-baseline gap-2 text-xs w-full text-left bg-transparent border-0 p-0 cursor-pointer"
-        >
-          <span className="text-fg-tertiary w-3 inline-block">{clusterOpen ? '▾' : '▸'}</span>
-          <span className="text-accent">✦</span>
-          <span className="font-medium text-fg-secondary">
-            {t('preprocessCrop.clusterSectionTitle')}
-          </span>
-          <span className="text-fg-tertiary">
-            {t('preprocessCrop.clusterSectionDesc')}
-          </span>
-          <span className="flex-1" />
-          {lastClusterK !== null && (
-            <span className="text-xs">
-              <span className="inline-block px-1.5 py-0.5 rounded-full bg-ok-soft text-ok font-mono">
-                ✓ {t('preprocessCrop.clusterDone')}
-              </span>
-              <span className="text-fg-tertiary ml-2">
-                {t('preprocessCrop.clusterUsed', { k: lastClusterK })}
-              </span>
-            </span>
-          )}
-        </button>
-        {clusterOpen && (
-          <div className="flex items-center gap-3 text-sm flex-wrap">
-            <ClusterSlider
-              label="max_crop"
-              min={0} max={0.3} step={0.01}
-              value={autoParams.maxCropFraction}
-              onChange={(v) => setAutoParams({ ...autoParams, maxCropFraction: v })}
-              display={autoParams.maxCropFraction.toFixed(2)}
-            />
-            <ClusterSlider
-              label="k_min"
-              min={1} max={10} step={1}
-              value={autoParams.kMin}
-              onChange={(v) => setAutoParams({ ...autoParams, kMin: Math.min(v, autoParams.kMax) })}
-              display={String(autoParams.kMin)}
-            />
-            <ClusterSlider
-              label="k_max"
-              min={2} max={15} step={1}
-              value={autoParams.kMax}
-              onChange={(v) => setAutoParams({ ...autoParams, kMax: Math.max(v, autoParams.kMin) })}
-              display={String(autoParams.kMax)}
-            />
-            <button
-              onClick={onRunCluster}
-              disabled={busy || totalImages === 0}
-              className="btn btn-secondary btn-sm"
-            >▶ {t('preprocessCrop.runCluster')}</button>
-          </div>
-        )}
-      </div>
-
-    </section>
+    </div>
   )
 }
 
-function ClusterSlider({
-  label, min, max, step, value, onChange, display,
+function ClusterField({
+  label, value, min, max, step, onChange,
 }: {
   label: string
-  min: number; max: number; step: number; value: number
+  value: number
+  min: number; max: number; step: number
   onChange: (v: number) => void
-  display: string
 }) {
   return (
-    <label className="flex items-center gap-1.5 min-w-[180px] flex-1">
-      <span className="text-fg-tertiary text-xs">{label}</span>
+    <label className="flex flex-col gap-1 text-xs">
+      <span className="text-fg-tertiary">{label}</span>
       <input
-        type="range" min={min} max={max} step={step}
+        type="number"
+        min={min} max={max} step={step}
         value={value}
         onChange={(e) => onChange(Number(e.target.value))}
-        className="flex-1 cursor-pointer accent-accent"
-        style={{ height: 4, minWidth: 100 }}
+        className="input input-mono text-sm"
+        style={{ padding: '4px 8px' }}
       />
-      <span className="font-mono text-xs text-fg-tertiary">{display}</span>
     </label>
   )
 }
@@ -692,6 +687,11 @@ function RectListPanel({
   crops,
   selectedId,
   arLock,
+  arSel,
+  setArSel,
+  customAR,
+  setCustomAR,
+  busy,
   onSelect,
   onLabelChange,
   onDelete,
@@ -701,6 +701,11 @@ function RectListPanel({
   crops: CropRect[]
   selectedId: string | null
   arLock: { w: number; h: number } | null
+  arSel: string
+  setArSel: (s: string) => void
+  customAR: { w: number; h: number }
+  setCustomAR: (v: { w: number; h: number }) => void
+  busy: boolean
   onSelect: (id: string) => void
   onLabelChange: (id: string, label: string) => void
   onDelete: (id: string) => void
@@ -708,7 +713,8 @@ function RectListPanel({
 }) {
   const { t } = useTranslation()
   return (
-    <div className="bg-sunken border border-subtle rounded-md p-2.5 flex flex-col gap-2 h-full min-h-0 overflow-y-auto">
+    <div className="bg-sunken border border-subtle rounded-md flex flex-col h-full min-h-0 overflow-hidden">
+      <div className="flex flex-col gap-2 p-2.5 flex-1 min-h-0 overflow-y-auto">
       <header className="flex items-center gap-2 flex-wrap">
         <h3 className="caption">{t('preprocessCrop.rectListTitle')} · {crops.length}</h3>
         <span className="text-fg-tertiary text-[11px]">
@@ -789,93 +795,45 @@ function RectListPanel({
           </div>
         )
       })}
-    </div>
-  )
-}
-
-// ---------------------------------------------------------------------------
-// Filmstrip
-// ---------------------------------------------------------------------------
-
-function Filmstrip({
-  items,
-  activeName,
-  cropsByImage,
-  onSelect,
-  thumbUrl,
-  emptyHint,
-}: {
-  items: CropWorkspaceItem[]
-  activeName: string | null
-  cropsByImage: Record<string, CropRect[]>
-  onSelect: (name: string) => void
-  thumbUrl: (im: CropWorkspaceItem) => string
-  emptyHint?: string
-}) {
-  /* 3-col vertical grid with square cover thumbs. Squaring is intentional —
-     a 264-image dataset spans both portrait and landscape source ARs and
-     mixing them in a row leaves ragged gaps. Cover-crop keeps the grid tidy
-     and recognisable enough as a navigator (full AR is visible in the
-     canvas anyway). The existing crop rects still overlay in normalized
-     percent coords, so the user can spot which images already have crops. */
-  if (items.length === 0) {
-    // Render the same container so the parent grid keeps 3 columns; empty
-    // state lives inside.
-    return (
-      <div className="flex items-center justify-center bg-sunken/40 border border-subtle rounded p-3 h-full text-center text-fg-tertiary text-[11px] leading-snug">
-        {emptyHint ?? ''}
       </div>
-    )
-  }
-  return (
-    <div className="grid grid-cols-3 gap-1 overflow-y-auto pr-1 bg-sunken/40 border border-subtle rounded p-1.5 h-full content-start">
-      {items.map((im) => {
-        const crops = cropsByImage[im.name] ?? []
-        const isActive = im.name === activeName
-        return (
-          <div key={im.name} className="fs-thumb-sq-cell">
-            <button
-              onClick={() => onSelect(im.name)}
-              className={'fs-thumb-sq ' + (isActive ? 'is-active' : '')}
-              title={im.name}
-            >
-              {/* <img> instead of background-image: browsers honour Cache-Control
-                  + ETag for <img src> reliably; CSS background-image hits the
-                  in-memory decoded-image cache and can keep showing stale bytes
-                  after an in-place crop output. object-fit: cover preserves the
-                  original squared-thumbnail look. */}
-              <img
-                src={thumbUrl(im)}
-                alt=""
-                draggable={false}
-                style={{
-                  position: 'absolute',
-                  inset: 0,
-                  width: '100%',
-                  height: '100%',
-                  objectFit: 'cover',
-                  objectPosition: 'center',
-                  pointerEvents: 'none',
-                }}
-              />
-              {crops.length > 0 && crops.map((c, i) => (
-                <div
-                  key={c.id}
-                  className={'fs-overlay ' + (crops.length > 1 ? 'is-multi' : '')}
-                  style={{
-                    left: `${c.x * 100}%`,
-                    top: `${c.y * 100}%`,
-                    width: `${c.w * 100}%`,
-                    height: `${c.h * 100}%`,
-                  }}
-                  aria-label={`crop ${i + 1}`}
-                />
-              ))}
-              {crops.length > 1 && <span className="fs-badge">×{crops.length}</span>}
-            </button>
-          </div>
-        )
-      })}
+
+      {/* 长宽比锁定固定栏：贴「本图裁剪」面板底部，画框时锁定裁剪框比例 */}
+      <div className="shrink-0 border-t border-subtle px-2.5 py-2 flex flex-col gap-1.5">
+        <label className="flex items-center gap-1.5 text-xs">
+          <span className="text-fg-tertiary shrink-0">{t('preprocessCrop.aspectRatio')}</span>
+          <select
+            value={arSel}
+            onChange={(e) => setArSel(e.target.value)}
+            disabled={busy}
+            className="input text-sm flex-1 min-w-0"
+            style={{ padding: '2px 6px' }}
+          >
+            {AR_OPTIONS.map((o) => (
+              <option key={o.id} value={o.id}>{o.label}</option>
+            ))}
+          </select>
+        </label>
+        {arSel === 'custom' && (
+          <label className="flex items-center gap-1.5 text-xs">
+            <span className="text-fg-tertiary shrink-0">W : H</span>
+            <input
+              type="number" min={1} max={64}
+              value={customAR.w}
+              onChange={(e) => setCustomAR({ ...customAR, w: Number(e.target.value) || 1 })}
+              className="input input-mono text-sm"
+              style={{ width: 56, padding: '2px 6px' }}
+            />
+            <span className="text-fg-tertiary">:</span>
+            <input
+              type="number" min={1} max={64}
+              value={customAR.h}
+              onChange={(e) => setCustomAR({ ...customAR, h: Number(e.target.value) || 1 })}
+              className="input input-mono text-sm"
+              style={{ width: 56, padding: '2px 6px' }}
+            />
+          </label>
+        )}
+      </div>
     </div>
   )
 }

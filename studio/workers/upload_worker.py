@@ -72,12 +72,12 @@ def run(job_id: int) -> int:
 
         sec = secrets.load()
         progress(
-            f"[start] files={len(sources)} convert_to_png={sec.gelbooru.convert_to_png}"
+            f"[start] files={len(sources)} convert_to_png={sec.download.convert_to_png}"
         )
         result = uploads_svc.ingest_paths(
             sources, dest,
-            convert_to_png=sec.gelbooru.convert_to_png,
-            remove_alpha_channel=sec.gelbooru.remove_alpha_channel,
+            convert_to_png=sec.download.convert_to_png,
+            remove_alpha_channel=sec.download.remove_alpha_channel,
             on_progress=progress,
         )
         project_jobs.write_result(job_id, result.as_dict())

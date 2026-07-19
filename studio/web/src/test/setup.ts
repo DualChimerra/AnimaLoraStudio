@@ -1,9 +1,10 @@
 import '@testing-library/jest-dom/vitest'
 import { vi } from 'vitest'
 
-// 测试环境里默认 locale = zh（i18n/index.ts 读 localStorage 取不到就 fallback 'zh'）。
-// 不 import 这个,useTranslation 返回 raw key,所有断言中文字面量全打挂。
-import '../i18n'
+// 测试环境里默认 locale = zh：上游测试断言中文字面量。本 fork 应用默认 'en'，
+// import 后同步切到 zh（import 会被 hoist，localStorage 预写没用）。
+import i18n from '../i18n'
+void i18n.changeLanguage('zh')
 
 // jsdom 装的 fetch 会真去打网络。tagDict store / 其他 mount-time 请求在测试态下
 // 打 404 是预期分支，但 `network error` 会让 React 报 act() warning。给 fetch 装
@@ -11,6 +12,16 @@ import '../i18n'
 // vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(...) 覆盖。
 if (typeof globalThis.fetch === 'function') {
   vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 404 })))
+}
+
+// jsdom 没有 ResizeObserver（useAutoGrowTextarea 等会 new 它撑高 textarea）；装个
+// no-op，避免组件 mount 时抛错。测试不校验自动撑高，回调不触发即可。
+if (typeof globalThis.ResizeObserver === 'undefined') {
+  globalThis.ResizeObserver = class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  } as unknown as typeof ResizeObserver
 }
 
 // 把 tagDict store 预热到 'empty' 状态：useTagDict 的 useEffect 看到非 idle 就

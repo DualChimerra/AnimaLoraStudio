@@ -1,8 +1,10 @@
-"""Optimizer utils 测试 — 重点覆盖 PPSF 接入。
+"""Optimizer utils 测试 — 覆盖 PPSF 接入 + Automagic v1/v2。
 
 - optimizer_eval_mode context manager 对 PPSF / 非 PPSF 行为
 - create_prodigy_plus_schedulefree 工厂在依赖缺失时友好报错
 - 工厂 lr 强制 1.0 + betas 默认覆盖逻辑
+- Automagic v1: step、bf16 Kahan（shift 同 param dtype，对齐 diffusion-pipe）、state_dict roundtrip
+- Automagic v2: fused backward hook、scalar lr
 """
 from __future__ import annotations
 
@@ -16,8 +18,12 @@ import torch
 from torch import nn
 
 from utils.optimizer_utils import (
+    CAME,
     Automagic,
+    Automagic2,
     Lion,
+    create_automagic,
+    create_automagic_v2,
     create_came,
     create_optimizer,
     create_prodigy_plus_schedulefree,
@@ -263,6 +269,159 @@ def test_automagic_state_dict_roundtrip() -> None:
         assert s1["lr_mask"].scale == s2["lr_mask"].scale
 
 
+# ---------------------------------------------------------------------------
+# CAME
+# ---------------------------------------------------------------------------
+
+
+def _came_reference_step(
+    p: torch.Tensor,
+    grad: torch.Tensor,
+    lr: float,
+    betas: tuple[float, float, float],
+    eps: tuple[float, float],
+    clip_threshold: float,
+) -> torch.Tensor:
+    """按官方实现（yangluo7/CAME, Algorithm 1）独立重算首步后的参数值。
+
+    首步（所有 EMA state 从 0 起）的 factored 路径，用于 codify 公式防回归
+    （AGENTS.md §0.4：外部论文实现先 verify 再用单测钉死）。
+    """
+    beta1, beta2, beta3 = betas
+    eps1, eps2 = eps
+
+    def rms(t: torch.Tensor) -> torch.Tensor:
+        return t.norm(2) / (t.numel() ** 0.5)
+
+    def approx(row: torch.Tensor, col: torch.Tensor) -> torch.Tensor:
+        r = (row / row.mean(dim=-1, keepdim=True)).rsqrt().unsqueeze(-1)
+        c = col.unsqueeze(-2).rsqrt()
+        return r * c
+
+    sq = grad**2 + eps1
+    row = (1.0 - beta2) * sq.mean(dim=-1)
+    col = (1.0 - beta2) * sq.mean(dim=-2)
+    update = approx(row, col) * grad
+    update = update / torch.clamp(rms(update) / clip_threshold, min=1.0)
+    exp_avg = (1.0 - beta1) * update
+    res = (update - exp_avg) ** 2 + eps2
+    res_row = (1.0 - beta3) * res.mean(dim=-1)
+    res_col = (1.0 - beta3) * res.mean(dim=-2)
+    final = approx(res_row, res_col) * exp_avg
+    return p - lr * final
+
+
+def test_came_first_step_matches_reference_formula() -> None:
+    """CAME 首步（factored 2D 参数）与按论文/官方实现独立重算的结果一致。"""
+    torch.manual_seed(3)
+    lr, betas, eps, clip = 1e-2, (0.9, 0.999, 0.9999), (1e-30, 1e-16), 1.0
+
+    p = nn.Parameter(torch.randn(6, 4))
+    grad = torch.randn(6, 4)
+    expected = _came_reference_step(p.detach(), grad, lr, betas, eps, clip)
+
+    optim = CAME([p], lr=lr, betas=betas, eps=eps, clip_threshold=clip)
+    p.grad = grad.clone()
+    optim.step()
+
+    assert torch.allclose(p.detach(), expected, atol=1e-7), (
+        f"CAME 首步与 reference 公式不一致：max diff = "
+        f"{(p.detach() - expected).abs().max().item():.3e}"
+    )
+
+
+def test_came_factored_state_keys() -> None:
+    """2D 参数走 factored 路径（行/列二阶矩 + 行/列 instability），1D 用完整二阶矩。"""
+    mat = nn.Parameter(torch.randn(4, 3))
+    vec = nn.Parameter(torch.randn(5))
+    optim = CAME([mat, vec], lr=1e-3)
+    mat.grad = torch.randn_like(mat)
+    vec.grad = torch.randn_like(vec)
+    optim.step()
+
+    st_mat = optim.state[mat]
+    assert {"exp_avg", "exp_avg_sq_row", "exp_avg_sq_col",
+            "exp_avg_res_row", "exp_avg_res_col"} <= set(st_mat)
+    assert "exp_avg_sq" not in st_mat
+    assert st_mat["exp_avg_sq_row"].shape == (4,)
+    assert st_mat["exp_avg_sq_col"].shape == (3,)
+
+    st_vec = optim.state[vec]
+    assert "exp_avg_sq" in st_vec
+    assert "exp_avg_sq_row" not in st_vec
+
+
+def test_came_bf16_param_state_fp32_and_finite() -> None:
+    """bf16 参数下 state 固定 fp32（EMA 增量不被 bf16 round 吞掉），写回有限。"""
+    p = nn.Parameter(torch.randn(8, 8, dtype=torch.bfloat16))
+    optim = CAME([p], lr=1e-3)
+    p.grad = torch.randn_like(p)
+    optim.step()
+
+    st = optim.state[p]
+    for key in ("exp_avg", "exp_avg_sq_row", "exp_avg_sq_col",
+                "exp_avg_res_row", "exp_avg_res_col"):
+        assert st[key].dtype == torch.float32, f"{key} 应为 fp32"
+    assert torch.isfinite(p).all()
+
+
+def test_create_came_backfills_beta3_and_eps_pair() -> None:
+    """上层 create_optimizer 传其 Adam 默认（betas=(0.9,0.999) / eps=1e-8）时，
+    工厂按默认哨兵映射到论文默认 β3=0.9999 / eps=(1e-30, 1e-16)。"""
+    model = nn.Linear(4, 4)
+    optim = create_optimizer("came", model.parameters(), learning_rate=1e-4)
+    assert isinstance(optim, CAME)
+    assert optim.param_groups[0]["betas"] == (0.9, 0.999, 0.9999)
+    assert optim.param_groups[0]["eps"] == (1e-30, 1e-16)
+
+    # 显式传 3 元组 / eps 对则尊重
+    model2 = nn.Linear(4, 4)
+    optim2 = create_came(
+        model2.parameters(), lr=1e-4, betas=(0.8, 0.99, 0.999), eps=(1e-20, 1e-12),
+    )
+    assert optim2.param_groups[0]["betas"] == (0.8, 0.99, 0.999)
+    assert optim2.param_groups[0]["eps"] == (1e-20, 1e-12)
+
+
+def test_create_came_rejects_explicit_scalar_eps_and_short_betas() -> None:
+    """非默认哨兵的错形状配置必须响亮失败，不许静默替换：
+    显式标量 eps（≠ Adam 默认 1e-8）报错；显式 2 元组 betas（≠ Adam 默认）
+    由 CAME.__init__ 拒绝。"""
+    model = nn.Linear(4, 4)
+    with pytest.raises(ValueError, match="eps1, eps2"):
+        create_came(model.parameters(), lr=1e-4, eps=1e-6)
+    with pytest.raises(ValueError, match="Invalid betas"):
+        create_came(model.parameters(), lr=1e-4, betas=(0.8, 0.99))
+
+
+def test_came_rejects_invalid_hyperparams() -> None:
+    model = nn.Linear(2, 2)
+    with pytest.raises(ValueError, match="Invalid betas"):
+        CAME(model.parameters(), lr=1e-4, betas=(0.9, 1.5, 0.9999))
+    with pytest.raises(ValueError, match="Invalid learning rate"):
+        CAME(model.parameters(), lr=0.0)
+    # β=1.0 会让 EMA 停在零值 → _approx_sq_grad 首步 0/0=NaN，必须拒绝
+    with pytest.raises(ValueError, match="Invalid betas"):
+        CAME(model.parameters(), lr=1e-4, betas=(0.9, 1.0, 0.9999))
+    with pytest.raises(ValueError, match="Invalid betas"):
+        CAME(model.parameters(), lr=1e-4, betas=(0.9, 0.999, 1.0))
+    # eps=0 在整张梯度为零（LoRA 零初始化首步）时 0/0=NaN，必须拒绝
+    with pytest.raises(ValueError, match="Invalid eps"):
+        CAME(model.parameters(), lr=1e-4, eps=(0.0, 1e-16))
+    with pytest.raises(ValueError, match="Invalid eps"):
+        CAME(model.parameters(), lr=1e-4, eps=(1e-30, 0.0))
+
+
+def test_came_weight_decay_shrinks_params() -> None:
+    """weight_decay 是解耦 L2：零梯度下参数按 (1 - wd*lr) 收缩。"""
+    p = nn.Parameter(torch.ones(4, 4))
+    optim = CAME([p], lr=1e-2, weight_decay=0.1)
+    p.grad = torch.zeros_like(p)
+    optim.step()
+    # grad=0 → update 全 0，只剩 weight decay 项：p ← p - wd*lr*p
+    assert torch.allclose(p.detach(), torch.full((4, 4), 1.0 - 0.1 * 1e-2))
+
+
 def test_create_lion_optimizer_updates_parameters() -> None:
     model = nn.Linear(2, 1, bias=False)
     with torch.no_grad():
@@ -416,69 +575,148 @@ def test_create_ppsf_exposes_train_eval_methods() -> None:
 
 
 # ---------------------------------------------------------------------------
-# create_came
+# Automagic v1
 # ---------------------------------------------------------------------------
 
 
-def _has_came() -> bool:
-    try:
-        importlib.import_module("came_pytorch")
-        return True
-    except ImportError:
-        return False
+def test_automagic_bf16_shift_dtype_stable_across_resume() -> None:
+    """bf16 参数的 Kahan shift buffer 与上游 diffusion-pipe 对齐：同 param dtype
+    （bf16）。关键性质是 resume 稳定 —— PyTorch load_state_dict 会把 float state
+    cast 到 param dtype，bf16 shift 在 roundtrip 后 dtype 不变（fp32 shift 则会被
+    静默降成 bf16，行为漂移）。"""
+    p = nn.Parameter(torch.randn(8, 8, dtype=torch.bfloat16))
+    optim = Automagic([p], lr=1e-4)
 
-
-def test_create_came_import_error_message(monkeypatch: pytest.MonkeyPatch) -> None:
-    """没装 came-pytorch 时报错信息要含安装提示，而不是裸 ImportError。
-
-    用 builtins.__import__ 强制让 `from came_pytorch import CAME` 抛 ImportError，
-    不依赖运行环境是否真装了 came-pytorch。
-    """
-    real_import = builtins.__import__
-
-    def fake_import(name, *args, **kwargs):
-        if name == "came_pytorch" or name.startswith("came_pytorch."):
-            raise ImportError("simulated: no came_pytorch")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.delitem(sys.modules, "came_pytorch", raising=False)
-    monkeypatch.setattr(builtins, "__import__", fake_import)
-
-    model = nn.Linear(4, 4)
-    with pytest.raises(ImportError, match="came-pytorch"):
-        create_came(model.parameters(), lr=1e-4)
-
-
-@pytest.mark.skipif(not _has_came(), reason="came-pytorch 未安装")
-def test_create_came_updates_parameters() -> None:
-    """CAME 单步：参数被更新，外部 lr 写进 param_group（非 schedule-free）。"""
-    model = nn.Linear(2, 1, bias=False)
-    with torch.no_grad():
-        model.weight.fill_(1.0)
-    optim = create_came(model.parameters(), lr=1e-2, weight_decay=0.0)
-
-    model(torch.ones(1, 2)).sum().backward()
+    p.grad = torch.randn_like(p)
     optim.step()
 
-    assert not torch.allclose(model.weight, torch.ones_like(model.weight))
-    assert optim.param_groups[0]["lr"] == pytest.approx(1e-2)
+    state = optim.state[p]
+    assert "shift" in state, "bf16 参数应该创建 shift buffer"
+    assert state["shift"].dtype == p.dtype
+
+    # state_dict roundtrip 后 dtype 不漂移
+    sd = optim.state_dict()
+    p2 = nn.Parameter(torch.randn(8, 8, dtype=torch.bfloat16))
+    optim2 = Automagic([p2], lr=1e-4)
+    optim2.load_state_dict(sd)
+    assert optim2.state[p2]["shift"].dtype == p2.dtype
 
 
-@pytest.mark.skipif(not _has_came(), reason="came-pytorch 未安装")
-def test_create_came_normalizes_adamw_shape_defaults() -> None:
-    """通用 create_optimizer 默认 betas=(0.9,0.999)（2 元组）+ eps=1e-8（标量）形状对
-    CAME 不合法；create_came 应回退到 CAME 上游默认 3 元组 / 2 元组而不是崩。"""
+# ---------------------------------------------------------------------------
+# Automagic v2
+# ---------------------------------------------------------------------------
+
+
+def test_automagic_v2_scalar_lr_updates() -> None:
+    """Automagic v2 使用 fused backward hook，验证参数确实更新。"""
+    torch.manual_seed(7)
+    model = nn.Linear(8, 4, bias=False)
+    p_before = model.weight.data.clone()
+
+    optim = create_automagic_v2(model.parameters(), lr=1e-3)
+
+    # v2 的 hook 在 backward 时自动更新参数
+    for _ in range(5):
+        out = model(torch.randn(2, 8))
+        loss = out.sum()
+        loss.backward()
+        # v2 不需要手动 step（hook 内完成），但调用也无害
+        optim.zero_grad()
+
+    assert not torch.allclose(model.weight.data, p_before), "v2 backward hook 应导致参数变化"
+
+
+def test_automagic_v2_get_avg_learning_rate() -> None:
+    """v2 实例应暴露 get_avg_learning_rate 方法。"""
     model = nn.Linear(4, 4)
-    optim = create_optimizer("came", model.parameters(), learning_rate=1e-4)
-    betas = optim.param_groups[0]["betas"]
-    eps = optim.param_groups[0]["eps"]
-    assert len(tuple(betas)) == 3
-    assert len(tuple(eps)) == 2
+    optim = create_automagic_v2(model.parameters(), lr=1e-3)
+    assert hasattr(optim, "get_avg_learning_rate")
+    avg_lr = optim.get_avg_learning_rate()
+    assert isinstance(avg_lr, float) or isinstance(avg_lr, torch.Tensor)
 
 
-@pytest.mark.skipif(not _has_came(), reason="came-pytorch 未安装")
-def test_came_monitor_metrics_use_plain_lr() -> None:
-    """CAME 是外部 lr 系，监控按普通 param_group['lr'] 读，不走 Prodigy d 逻辑。"""
+# ---------------------------------------------------------------------------
+# get_optimizer_monitor_metrics — Automagic duck typing
+# ---------------------------------------------------------------------------
+
+
+def test_automagic_monitor_metrics_uses_get_avg_learning_rate() -> None:
+    """get_optimizer_monitor_metrics 优先走 get_avg_learning_rate 鸭子类型。"""
+    torch.manual_seed(0)
     model = nn.Linear(4, 4)
-    optim = create_came(model.parameters(), lr=2e-4)
-    assert get_optimizer_monitor_metrics(optim) == {"lr": pytest.approx(2e-4)}
+    optim = create_automagic(model.parameters(), lr=1e-4)
+
+    # 跑几步让 lr 有值
+    for _ in range(3):
+        out = model(torch.randn(2, 4))
+        out.sum().backward()
+        optim.step()
+        optim.zero_grad()
+
+    metrics = get_optimizer_monitor_metrics(optim)
+    assert "lr" in metrics
+    assert "actual_lr" in metrics
+    assert metrics["lr"] > 0
+
+
+# ---------------------------------------------------------------------------
+# create_optimizer 工厂分派
+# ---------------------------------------------------------------------------
+
+
+def test_create_optimizer_dispatches_automagic() -> None:
+    """create_optimizer(optimizer_type='automagic') 返回 Automagic 实例。"""
+    model = nn.Linear(4, 4)
+    optim = create_optimizer("automagic", model.parameters(), learning_rate=1e-4)
+    assert isinstance(optim, Automagic)
+
+
+def test_create_optimizer_dispatches_automagic_v2() -> None:
+    """create_optimizer(optimizer_type='automagic_v2') 返回 Automagic2 实例。"""
+    model = nn.Linear(4, 4)
+    optim = create_optimizer("automagic_v2", model.parameters(), learning_rate=1e-3)
+    assert isinstance(optim, Automagic2)
+
+
+# ---------------------------------------------------------------------------
+# Automagic v2 守卫（followup：fused 路径自卫）
+# ---------------------------------------------------------------------------
+
+
+def test_automagic_v2_skips_nonfinite_grad() -> None:
+    """fused 路径绕过训练循环的 step 边界 NaN 检查，必须在 hook 内自卫。"""
+    p = nn.Parameter(torch.ones(4, 4))
+    optim = Automagic2([p], lr=1e-4)
+    before = p.detach().clone()
+    p.grad = torch.full_like(p, float("nan"))
+    optim._update_param(p, optim.param_groups[0])
+    assert torch.equal(p.detach(), before), "NaN 梯度不应触碰参数"
+    assert p.grad is None, "坏梯度应被丢弃"
+
+
+def test_automagic_v2_second_moment_fp32_under_bf16() -> None:
+    """二阶矩固定 fp32：bf16 存储会让 (1-beta2)=1e-3 的 EMA 增量被 round 吞掉。"""
+    p = nn.Parameter(torch.randn(4, 4, dtype=torch.bfloat16))
+    optim = Automagic2([p], lr=1e-6)
+    p.grad = torch.randn_like(p)
+    optim._update_param(p, optim.param_groups[0])
+    st = optim.state[p]
+    assert st["exp_avg_sq_row"].dtype == torch.float32
+    assert st["exp_avg_sq_col"].dtype == torch.float32
+    assert st["lr"].dtype == torch.float32
+
+
+def test_automagic_v2_validate_rejects_grad_accum() -> None:
+    """v2 fused backward 与梯度累积语义冲突，启动期必须拦截。"""
+    from types import SimpleNamespace
+    from training.optimizers import automagic as automagic_builder
+
+    args = SimpleNamespace(
+        lr_scheduler="none", automagic_variant="v2",
+        mixed_precision="bf16", grad_clip_max_norm=0, grad_accum=4,
+    )
+    with pytest.raises(ValueError, match="grad_accum"):
+        automagic_builder.validate(args)
+
+    args.grad_accum = 1
+    automagic_builder.validate(args)  # 不应抛

@@ -17,7 +17,7 @@ import app` 不再触发文件系统初始化，便于测试 / 工具 import 而
     1. 取消挂着的 SSE disconnect timer
     2. SystemStatsSampler.stop
     3. Supervisor.stop（含 daemon stop + 子进程 graceful terminate）
-    4. generate_cache.clear_all（释放图缓存内存）
+    4. disk_cache.clear_all（删 session 目录 + key 跟着进程退出一起没）
 """
 from __future__ import annotations
 
@@ -68,6 +68,36 @@ def _install_proactor_disconnect_filter(loop: asyncio.AbstractEventLoop) -> None
     loop.set_exception_handler(_filter)
 
 
+class _CancelledAsgiNoiseFilter(logging.Filter):
+    """吞 shutdown 收尾取消连接时 uvicorn 的 cosmetic CancelledError 噪声。
+
+    uvicorn 启动参数带 timeout_graceful_shutdown（见 api/main.py）：超时后
+    uvicorn cancel 剩余连接 task（/api/events 等 SSE 长连接），CancelledError
+    从 starlette 冒回 h11 的 run_asgi 时被 `except BaseException` 兜住、按
+    「Exception in ASGI application」打 ERROR + 完整 traceback —— 但这个取消
+    是关停流程主动要求的，不是应用错误，Ctrl+C 一次就刷两大坨假报错。
+
+    精确过滤：只吞 message 为该文案且异常类型是 CancelledError 的记录；
+    其它 ASGI 异常照常打。
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not str(record.msg).startswith("Exception in ASGI application"):
+            return True
+        exc = record.exc_info[1] if record.exc_info else None
+        return not isinstance(exc, asyncio.CancelledError)
+
+
+_cancelled_asgi_filter = _CancelledAsgiNoiseFilter()
+
+
+def _install_uvicorn_cancelled_asgi_filter() -> None:
+    """幂等挂到 uvicorn.error logger（测试里 lifespan 会反复 startup）。"""
+    uvicorn_logger = logging.getLogger("uvicorn.error")
+    if _cancelled_asgi_filter not in uvicorn_logger.filters:
+        uvicorn_logger.addFilter(_cancelled_asgi_filter)
+
+
 @asynccontextmanager
 async def lifespan(app_: FastAPI) -> AsyncIterator[None]:
     """启动绑定 event bus 到当前 loop 并起 supervisor；关闭时停 supervisor。"""
@@ -78,6 +108,8 @@ async def lifespan(app_: FastAPI) -> AsyncIterator[None]:
 
     # 装 Windows ProactorEventLoop 的 ConnectionResetError 过滤器（详见 helper docstring）
     _install_proactor_disconnect_filter(asyncio.get_running_loop())
+    # 装 shutdown 取消 SSE 连接时的 CancelledError 日志过滤器（详见 class docstring）
+    _install_uvicorn_cancelled_asgi_filter()
 
     # PR-5：从 server.py 顶层搬来的 import-time 副作用 —— 现在跟随 app 启动
     # 才落盘，便于测试 / 工具 import 而不写文件系统。
@@ -86,10 +118,16 @@ async def lifespan(app_: FastAPI) -> AsyncIterator[None]:
 
     # 测试出图 tempdir 遗留清扫（防 supervisor crash 泄漏 anima_gen_* 目录）
     from ..services.inference.core import cleanup_stale_generate_tempdirs
-    from ..services.inference import cache as generate_cache
+    from ..services.inference import disk_cache as generate_cache
     from ..services import models as _md
     from ..services import system_stats
+    from ..infrastructure.paths import STUDIO_DATA
     cleanup_stale_generate_tempdirs()
+
+    # 加密磁盘 cache 初始化：startup_clean 清掉残留 session-* 目录（上次 SIGKILL
+    # / 断电 / 正常 shutdown 漏删的），再开一个新 session（随机 session_id + aes_key，
+    # 进程退出 key 一起没 → 残留文件等于乱字节，扫盘工具识不出）。
+    generate_cache.init(STUDIO_DATA / ".cache" / "generate")
 
     # TAEFlux（中间步预览）后台下载：跟 server 一起启动；下载失败不阻塞 server。
     # 如果已下载则 noop；下载期间用户能正常用其他功能，预览功能等下载完才生效。
@@ -105,14 +143,14 @@ async def lifespan(app_: FastAPI) -> AsyncIterator[None]:
             logger.exception("taeflux background download crashed")
     threading.Thread(target=_bg_download_taeflux, name="taeflux-bg-download", daemon=True).start()
 
-    # Tag 翻译词典（约 3MB CSV）后台下载：仅当 active.json 不存在时拉取；失败只
+    # Tag 翻译词典（约 30MB SQLite）后台下载：仅当 active.json 不存在时拉取；失败只
     # log warning，让用户进 Settings 看状态后手动点 "恢复默认词典" 重试。
     def _bg_download_tag_dict() -> None:
         from ..infrastructure import tag_dictionary as _td
         try:
             if _td.ACTIVE_JSON.exists():
                 return
-            logger.info("background-downloading tag dictionary (~3MB)…")
+            logger.info("background-downloading tag dictionary (~30MB)…")
             _td.download_default()
         except Exception as exc:
             logger.warning(
@@ -147,7 +185,7 @@ async def lifespan(app_: FastAPI) -> AsyncIterator[None]:
         n = generate_cache.total_count()
         if n:
             generate_cache.clear_all()
-            logger.info("flushed generate cache (%d images) after SSE idle", n)
+            logger.info("flushed generate disk cache (%d images) after SSE idle", n)
         _disconnect_timer["t"] = None
 
     bus.set_connection_callbacks(
@@ -177,5 +215,6 @@ async def lifespan(app_: FastAPI) -> AsyncIterator[None]:
             timer.cancel()
         sys_sampler.stop()
         sup.stop()
-        # commit 11：lifespan shutdown 清掉所有图 cache（释放内存 + 干净退出）
+        # shutdown 清整个 session 目录 + 进程退出 aes_key 一起没（即便 rmtree
+        # 失败，残留文件无 key 也是乱字节，下次启动 startup_clean 兜底）
         generate_cache.clear_all()

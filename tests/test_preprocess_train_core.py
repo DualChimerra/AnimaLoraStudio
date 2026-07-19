@@ -15,6 +15,7 @@ import pytest
 from PIL import Image
 
 from studio import db
+from studio.domain.errors import InvalidPathError, ValidationError
 from studio.services.preprocess import core as preprocess
 from studio.services.preprocess import manifest as preprocess_manifest
 from studio.services.projects import jobs as project_jobs, projects, versions
@@ -203,15 +204,17 @@ def test_resolve_targets_selected_intersects_train(isolated) -> None:
 
 def test_resolve_targets_selected_empty_names_raises(isolated) -> None:
     p = isolated["project"]
-    with pytest.raises(preprocess.PreprocessError):
+    with pytest.raises(ValidationError) as exc:
         preprocess.resolve_targets_train(p, "v1", mode="selected", names=[])
+    assert exc.value.code == "preprocess.selection_empty"
 
 
 def test_resolve_targets_unknown_mode_raises(isolated) -> None:
-    with pytest.raises(preprocess.PreprocessError):
+    with pytest.raises(ValidationError) as exc:
         preprocess.resolve_targets_train(
             isolated["project"], "v1", mode="bogus"
         )
+    assert exc.value.code == "preprocess.mode_invalid"
 
 
 def test_resolve_targets_name_with_traversal_rejected(isolated) -> None:
@@ -219,10 +222,11 @@ def test_resolve_targets_name_with_traversal_rejected(isolated) -> None:
     p = isolated["project"]
     sub = isolated["sub"]
     _write_png(sub / "X.png")
-    with pytest.raises(preprocess.PreprocessError):
+    with pytest.raises(InvalidPathError) as exc:
         preprocess.resolve_targets_train(
             p, "v1", mode="selected", names=["../etc/passwd"]
         )
+    assert exc.value.code == "path.invalid"
 
 
 # ---------------------------------------------------------------------------
@@ -252,11 +256,12 @@ def test_start_job_train_selected_requires_names(isolated) -> None:
     p = isolated["project"]
     v = isolated["version"]
     with db.connection_for(isolated["db"]) as conn:
-        with pytest.raises(preprocess.PreprocessError):
+        with pytest.raises(ValidationError) as exc:
             preprocess.start_job_train(
                 conn, project_id=p["id"], version_id=v["id"],
                 mode="selected",
             )
+        assert exc.value.code == "preprocess.selection_empty"
 
 
 def test_start_crop_job_train_validates_rects(isolated) -> None:
@@ -270,11 +275,12 @@ def test_start_crop_job_train_validates_rects(isolated) -> None:
             crops={_rel("X.png"): [{"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}]},
         )
         assert job["version_id"] == v["id"]
-        with pytest.raises(preprocess.PreprocessError):
+        with pytest.raises(ValidationError) as exc:
             preprocess.start_crop_job_train(
                 conn, project_id=p["id"], version_id=v["id"],
                 crops={_rel("X.png"): [{"x": 0, "y": 0, "w": 0.001, "h": 0.5}]},
             )
+        assert exc.value.code == "preprocess.crop_too_small"
 
 
 # ---------------------------------------------------------------------------
@@ -321,6 +327,110 @@ def test_list_crop_workspace_processed_flag(isolated) -> None:
     by_name = {it["name"]: it for it in out}
     assert by_name[_rel("up.png")]["processed"] is True
     assert by_name[_rel("raw.png")]["processed"] is False
+
+
+# ---------------------------------------------------------------------------
+# inpaint_save_train
+# ---------------------------------------------------------------------------
+
+
+def _png_bytes(size: tuple[int, int] = (10, 10), color: str = "blue") -> bytes:
+    import io
+
+    buf = io.BytesIO()
+    Image.new("RGB", size, color=color).save(buf, "PNG")
+    return buf.getvalue()
+
+
+def test_inpaint_save_overwrites_png_source(isolated) -> None:
+    """png 源同名覆盖：像素被替换、manifest 标 processed、返回新 size/mtime。"""
+    p = isolated["project"]
+    sub = isolated["sub"]
+    _write_png(sub / "X.png", (10, 10))  # 红色源
+
+    res = preprocess.inpaint_save_train(
+        p, "v1", name=_rel("X.png"), data=_png_bytes((10, 10), "blue"),
+    )
+    assert res["name"] == _rel("X.png")
+    assert res["w"] == 10 and res["h"] == 10
+
+    with Image.open(sub / "X.png") as im:
+        assert im.getpixel((0, 0)) == (0, 0, 255)
+
+    entry = preprocess_manifest.train_get_entry(
+        preprocess.project_root(p), "v1", _rel("X.png")
+    )
+    assert entry is not None
+    assert entry.get("processed") is True
+    assert entry["size"] == (sub / "X.png").stat().st_size
+
+
+def test_inpaint_save_converts_non_png_source(isolated) -> None:
+    """jpg 源 → 产物统一 .png、旧源删除、caption sidecar 保留、manifest key 迁移。"""
+    p = isolated["project"]
+    sub = isolated["sub"]
+    Image.new("RGB", (20, 10), color="red").save(sub / "Y.jpg", "JPEG")
+    (sub / "Y.txt").write_text("1girl, solo", encoding="utf-8")
+    preprocess_manifest.train_add_processed(
+        preprocess.project_root(p), "v1", _rel("Y.jpg"), {"origin": "Y.jpg"}
+    )
+
+    res = preprocess.inpaint_save_train(
+        p, "v1", name=_rel("Y.jpg"), data=_png_bytes((20, 10)),
+    )
+    assert res["name"] == _rel("Y.png")
+    assert res["origin"] == "Y.jpg"
+    assert (sub / "Y.png").is_file()
+    assert not (sub / "Y.jpg").exists()
+    assert (sub / "Y.txt").is_file()  # caption 跟 stem 走，不动
+
+    m = preprocess_manifest.train_load(preprocess.project_root(p), "v1")
+    assert _rel("Y.jpg") not in m["images"]
+    entry = m["images"][_rel("Y.png")]
+    assert entry["origin"] == "Y.jpg"
+    assert entry.get("processed") is True
+
+
+def test_inpaint_save_size_mismatch_rejected(isolated) -> None:
+    """尺寸不符 → ValidationError，源图字节不动。"""
+    p = isolated["project"]
+    sub = isolated["sub"]
+    _write_png(sub / "Z.png", (10, 10))
+    before = (sub / "Z.png").read_bytes()
+
+    with pytest.raises(ValidationError):
+        preprocess.inpaint_save_train(
+            p, "v1", name=_rel("Z.png"), data=_png_bytes((11, 10)),
+        )
+    assert (sub / "Z.png").read_bytes() == before
+
+
+def test_inpaint_save_invalid_bytes_rejected(isolated) -> None:
+    p = isolated["project"]
+    sub = isolated["sub"]
+    _write_png(sub / "B.png")
+
+    with pytest.raises(ValidationError):
+        preprocess.inpaint_save_train(
+            p, "v1", name=_rel("B.png"), data=b"not an image",
+        )
+
+
+def test_inpaint_save_missing_source_rejected(isolated) -> None:
+    from studio.domain.errors import NotFoundError
+
+    p = isolated["project"]
+    with pytest.raises(NotFoundError):
+        preprocess.inpaint_save_train(
+            p, "v1", name=_rel("nope.png"), data=_png_bytes(),
+        )
+
+
+def test_inpaint_save_invalid_name_rejected(isolated) -> None:
+    p = isolated["project"]
+    for bad in ("../X.png", "X.png", "1_data/../X.png", "a/b/c.png", ""):
+        with pytest.raises(InvalidPathError):
+            preprocess.inpaint_save_train(p, "v1", name=bad, data=_png_bytes())
 
 
 # ---------------------------------------------------------------------------
@@ -410,5 +520,6 @@ def test_restore_products_train_no_origin_when_download_missing(isolated) -> Non
 
 def test_restore_products_train_validates_name(isolated) -> None:
     p = isolated["project"]
-    with pytest.raises(preprocess.PreprocessError):
+    with pytest.raises(InvalidPathError) as exc:
         preprocess.restore_products_train(p, "v1", ["../etc"])
+    assert exc.value.code == "path.invalid"

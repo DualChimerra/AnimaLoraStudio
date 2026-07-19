@@ -1,7 +1,7 @@
 """模型加载基础设施：前缀推断、safetensors 读取、路径解析、xformers / 梯度检查点。
 
 抽自原 runtime/anima_train.py L370-612（ADR 0003 PR-A）。这里都是相对底层的 utils；
-更上层的 load_anima_model / load_vae / load_text_encoders 在 training.models。
+更上层的 load_vae 在 training.vae；load_anima_model / load_text_encoders 在 families/anima/loader。
 
 公开（被 sister script 用）：
 - find_diffusion_pipe_root / resolve_path_best_effort / enable_xformers
@@ -10,13 +10,13 @@
 内部：
 - _strip_prefixes / _pick_best_prefix_remap — checkpoint key 前缀自动推断
 - _load_safetensors_state_dict / _load_weights_best_effort — 容错加载
-- load_module_from_path — 动态加载 anima_modeling.py
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import sys
 from pathlib import Path
 
 import torch
@@ -28,34 +28,6 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 # 梯度检查点
 # ============================================================================
-
-def forward_with_optional_checkpoint(model, latents, timesteps, cross, padding_mask, use_checkpoint=False):
-    """带可选梯度检查点的前向传播。"""
-    if not use_checkpoint:
-        return model(latents, timesteps, cross, padding_mask=padding_mask)
-    from torch.utils.checkpoint import checkpoint
-
-    x_B_T_H_W_D, rope_emb, extra_pos_emb = model.prepare_embedded_sequence(
-        latents, fps=None, padding_mask=padding_mask,
-    )
-    if timesteps.ndim == 1:
-        timesteps = timesteps.unsqueeze(1)
-    t_embedding, adaln_lora = model.t_embedder(timesteps)
-    t_embedding = model.t_embedding_norm(t_embedding)
-
-    block_kwargs = {
-        "rope_emb_L_1_1_D": rope_emb,
-        "adaln_lora_B_T_3D": adaln_lora,
-        "extra_per_block_pos_emb": extra_pos_emb,
-    }
-
-    for block in model.blocks:
-        def custom_forward(x, blk=block):
-            return blk(x, t_embedding, cross, **block_kwargs)
-        x_B_T_H_W_D = checkpoint(custom_forward, x_B_T_H_W_D, use_reentrant=False)
-
-    x_B_T_H_W_O = model.final_layer(x_B_T_H_W_D, t_embedding, adaln_lora_B_T_3D=adaln_lora)
-    return model.unpatchify(x_B_T_H_W_O)
 
 
 # ============================================================================
@@ -71,6 +43,25 @@ def enable_xformers(model):
         return False
 
     enabled_count = 0
+    module_switches = 0
+    module_names = {
+        cls.__module__
+        for cls in type(model).__mro__
+        if getattr(cls, "__module__", None)
+    }
+    # exec-load 退役后模块身份唯一（多模型 PR-2a）：MRO 即可覆盖真实模块名
+    # （modeling.anima.cosmos_predict2_modeling / anima_modeling），无需别名广播。
+    for module_name in sorted(module_names):
+        module = sys.modules.get(module_name)
+        fn = getattr(module, "set_xformers_enabled", None) if module is not None else None
+        if fn is None:
+            continue
+        try:
+            if fn(True):
+                module_switches += 1
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("xformers 模组开关启用失败 (%s): %s", module_name, exc)
+
     for name, module in model.named_modules():
         # 查找 attention 模块并替换
         if hasattr(module, "set_use_memory_efficient_attention_xformers"):
@@ -80,13 +71,16 @@ def enable_xformers(model):
             module.enable_xformers_memory_efficient_attention()
             enabled_count += 1
 
-    if enabled_count > 0:
-        logger.info(f"xformers 已启用: {enabled_count} 个模块")
+    if module_switches > 0 or enabled_count > 0:
+        logger.info(
+            "xformers 已启用: module_switches=%d, module_hooks=%d",
+            module_switches,
+            enabled_count,
+        )
         return True
 
-    # 如果模型没有内置支持，尝试 monkey patch
-    logger.info("xformers 已加载，将在 attention 计算中使用")
-    return True
+    logger.warning("xformers 已安装，但当前模型没有可启用的 xformers attention hook")
+    return False
 
 
 # ============================================================================
@@ -94,42 +88,22 @@ def enable_xformers(model):
 # ============================================================================
 
 def find_diffusion_pipe_root():
-    """查找 diffusion-pipe 模型代码路径。
+    """[deprecated shim] 返回 Anima 模型代码目录（`modeling/anima/`）。
 
-    候选顺序（首个命中即返回）：
-      1. 脚本同目录 `diffusion_models/` / `models/`（CLI 直接 cd 进 scripts/ 跑）
-      2. 仓库根 `models/` / `diffusion_models/`（训练脚本在 runtime/ 下的 repo
-         layout：repo_root/runtime/anima_train.py → ../models/anima_modeling.py）
-      3. 环境变量 `DIFFUSION_PIPE_ROOT`（覆盖路径用）
+    模型代码随仓库发布并走正常 import（exec-load 与外部 diffusion-pipe checkout
+    兼容已退役，多模型 PR-2a）。函数名与返回语义保留 —— 它是 sister 契约 7 名
+    之一（docs/AGENTS.md §3.2「可加不可减不可改签名」），下游把返回值作为
+    `load_anima_model(..., repo_root=)` 透传，该参数现被忽略。
+
+    `DIFFUSION_PIPE_ROOT` 环境变量已不支持：检测到设置时打一次 warning，
+    下个 release 删除此检测。
     """
-    # 注：本模块从 runtime/training/model_loading.py 调用时，__file__ 在 runtime/training/
-    # 下，往上两级才是 repo_root。原 anima_train.py 在 runtime/，只往上一级。
-    # 用 __file__.parent.parent.parent 保持等价语义。
-    module_dir = Path(__file__).resolve().parent  # runtime/training
-    runtime_dir = module_dir.parent                 # runtime
-    repo_root = runtime_dir.parent                  # repo root
-    candidates = [
-        runtime_dir / "diffusion_models",
-        runtime_dir / "models",
-        repo_root / "models",
-        repo_root / "diffusion_models",
-        Path(os.environ.get("DIFFUSION_PIPE_ROOT", "")) if os.environ.get("DIFFUSION_PIPE_ROOT") else None,
-    ]
-    for candidate in candidates:
-        if candidate and (candidate / "anima_modeling.py").exists():
-            return candidate
-        if candidate and (candidate / "models" / "anima_modeling.py").exists():
-            return candidate / "models"
-    raise RuntimeError("找不到 anima_modeling.py，请设置 DIFFUSION_PIPE_ROOT 或放置模型代码")
-
-
-def load_module_from_path(module_name, file_path):
-    """动态加载 Python 模块。"""
-    import importlib.util
-    spec = importlib.util.spec_from_file_location(module_name, file_path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    if os.environ.get("DIFFUSION_PIPE_ROOT"):
+        logger.warning(
+            "DIFFUSION_PIPE_ROOT 已不支持（模型代码随仓库发布，走正常 import），忽略该变量"
+        )
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    return repo_root / "modeling" / "anima"
 
 
 # ============================================================================
@@ -195,6 +169,15 @@ def _load_safetensors_state_dict(path: Path) -> dict:
     return sd
 
 
+def ensure_models_namespace(repo_root):
+    """确保 models 命名空间可用。"""
+    repo_root = Path(repo_root)
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+    if str(repo_root.parent) not in sys.path:
+        sys.path.insert(0, str(repo_root.parent))
+
+
 def resolve_path_best_effort(path_str: str, bases: list[Path]) -> str:
     """
     将相对路径按多个 base 尝试解析到一个真实存在的路径。
@@ -248,7 +231,9 @@ def _load_weights_best_effort(model: torch.nn.Module, sd: dict, label: str) -> d
     model_keys = set(model.state_dict().keys())
     sd_keys = list(sd.keys())
     prefixes, matched = _pick_best_prefix_remap(sd_keys, model_keys)
-    remapped = {_strip_prefixes(k, prefixes): v for k, v in sd.items()}
+    # Common path is no prefix remap. Reusing the original dict avoids building
+    # another large key->tensor mapping while loading multi-GB checkpoints.
+    remapped = sd if not prefixes else {_strip_prefixes(k, prefixes): v for k, v in sd.items()}
 
     incompatible = model.load_state_dict(remapped, strict=False)
     missing = list(getattr(incompatible, "missing_keys", []) or [])
@@ -279,3 +264,7 @@ def _load_weights_best_effort(model: torch.nn.Module, sd: dict, label: str) -> d
         "missing": missing,
         "unexpected": unexpected,
     }
+
+
+# 兼容 re-export（sister/loop 现有 import 面；多模型 PR-2b 移居 families/anima/forward.py）
+from training.families.anima.forward import forward_with_optional_checkpoint  # noqa: E402,F401

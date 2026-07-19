@@ -7,7 +7,7 @@ interface ToolDef {
   id: PreprocessTool
   /** i18n key suffix under `preprocess.tools.*`. */
   i18nKey: string
-  /** Disabled in this milestone; pill is dim placeholder. */
+  /** Disabled in this milestone; tab is dim placeholder. */
   disabled?: boolean
 }
 
@@ -18,7 +18,7 @@ const TOOLS: ReadonlyArray<ToolDef> = [
   { id: 'dedupe',   i18nKey: 'dedupe' },
   { id: 'upscale',  i18nKey: 'upscale' },
   { id: 'crop',     i18nKey: 'crop' },
-  { id: 'inpaint',  i18nKey: 'inpaint', disabled: true },
+  { id: 'inpaint',  i18nKey: 'inpaint' },
 ]
 
 interface Props {
@@ -27,15 +27,15 @@ interface Props {
   versionId: number
 }
 
-/** Top-of-page tools bar shared by every preprocess sub-tool.
+/** 预处理工具切换条：贴 header 下方的全宽下划线 tab（对齐正则集页 belowHeader nav）。
  *
- *  The tools (放大 / 裁剪 / 涂抹) are peer **tools**, not pipeline stages — they
- *  don't have a completion state, and any one can be used at any time in any
- *  order. URL convention（ADR 0010 后）：
- *  `/projects/:pid/v/:vid/preprocess?tool=...`. The query string lets the
- *  sidebar's `/preprocess` matcher stay simple AND keeps the parent route
- *  mounted across tool switches.
- */
+ *  工具（总览 / 去重 / 放大 / 裁剪 / 涂抹）是平级 **tool**、不是流水阶段——没有完成
+ *  态、任意时刻任意顺序都能用。每个 tab 是路由 `<Link>`（`?tool=`），不是本地 state；
+ *  inpaint 是占位禁用。URL 约定（ADR 0010）：
+ *  `/projects/:pid/v/:vid/preprocess?tool=...`——query string 让 sidebar 的
+ *  `/preprocess` matcher 保持简单，同时切换工具时父路由不卸载。
+ *
+ *  设计为直接塞进 StepShell 的 `belowHeader`（自带 `border-b px-6` 全宽条）。 */
 export default function PreprocessToolsBar({ current, projectId, versionId }: Props) {
   const { t } = useTranslation()
   const base = `/projects/${projectId}/v/${versionId}/preprocess`
@@ -56,8 +56,6 @@ export default function PreprocessToolsBar({ current, projectId, versionId }: Pr
             >{label}</span>
           )
         }
-        // overview is the default tool (no ?tool= query); everyone else needs a tool param
-        const href = tool.id === 'overview' ? base : `${base}?tool=${tool.id}`
         if (isActive) {
           // Segmented active：白底 pill + 阴影（redesign 原型 Segmented）
           return (
@@ -68,6 +66,8 @@ export default function PreprocessToolsBar({ current, projectId, versionId }: Pr
             >{label}</span>
           )
         }
+        // overview is the default tool (no ?tool= query); everyone else needs a tool param
+        const href = tool.id === 'overview' ? base : `${base}?tool=${tool.id}`
         return (
           <Link
             key={tool.id}

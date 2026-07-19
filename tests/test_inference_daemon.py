@@ -113,10 +113,10 @@ def test_daemon_starts_and_reaches_idle(mock_daemon_script: Path) -> None:
     assert d.state == STATE_STOPPED
 
 
-def test_submit_task_runs_to_done(mock_daemon_script: Path) -> None:
-    from studio.services.inference import cache as generate_cache
+def test_submit_task_runs_to_done(mock_daemon_script: Path, tmp_path: Path) -> None:
+    from studio.services.inference import disk_cache as generate_cache
 
-    generate_cache.clear_all()
+    generate_cache.init(tmp_path / "cache")
     d = InferenceDaemon(script_path=mock_daemon_script)
     d.start()
     events: list[dict[str, Any]] = []
@@ -148,6 +148,42 @@ def test_submit_task_runs_to_done(mock_daemon_script: Path) -> None:
     assert image_done_events
     for e in image_done_events:
         assert "image_b64" not in e
+    # 决策 #14：image_done 加 delivery 子字段；config 没 save_test_images_at_dispatch
+    # 时默认 'cache'
+    for e in image_done_events:
+        assert e.get("delivery") == "cache"
+    generate_cache.clear_all()
+
+
+def test_submit_task_delivery_disk_when_save_to_disk_true(
+    mock_daemon_script: Path,
+    tmp_path: Path,
+) -> None:
+    """决策 #14 / #15：config 含 save_test_images_at_dispatch=True 时，
+    image_done event 的 delivery 字段是 'disk'。
+    """
+    from studio.services.inference import disk_cache as generate_cache
+
+    generate_cache.init(tmp_path / "cache")
+    d = InferenceDaemon(script_path=mock_daemon_script)
+    d.start()
+    events: list[dict[str, Any]] = []
+    try:
+        d.submit_task(
+            task_id=43,
+            config={"prompts": ["a"], "save_test_images_at_dispatch": True},
+            output_dir="/tmp/x",
+            on_event=events.append,
+        )
+        assert _wait_for(
+            lambda: any(e.get("kind") == "done" for e in events), timeout=3
+        ), f"events={events}"
+    finally:
+        d.stop()
+    image_done_events = [e for e in events if e.get("kind") == "image_done"]
+    assert image_done_events
+    for e in image_done_events:
+        assert e.get("delivery") == "disk"
     generate_cache.clear_all()
 
 
@@ -342,8 +378,9 @@ def test_supervisor_train_dispatch_skips_generate(env, monkeypatch):
 
 def test_dispatch_generate_skips_task_without_config_path(env, monkeypatch):
     """enqueue 竞态：task 已 pending+generate 但 config_path 还没落库时，
-    _dispatch_generate 必须跳过（不能 submit → daemon 报 config not found: <none>），
-    等 config_path 落库后下个 tick 才派。"""
+    exclusive 派发必须跳过（不能 submit → daemon 报 config not found: <none>），
+    等 config_path 落库后下个 tick 才派。R-1 起 generate 走
+    _dispatch_exclusive_tasks 统一派发。"""
     from studio.supervisor import Supervisor
 
     sup = Supervisor(
@@ -352,18 +389,66 @@ def test_dispatch_generate_skips_task_without_config_path(env, monkeypatch):
     )
     submitted: list[int] = []
     monkeypatch.setattr(sup, "_submit_to_daemon", lambda t: submitted.append(t["id"]))
+    train_slot = next(s for s in sup._slots if s.name == "train")
 
     # config_path 还是 NULL（模拟 create_task 刚落、config.json 还没写）
     with db.connection_for(env["db"]) as conn:
         tid = db.create_task(conn, name="g", config_name="gen", priority=0)
         db.update_task(conn, tid, task_type="generate")
 
-    sup._dispatch_generate()
+    sup._dispatch_exclusive_tasks(train_slot)
     assert submitted == [], "config_path=NULL 的 generate task 不应被 submit"
     assert _task_status(env["db"], tid) == "pending", "应保持 pending 等待，不该 failed"
 
     # config_path 落库后应被派
     with db.connection_for(env["db"]) as conn:
         db.update_task(conn, tid, config_path=str(env["configs"] / "gen.json"))
-    sup._dispatch_generate()
+    sup._dispatch_exclusive_tasks(train_slot)
     assert submitted == [tid]
+
+
+# ---------- 任务超时兜底（卡死场景硬杀 daemon） -------------------------------
+
+
+def test_task_timeout_kills_daemon_and_emits_error(
+    mock_daemon_script: Path, tmp_path: Path,
+) -> None:
+    """任务超时（卡死兜底）：到时硬杀 daemon 进程 → reader EOF →
+    _handle_proc_exit 给任务推 error + 状态 STOPPED（下次任务自动重启）。"""
+    d = InferenceDaemon(script_path=mock_daemon_script)
+    d.start()
+    assert _wait_for(lambda: d.state == "idle")
+    with d._lock:
+        d._task_timeout_seconds = 0.5
+
+    events: list[dict] = []
+    d.submit_task(
+        task_id=99, config={"wait_for_cancel": True},  # mock 收到后卡住不回
+        output_dir=str(tmp_path), on_event=events.append,
+    )
+    assert _wait_for(
+        lambda: any(e.get("kind") == "error" for e in events), timeout=6.0,
+    )
+    assert not d.is_alive
+    assert d.state == "stopped"
+
+
+def test_task_timer_cleared_on_normal_done(
+    mock_daemon_script: Path, tmp_path: Path,
+) -> None:
+    """正常完成的任务取消超时 timer（不误杀后续 idle daemon）。"""
+    d = InferenceDaemon(script_path=mock_daemon_script)
+    d.start()
+    assert _wait_for(lambda: d.state == "idle")
+    with d._lock:
+        d._task_timeout_seconds = 30.0
+
+    events: list[dict] = []
+    d.submit_task(
+        task_id=100, config={}, output_dir=str(tmp_path), on_event=events.append,
+    )
+    assert _wait_for(lambda: any(e.get("kind") == "done" for e in events))
+    with d._lock:
+        assert d._task_timer is None
+    assert d.is_alive
+    d.stop()

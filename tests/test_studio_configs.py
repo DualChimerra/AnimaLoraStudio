@@ -37,27 +37,39 @@ def test_schema_is_complete() -> None:
     fields = TrainingConfig.model_fields
     for name in (
         "transformer_path", "data_dir", "lora_type", "lora_rank", "epochs",
+        "tlora_min_rank", "tlora_alpha_rank_scale", "tlora_use_ortho",
         "optimizer_type", "prodigy_d_coef", "prodigy_safeguard_warmup",
         "lr_scheduler_warmup_steps",
         "lion_beta1", "lion_beta2",
+        "came_beta1", "came_beta2", "came_beta3",
+        "came_eps1", "came_eps2", "came_clip_threshold",
         "automagic_min_lr", "automagic_max_lr", "automagic_lr_bump",
         "automagic_beta2", "automagic_eps", "automagic_clip_threshold",
         # ProdigyPlusScheduleFree 字段
         "ppsf_d_coef", "ppsf_prodigy_steps", "ppsf_beta1", "ppsf_beta2",
         "ppsf_split_groups", "ppsf_split_groups_mean", "ppsf_use_speed",
         "ppsf_fused_back_pass", "ppsf_use_stableadamw",
-        "sample_prompt", "sample_prompts", "no_monitor",
+        "sample_prompt", "sample_prompts", "no_progress",
     ):
         assert name in fields, f"missing: {name}"
-    assert "wandb_enabled" in fields
-    # optimizer_type Literal 包含 Lion / PPSF
+    # 0.18: wandb per-config 覆盖块已移除（secrets 不进训练 yaml），schema 里不
+    # 应再出现任何 wandb_* 字段
+    assert not [n for n in fields if n.startswith("wandb_")]
+    # 退役的 monitor server 字段不应回归（老 yaml 键静默丢弃，见 migrations）
+    assert not {"no_monitor", "monitor_host", "monitor_port", "no_browser"} & set(fields)
+    lora_annotation = fields["lora_type"].annotation
+    lora_options = getattr(lora_annotation, "__args__", ())
+    assert "ortho" in lora_options
+    assert "tlora" in lora_options
     scheduler_annotation = fields["lr_scheduler"].annotation
     scheduler_options = getattr(scheduler_annotation, "__args__", ())
     assert "cosine_with_warmup" in scheduler_options
+    # optimizer_type Literal 包含 Lion / PPSF
     optimizer_annotation = fields["optimizer_type"].annotation
     # Literal 的 __args__ 包含所有合法值
     optimizer_options = getattr(optimizer_annotation, "__args__", ())
     assert "automagic" in optimizer_options
+    assert "came" in optimizer_options
     assert "lion" in optimizer_options
     assert "prodigy_plus_schedulefree" in optimizer_options
 
@@ -88,14 +100,21 @@ def test_schema_carries_ui_metadata(client: TestClient) -> None:
     assert props["transformer_path"]["group"] == "model"
     assert props["transformer_path"]["control"] == "path"
     assert "show_when" in props["prodigy_d_coef"]
+    assert props["tlora_min_rank"]["show_when"] == "lora_type==tlora"
+    assert props["tlora_alpha_rank_scale"]["show_when"] == "lora_type==tlora"
+    assert props["tlora_use_ortho"]["show_when"] == "lora_type==tlora"
     assert props["lion_beta1"]["show_when"] == "optimizer_type==lion"
     assert props["lion_beta2"]["show_when"] == "optimizer_type==lion"
+    assert props["came_beta3"]["show_when"] == "optimizer_type==came"
+    assert props["came_clip_threshold"]["show_when"] == "optimizer_type==came"
     assert "automagic" not in props["learning_rate"]["disable_when"]
     assert props["lr_scheduler"]["disable_when"] == "optimizer_type==automagic||optimizer_type==prodigy||optimizer_type==prodigy_plus_schedulefree||optimizer_type==soap_sf"
     assert props["lr_scheduler_warmup_steps"]["show_when"] == "lr_scheduler==cosine_with_warmup"
     assert props["automagic_min_lr"]["show_when"] == "optimizer_type==automagic"
     assert props["automagic_max_lr"]["show_when"] == "optimizer_type==automagic"
-    assert props["wandb_enabled"]["group"] == "wandb"
+    assert props["automagic_variant"]["show_when"] == "optimizer_type==automagic"
+    assert props["automagic_agreement_threshold"]["show_when"] == "optimizer_type==automagic&&automagic_variant==v2"
+    assert not [n for n in props if n.startswith("wandb_")]
     # PPSF 字段都按 optimizer_type==prodigy_plus_schedulefree 显示
     for ppsf_field in (
         "ppsf_d_coef", "ppsf_prodigy_steps", "ppsf_beta1", "ppsf_beta2",
@@ -126,6 +145,32 @@ def test_ppsf_accepts_none_scheduler() -> None:
     payload["lr_scheduler"] = "none"
     cfg = TrainingConfig.model_validate(payload)
     assert cfg.optimizer_type == "prodigy_plus_schedulefree"
+
+
+def test_navit_requires_xformers_backend() -> None:
+    """navit_packing 开启时 attention_backend 必须 xformers（块对角只走 xformers varlen）。
+
+    刀 2 / R2 v2 语义：缺省跟随钉值（未显式提供 → 自动落 xformers），显式提供
+    冲突值 → fail-fast 报错（取代历史 _coerce 的无差别静默改写）。
+    """
+    import pytest as _pytest
+    from pydantic import ValidationError as _VErr
+
+    cfg = TrainingConfig.model_validate({"navit_packing": True})
+    assert cfg.attention_backend == "xformers"
+    with _pytest.raises(_VErr, match="attention_backend"):
+        TrainingConfig.model_validate(
+            {"navit_packing": True, "attention_backend": "flash_attn"}
+        )
+
+
+def test_navit_off_keeps_user_attention_backend() -> None:
+    """navit 关闭时 attention_backend 保持用户选择，不被强制。"""
+    payload = TrainingConfig().model_dump(mode="python")
+    payload["navit_packing"] = False
+    payload["attention_backend"] = "flash_attn"
+    cfg = TrainingConfig.model_validate(payload)
+    assert cfg.attention_backend == "flash_attn"
 
 
 def test_prodigy_rejects_non_none_scheduler() -> None:
@@ -196,7 +241,8 @@ def test_api_duplicate_conflict(client: TestClient) -> None:
     client.put("/api/presets/x", json=payload)
     client.put("/api/presets/y", json=payload)
     resp = client.post("/api/presets/x/duplicate", json={"new_name": "y"})
-    assert resp.status_code == 400
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "preset.exists"
 
 
 def test_api_delete_missing(client: TestClient) -> None:
@@ -210,7 +256,7 @@ def test_yaml_on_disk_is_human_readable(client: TestClient, presets_dir: Path) -
     assert "transformer_path:" in text
     assert not text.startswith("{")
     parsed = yaml.safe_load(text)
-    assert parsed["lora_type"] == "lokr"
+    assert parsed["lora_type"] == "lora"
 
 
 # ---------------------------------------------------------------------------
@@ -332,10 +378,11 @@ def test_import_returns_409_on_conflict(
         files={"file": ("clash.yaml", yaml_bytes2, "application/yaml")},
     )
     assert resp2.status_code == 409, resp2.text
-    detail = resp2.json()["detail"]
-    assert isinstance(detail, dict)
-    assert detail["suggested_name"] == "clash"
-    assert detail["config"]["epochs"] == 42
+    error = resp2.json()["error"]
+    assert error["code"] == "preset.exists"
+    details = error["details"]
+    assert details["suggested_name"] == "clash"
+    assert details["config"]["epochs"] == 42
     # 没覆盖原文件
     assert (presets_dir / "clash.yaml").stat().st_mtime == on_disk_mtime
     assert client.get("/api/presets/clash").json()["epochs"] != 42
@@ -367,7 +414,7 @@ def test_get_preset_with_warnings_reports_defaulted(
 ) -> None:
     """字段值不合法时回退默认值并列入 defaulted_fields。"""
     payload = _payload()
-    payload["optimizer_type"] = "nonexistent_opt"  # 不在 Literal 里（lion 已是合法值）
+    payload["optimizer_type"] = "made_up_optim"  # 不在 Literal 里
     yaml_bytes = yaml.safe_dump(payload, allow_unicode=True).encode("utf-8")
     (presets_dir / "badval.yaml").write_bytes(yaml_bytes)
 
@@ -375,7 +422,7 @@ def test_get_preset_with_warnings_reports_defaulted(
     assert resp.status_code == 200
     body = resp.json()
     assert "optimizer_type" in body["defaulted_fields"]
-    assert body["config"]["optimizer_type"] != "lion"
+    assert body["config"]["optimizer_type"] != "made_up_optim"
 
 
 def test_get_preset_without_warnings_returns_flat(
@@ -394,7 +441,7 @@ def test_tolerant_load_invalid_values(
 ) -> None:
     """跨分支预设：未知字段 + 非法值 → 都能加载，不会 500。"""
     payload = _payload()
-    payload["optimizer_type"] = "lion"
+    payload["optimizer_type"] = "made_up_optim"
     payload["infonoise_K"] = 0
     raw = {**payload, "nonexistent_thing": True}
     yaml_bytes = yaml.safe_dump(raw, allow_unicode=True).encode("utf-8")
@@ -419,3 +466,21 @@ def test_legacy_configs_endpoint_redirects(client: TestClient) -> None:
     resp = client.get("/api/configs/foo", follow_redirects=False)
     assert resp.status_code == 308
     assert resp.headers["location"].endswith("/api/presets/foo")
+
+
+def test_automagic_v2_hidden_without_feature_flag(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """SystemConfig.enable_automagic_v2 默认 False → automagic_variant 打 hidden；
+    开启后不打。值始终透传，只影响 UI 渲染。"""
+    from studio.infrastructure import secrets as secrets_infra
+
+    # 默认（flag off）：hidden=True —— monkeypatch 隔离本机 secrets.json
+    monkeypatch.setattr(secrets_infra, "load", lambda: secrets_infra.Secrets())
+    props = client.get("/api/schema").json()["schema"]["properties"]
+    assert props["automagic_variant"].get("hidden") is True
+
+    # flag on：不打 hidden
+    flagged = secrets_infra.Secrets()
+    flagged.system.enable_automagic_v2 = True
+    monkeypatch.setattr(secrets_infra, "load", lambda: flagged)
+    props = client.get("/api/schema").json()["schema"]["properties"]
+    assert props["automagic_variant"].get("hidden") is not True

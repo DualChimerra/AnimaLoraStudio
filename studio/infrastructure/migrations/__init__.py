@@ -27,6 +27,13 @@ from ._v9_drop_legacy_stage import migrate as _migrate_v9
 from ._v10_request_trace import migrate as _migrate_v10
 from ._v11_preprocessing_phase import migrate as _migrate_v11
 from ._v12_drop_tagging_phase import migrate as _migrate_v12
+from ._v13_project_archived import migrate as _migrate_v13
+from ._v14_last_state import migrate as _migrate_v14
+from ._v15_generate_meta import migrate as _migrate_v15
+from ._v16_scheduled_at import migrate as _migrate_v16
+from ._v17_job_created_at import migrate as _migrate_v17
+from ._v18_unified_ledger import migrate as _migrate_v18
+from ._v19_legacy_jobs_freeze import migrate as _migrate_v19
 
 Migration = Callable[[sqlite3.Connection], None]
 
@@ -43,6 +50,15 @@ MIGRATIONS: list[Migration] = [
     _migrate_v10, # v10: tasks.request_trace_id（ADR-0009 PR-1 C6 trace_id 跨进程贯穿）
     _migrate_v11, # v11: versions.phase 加 preprocessing 值（ADR-0010 配套，回填 curating+train 非空 → preprocessing）
     _migrate_v12, # v12: 移除 tagging phase（自动打标删除），存量 tagging → editing
+    # 注意：本 fork 的 v12 与上游 v12 含义不同（上游无 drop_tagging）。上游
+    # v12–v18 在本 fork 顺延为 v13–v19，内容逐字节相同、仅编号平移。
+    _migrate_v13, # 上游 v12: projects.archived_at（项目归档软隐藏）
+    _migrate_v14, # 上游 v13: tasks.last_state_* 列（ADR 0006 Addendum 2 terminal-resume）
+    _migrate_v15, # 上游 v14: tasks.generate_params / generate_cover（0.17 P-I forward-write）
+    _migrate_v16, # 上游 v15: tasks.scheduled_at（0.17 P-B 计划任务，配套新 scheduled 状态）
+    _migrate_v17, # 上游 v16: project_jobs.created_at（0.17 P-G 数据作业详情页入队时间）
+    _migrate_v18, # 上游 v17: tasks.params（R-2 台账合并——tasks 承接数据作业 kind 参数）
+    _migrate_v19, # 上游 v18: 冻结旧 project_jobs（R-3 写路径翻转，残留 pending/running→canceled）
 ]
 
 

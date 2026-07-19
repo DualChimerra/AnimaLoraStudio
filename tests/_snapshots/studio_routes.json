@@ -1,7 +1,7 @@
 {
   "version": 1,
   "generated_from": "studio.server.app",
-  "count": 153,
+  "count": 194,
   "routes": [
     {
       "path": "/",
@@ -106,6 +106,14 @@
       "type": "APIRoute"
     },
     {
+      "path": "/api/generate/cache/index",
+      "methods": [
+        "GET"
+      ],
+      "name": "list_cache_index",
+      "type": "APIRoute"
+    },
+    {
       "path": "/api/generate/daemon/logs",
       "methods": [
         "GET"
@@ -130,6 +138,70 @@
       "type": "APIRoute"
     },
     {
+      "path": "/api/generate/disk/history",
+      "methods": [
+        "GET"
+      ],
+      "name": "list_disk_history",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/generate/disk/image/{date_str}/xy/{folder}/{filename}",
+      "methods": [
+        "GET"
+      ],
+      "name": "get_disk_xy_image",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/generate/disk/image/{date_str}/{mode}/{filename}",
+      "methods": [
+        "GET"
+      ],
+      "name": "get_disk_image",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/generate/disk/thumb/{date_str}/xy/{folder}/{filename}",
+      "methods": [
+        "GET"
+      ],
+      "name": "get_disk_xy_thumb",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/generate/disk/thumb/{date_str}/{mode}/{filename}",
+      "methods": [
+        "GET"
+      ],
+      "name": "get_disk_thumb",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/generate/disk/{date_str}/xy/{folder}",
+      "methods": [
+        "DELETE"
+      ],
+      "name": "delete_disk_xy_folder",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/generate/disk/{date_str}/{mode}/{filename}",
+      "methods": [
+        "DELETE"
+      ],
+      "name": "delete_disk_image",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/generate/save",
+      "methods": [
+        "POST"
+      ],
+      "name": "save_test_image",
+      "type": "APIRoute"
+    },
+    {
       "path": "/api/generate/taeflux/install",
       "methods": [
         "POST"
@@ -143,6 +215,14 @@
         "GET"
       ],
       "name": "get_taeflux_status",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/generate/token_count",
+      "methods": [
+        "POST"
+      ],
+      "name": "count_prompt_tokens",
       "type": "APIRoute"
     },
     {
@@ -170,30 +250,6 @@
       "type": "APIRoute"
     },
     {
-      "path": "/api/jobs/{jid}",
-      "methods": [
-        "GET"
-      ],
-      "name": "get_job_endpoint",
-      "type": "APIRoute"
-    },
-    {
-      "path": "/api/jobs/{jid}/cancel",
-      "methods": [
-        "POST"
-      ],
-      "name": "cancel_job_endpoint",
-      "type": "APIRoute"
-    },
-    {
-      "path": "/api/jobs/{jid}/log",
-      "methods": [
-        "GET"
-      ],
-      "name": "get_job_log",
-      "type": "APIRoute"
-    },
-    {
       "path": "/api/llm-tagger/models/refresh",
       "methods": [
         "POST"
@@ -218,6 +274,54 @@
       "type": "APIRoute"
     },
     {
+      "path": "/api/model-sources/{domain}",
+      "methods": [
+        "DELETE"
+      ],
+      "name": "remove_model_source",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/model-sources/{domain}",
+      "methods": [
+        "POST"
+      ],
+      "name": "add_model_source",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/models-root/info",
+      "methods": [
+        "GET"
+      ],
+      "name": "models_root_info",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/models-root/migrate",
+      "methods": [
+        "POST"
+      ],
+      "name": "models_root_migrate",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/models-root/migrate_status",
+      "methods": [
+        "GET"
+      ],
+      "name": "models_root_migrate_status",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/models/asset",
+      "methods": [
+        "DELETE"
+      ],
+      "name": "delete_model_asset",
+      "type": "APIRoute"
+    },
+    {
       "path": "/api/models/catalog",
       "methods": [
         "GET"
@@ -231,6 +335,14 @@
         "POST"
       ],
       "name": "start_model_download",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/models/family-switch",
+      "methods": [
+        "POST"
+      ],
+      "name": "switch_model_family",
       "type": "APIRoute"
     },
     {
@@ -386,6 +498,14 @@
       "type": "APIRoute"
     },
     {
+      "path": "/api/projects/{pid}/archive",
+      "methods": [
+        "POST"
+      ],
+      "name": "archive_project_endpoint",
+      "type": "APIRoute"
+    },
+    {
       "path": "/api/projects/{pid}/download",
       "methods": [
         "POST"
@@ -447,6 +567,14 @@
         "GET"
       ],
       "name": "project_thumb",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/projects/{pid}/unarchive",
+      "methods": [
+        "POST"
+      ],
+      "name": "unarchive_project_endpoint",
       "type": "APIRoute"
     },
     {
@@ -527,6 +655,14 @@
         "POST"
       ],
       "name": "advance_phase_endpoint",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/projects/{pid}/versions/{vid}/bucket-distribution",
+      "methods": [
+        "GET"
+      ],
+      "name": "get_bucket_distribution_endpoint",
       "type": "APIRoute"
     },
     {
@@ -674,6 +810,102 @@
       "type": "APIRoute"
     },
     {
+      "path": "/api/projects/{pid}/versions/{vid}/curation/validation",
+      "methods": [
+        "GET"
+      ],
+      "name": "get_curation_validation",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/projects/{pid}/versions/{vid}/curation/validation/copy",
+      "methods": [
+        "POST"
+      ],
+      "name": "copy_to_validation",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/projects/{pid}/versions/{vid}/curation/validation/remove",
+      "methods": [
+        "POST"
+      ],
+      "name": "remove_from_validation",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/projects/{pid}/versions/{vid}/eval/jobs",
+      "methods": [
+        "GET"
+      ],
+      "name": "list_task_eval_jobs_endpoint",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/projects/{pid}/versions/{vid}/eval/metrics",
+      "methods": [
+        "GET"
+      ],
+      "name": "list_eval_metric_results_endpoint",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/projects/{pid}/versions/{vid}/eval/run",
+      "methods": [
+        "POST"
+      ],
+      "name": "run_task_eval_endpoint",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/projects/{pid}/versions/{vid}/eval/samples",
+      "methods": [
+        "GET"
+      ],
+      "name": "list_eval_sample_runs_endpoint",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/projects/{pid}/versions/{vid}/eval/samples/{run_id}",
+      "methods": [
+        "GET"
+      ],
+      "name": "get_eval_sample_run_endpoint",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/projects/{pid}/versions/{vid}/eval/samples/{run_id}/images/{filename}",
+      "methods": [
+        "GET"
+      ],
+      "name": "get_eval_sample_image_endpoint",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/projects/{pid}/versions/{vid}/eval/samples/{run_id}/metrics",
+      "methods": [
+        "GET"
+      ],
+      "name": "get_eval_metric_result_endpoint",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/projects/{pid}/versions/{vid}/eval/samples/{run_id}/metrics/clip",
+      "methods": [
+        "POST"
+      ],
+      "name": "start_eval_clip_metrics_endpoint",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/projects/{pid}/versions/{vid}/eval/samples/{run_id}/metrics/dino",
+      "methods": [
+        "POST"
+      ],
+      "name": "start_eval_dino_metrics_endpoint",
+      "type": "APIRoute"
+    },
+    {
       "path": "/api/projects/{pid}/versions/{vid}/export-bundle",
       "methods": [
         "POST"
@@ -762,6 +994,38 @@
       "type": "APIRoute"
     },
     {
+      "path": "/api/projects/{pid}/versions/{vid}/preprocess/inpaint/save",
+      "methods": [
+        "POST"
+      ],
+      "name": "inpaint_save_train_endpoint",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/projects/{pid}/versions/{vid}/preprocess/mask",
+      "methods": [
+        "DELETE"
+      ],
+      "name": "delete_mask_train_endpoint",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/projects/{pid}/versions/{vid}/preprocess/mask",
+      "methods": [
+        "GET"
+      ],
+      "name": "get_mask_train_endpoint",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/projects/{pid}/versions/{vid}/preprocess/mask",
+      "methods": [
+        "PUT"
+      ],
+      "name": "put_mask_train_endpoint",
+      "type": "APIRoute"
+    },
+    {
       "path": "/api/projects/{pid}/versions/{vid}/preprocess/start",
       "methods": [
         "POST"
@@ -834,11 +1098,27 @@
       "type": "APIRoute"
     },
     {
+      "path": "/api/projects/{pid}/versions/{vid}/reg/folder",
+      "methods": [
+        "POST"
+      ],
+      "name": "reg_rename_folder",
+      "type": "APIRoute"
+    },
+    {
       "path": "/api/projects/{pid}/versions/{vid}/reg/generate-prior",
       "methods": [
         "POST"
       ],
       "name": "reg_generate_prior",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/projects/{pid}/versions/{vid}/reg/generate-prior/latest",
+      "methods": [
+        "GET"
+      ],
+      "name": "get_latest_reg_prior_task",
       "type": "APIRoute"
     },
     {
@@ -898,14 +1178,6 @@
       "type": "APIRoute"
     },
     {
-      "path": "/api/queue/export",
-      "methods": [
-        "GET"
-      ],
-      "name": "export_queue",
-      "type": "APIRoute"
-    },
-    {
       "path": "/api/queue/hold",
       "methods": [
         "GET"
@@ -919,14 +1191,6 @@
         "POST"
       ],
       "name": "hold_queue",
-      "type": "APIRoute"
-    },
-    {
-      "path": "/api/queue/import",
-      "methods": [
-        "POST"
-      ],
-      "name": "import_queue",
       "type": "APIRoute"
     },
     {
@@ -1050,11 +1314,27 @@
       "type": "APIRoute"
     },
     {
+      "path": "/api/queue/{task_id}/start_now",
+      "methods": [
+        "POST"
+      ],
+      "name": "start_scheduled_now",
+      "type": "APIRoute"
+    },
+    {
       "path": "/api/schema",
       "methods": [
         "GET"
       ],
       "name": "get_schema",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/schema/preview-yaml",
+      "methods": [
+        "POST"
+      ],
+      "name": "preview_config_yaml_endpoint",
       "type": "APIRoute"
     },
     {
@@ -1074,11 +1354,51 @@
       "type": "APIRoute"
     },
     {
+      "path": "/api/secrets/wandb/presets/import",
+      "methods": [
+        "POST"
+      ],
+      "name": "import_wandb_preset",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/secrets/wandb/presets/{preset_id}/export",
+      "methods": [
+        "GET"
+      ],
+      "name": "export_wandb_preset",
+      "type": "APIRoute"
+    },
+    {
       "path": "/api/state",
       "methods": [
         "GET"
       ],
       "name": "get_state",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/studio-data/info",
+      "methods": [
+        "GET"
+      ],
+      "name": "studio_data_info",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/studio-data/migrate",
+      "methods": [
+        "POST"
+      ],
+      "name": "studio_data_migrate",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/studio-data/migrate_status",
+      "methods": [
+        "GET"
+      ],
+      "name": "studio_data_migrate_status",
       "type": "APIRoute"
     },
     {
@@ -1122,6 +1442,14 @@
       "type": "APIRoute"
     },
     {
+      "path": "/api/tagger/{name}/check",
+      "methods": [
+        "GET"
+      ],
+      "name": "check_tagger",
+      "type": "APIRoute"
+    },
+    {
       "path": "/api/torch/reinstall",
       "methods": [
         "POST"
@@ -1135,14 +1463,6 @@
         "GET"
       ],
       "name": "torch_status",
-      "type": "APIRoute"
-    },
-    {
-      "path": "/api/upscalers/download_custom",
-      "methods": [
-        "POST"
-      ],
-      "name": "start_upscaler_custom_download",
       "type": "APIRoute"
     },
     {
@@ -1231,9 +1551,19 @@
     },
     {
       "path": "/studio",
-      "methods": [],
-      "name": "studio",
-      "type": "Mount"
+      "methods": [
+        "GET"
+      ],
+      "name": "legacy_studio_redirect",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/studio/{rest:path}",
+      "methods": [
+        "GET"
+      ],
+      "name": "legacy_studio_redirect",
+      "type": "APIRoute"
     }
   ]
 }

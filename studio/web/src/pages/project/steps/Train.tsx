@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next'
 import { useNavigate, useOutletContext } from 'react-router-dom'
 import {
   api,
+  type BucketDistribution,
   type ConfigData,
   type PresetSummary,
   type ProjectDetail,
@@ -11,11 +12,16 @@ import {
   type Version,
   type VersionConfigResponse,
 } from '../../../api/client'
+import { parseFolderMeta } from '../../../lib/folderMeta'
+import { useLocalStorageState } from '../../../lib/useLocalStorageState'
 import ConfigSkeleton from '../../../components/ConfigSkeleton'
+import ConfigYamlPanel from '../../../components/ConfigYamlPanel'
 import { useDialog } from '../../../components/Dialog'
+import SaveIndicator from '../../../components/SaveIndicator'
 import SchemaForm, { visibleSchemaGroups } from '../../../components/SchemaForm'
 import SchemaSectionIndex from '../../../components/SchemaSectionIndex'
 import StepShell from '../../../components/StepShell'
+import type { SaveStatus } from '../../../lib/SettingsData'
 import { useToast } from '../../../components/Toast'
 import { useSettingsDrawer } from '../../../lib/SettingsDrawer'
 import { useAdvancedMode } from '../../../lib/useAdvancedMode'
@@ -24,6 +30,7 @@ import {
   defaultsFromSchema,
   generateUniquePresetName,
 } from '../../../lib/preset-helpers'
+import FamilySwitchDialog from '../../../components/FamilySwitchDialog'
 
 // 全局模型字段来自全局设置，对版本维度只读
 const GLOBAL_MODEL_FIELDS = [
@@ -75,6 +82,9 @@ export default function TrainPage() {
   // 预设 picker（dropdown 模式，与 Presets 页一致）
   const [pickerOpen, setPickerOpen] = useState(false)
   const [pickerSearch, setPickerSearch] = useState('')
+  // 0.17 P-B — 定时训练弹层（延迟 N 小时 / 指定绝对时间两种入口，D7）。
+  const [scheduleOpen, setScheduleOpen] = useState(false)
+  const [scheduleTime, setScheduleTime] = useState('')
   const [advancedMode, toggleAdvancedMode] = useAdvancedMode()
   const pickerAnchorRef = useRef<HTMLButtonElement | null>(null)
   const pickerPopRef = useRef<HTMLDivElement | null>(null)
@@ -90,6 +100,26 @@ export default function TrainPage() {
     configRef.current = v
     setConfig(v)
   }, [])
+
+  /** 待确认的族切换目标（非空时渲染 FamilySwitchDialog）。 */
+  const [familySwitchTarget, setFamilySwitchTarget] = useState<string | null>(null)
+
+  /** header 自动保存指示（与 Settings 页同款 SaveIndicator）。 */
+  const [saveStatus, setSaveStatus] = useState<SaveStatus>({ state: 'idle' })
+
+  /** SchemaForm.onChange 入口：拦截 model_family 变化走切换动作（P4-3）。
+   * 切族不是裸字段编辑——弹结构化确认对话框（后端重算路径 + 重置族风味
+   * 字段），用户取消则保持旧值不动。其余字段变更原样透传 setConfigSync。 */
+  const onFormChange = useCallback((v: ConfigData) => {
+    const prev = configRef.current
+    const prevFamily = String(prev?.model_family ?? 'anima')
+    const nextFamily = String(v.model_family ?? 'anima')
+    if (prev && nextFamily !== prevFamily) {
+      setFamilySwitchTarget(nextFamily)
+      return
+    }
+    setConfigSync(v)
+  }, [setConfigSync])
 
   const vid = activeVersion?.id ?? null
 
@@ -206,24 +236,36 @@ export default function TrainPage() {
    *   - 相等 → 用户没动过，安全 sync server 归一化结果到 UI
    *   - 不等 → 用户有新内容，只更新 savedJson baseline，UI state 不动；
    *            useEffect debounce 会自然为新内容触发下一轮 save 收敛 */
-  const persistConfig = useCallback(async (cfg: ConfigData): Promise<void> => {
+  const persistConfig = useCallback(async (cfg: ConfigData, force = false): Promise<void> => {
     while (inFlightSaveRef.current) {
       await inFlightSaveRef.current
     }
-    if (JSON.stringify(cfg) === savedJsonRef.current) return
+    // force：内容没变也要 PUT（「清理旧字段」重写 yaml —— 磁盘上的旧键不在
+    // GET 归一化结果里，JSON diff 看不出差异）。
+    if (!force && JSON.stringify(cfg) === savedJsonRef.current) return
     const p = (async () => {
-      const r = await api.putVersionConfig(project.id, vid!, cfg)
-      setConfigResp((prev) => prev ? { ...prev, has_config: true, config: r.config } : prev)
-      // baseline 用 server 归一化后的 r.config，下次 dirty diff 才不会假阳性。
-      savedJsonRef.current = JSON.stringify(r.config)
-      if (configRef.current === cfg) {
-        configRef.current = r.config
-        setConfig(r.config)
+      setSaveStatus({ state: 'saving' })
+      try {
+        const r = await api.putVersionConfig(project.id, vid!, cfg)
+        setConfigResp((prev) => prev ? { ...prev, has_config: true, config: r.config } : prev)
+        // baseline 用 server 归一化后的 r.config，下次 dirty diff 才不会假阳性。
+        savedJsonRef.current = JSON.stringify(r.config)
+        if (configRef.current === cfg) {
+          configRef.current = r.config
+          setConfig(r.config)
+        }
+        // PUT 全量重写 yaml（tolerant validate + prune），磁盘上不再有旧字段 /
+        // 非法值 —— 兼容横幅的信息已过期，清掉。
+        applyPresetWarnings({})
+        setSaveStatus({ state: 'saved', at: Date.now() })
+      } catch (e) {
+        setSaveStatus({ state: 'error', error: String(e) })
+        throw e
       }
     })()
     inFlightSaveRef.current = p
     try { await p } finally { inFlightSaveRef.current = null }
-  }, [project.id, vid])
+  }, [project.id, vid, applyPresetWarnings])
 
   // ── auto-save ─────────────────────────────────────────────────────────
   // config 变化 → 600ms 后没新改动就落盘。中途又改 → cleanup clearTimeout 重置。
@@ -260,6 +302,9 @@ export default function TrainPage() {
 
   // 右侧 SchemaSectionIndex 的 IntersectionObserver root + 跳转目标
   const schemaScrollRef = useRef<HTMLDivElement | null>(null)
+  // 右侧训练集分布预览抽屉的展开/收起（持久化）。收起时把横向空间让给表单。
+  const [previewOpen, setPreviewOpen] = useLocalStorageState('train.previewOpen', true)
+  const [previewTab, setPreviewTab] = useLocalStorageState<'stats' | 'config'>('train.previewTab', 'stats')
   const visibleGroups = useMemo(
     () => (schema ? visibleSchemaGroups(schema, advancedMode) : []),
     [schema, advancedMode],
@@ -422,7 +467,7 @@ export default function TrainPage() {
     }
   }
 
-  const onEnqueue = async () => {
+  const onEnqueue = async (scheduledAt?: number) => {
     if (!configResp?.has_config) {
       toast(t('train.noPresetError'), 'error')
       return
@@ -445,8 +490,18 @@ export default function TrainPage() {
       if (cur && JSON.stringify(cur) !== savedJsonRef.current) {
         await persistConfig(cur)
       }
-      const task = await api.enqueueVersionTraining(project.id, vid)
-      toast(t('train.enqueuedNav', { id: task.id }), 'success')
+      const task = await api.enqueueVersionTraining(
+        project.id, vid, scheduledAt != null ? { scheduledAt } : undefined,
+      )
+      if (scheduledAt != null) {
+        toast(t('train.scheduledNav', {
+          id: task.id,
+          time: new Date(scheduledAt * 1000).toLocaleString('zh-CN', { hour12: false }),
+        }), 'success')
+      } else {
+        toast(t('train.enqueuedNav', { id: task.id }), 'success')
+      }
+      setScheduleOpen(false)
       void reload()
       navigate('/queue')
     } catch (e) {
@@ -456,6 +511,23 @@ export default function TrainPage() {
     }
   }
 
+  // datetime-local 的 value 格式（本地时区，分钟精度）。
+  const toLocalInputValue = (d: Date) => {
+    const pad = (n: number) => String(n).padStart(2, '0')
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+      + `T${pad(d.getHours())}:${pad(d.getMinutes())}`
+  }
+
+  const onScheduleAbsolute = () => {
+    if (!scheduleTime) return
+    const ts = new Date(scheduleTime).getTime() / 1000
+    if (!Number.isFinite(ts) || ts <= Date.now() / 1000 + 30) {
+      toast(t('train.schedulePast'), 'error')
+      return
+    }
+    void onEnqueue(ts)
+  }
+
   return (
     <StepShell
       idx={6}
@@ -463,22 +535,101 @@ export default function TrainPage() {
       title={t('steps.train.title')}
       subtitle={t('steps.train.subtitle')}
       actions={
-        <button
-          onClick={() => void onEnqueue()}
-          disabled={busy || !configResp?.has_config}
-          className="btn btn-primary"
-        >
-          {t('train.startTrainBtn')}
-        </button>
+        <>
+          {/* 0.17 P-B — 定时训练：延迟 N 小时 / 指定时间，建成 scheduled task。
+              样式对齐项目页「导入项目」（btn-ghost btn-sm）。 */}
+          <button
+            onClick={() => setScheduleOpen(true)}
+            disabled={busy || !configResp?.has_config}
+            className="btn btn-ghost btn-sm"
+            title={t('train.scheduleHint')}
+            data-testid="train-schedule-btn"
+          >
+            {t('train.scheduleBtn')}
+          </button>
+          {/* 样式对齐项目页「新建项目」（btn-primary btn-sm + icon + 文字） */}
+          <button
+            onClick={() => void onEnqueue()}
+            disabled={busy || !configResp?.has_config}
+            className="btn btn-primary btn-sm"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M8 5v14l11-7z" />
+            </svg>
+            <span>{t('train.startTrainBtn')}</span>
+          </button>
+          {scheduleOpen && (
+            <div
+              role="dialog"
+              aria-modal="true"
+              className="fixed inset-0 z-40 flex items-center justify-center bg-black/50"
+              onMouseDown={(e) => { if (e.target === e.currentTarget) setScheduleOpen(false) }}
+              data-testid="train-schedule-modal"
+            >
+              <div className="bg-elevated border border-dim rounded-lg w-[90%] max-w-[440px] p-6 flex flex-col gap-4 shadow-xl">
+                <h2 className="m-0 text-lg font-semibold text-fg-primary">
+                  {t('train.scheduleBtn')}
+                </h2>
+                <div className="flex flex-col gap-1.5">
+                  <span className="text-xs font-semibold text-fg-tertiary uppercase tracking-wide">
+                    {t('train.scheduleDelaySection')}
+                  </span>
+                  <div className="flex gap-1.5">
+                    {[1, 2, 4, 8].map((h) => (
+                      <button
+                        key={h}
+                        onClick={() => void onEnqueue(Date.now() / 1000 + h * 3600)}
+                        disabled={busy}
+                        className="btn btn-secondary btn-sm flex-1"
+                        data-testid={`train-schedule-delay-${h}h`}
+                      >
+                        +{h}h
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  <span className="text-xs font-semibold text-fg-tertiary uppercase tracking-wide">
+                    {t('train.scheduleAbsoluteSection')}
+                  </span>
+                  <input
+                    type="datetime-local"
+                    className="input"
+                    value={scheduleTime}
+                    min={toLocalInputValue(new Date())}
+                    onChange={(e) => setScheduleTime(e.target.value)}
+                    data-testid="train-schedule-time"
+                  />
+                </div>
+                <div className="flex gap-2 justify-end mt-1">
+                  <button
+                    onClick={() => setScheduleOpen(false)}
+                    className="btn btn-secondary"
+                  >
+                    {t('common.cancel')}
+                  </button>
+                  <button
+                    onClick={onScheduleAbsolute}
+                    disabled={busy || !scheduleTime}
+                    className="btn btn-primary"
+                    data-testid="train-schedule-confirm"
+                  >
+                    {t('train.scheduleConfirm')}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </>
       }
     >
       <div className="flex flex-col h-full gap-3">
 
         {/* 两栏布局：左（预设 + config 编辑） / 右（估算面板） */}
-        <div className="grid grid-cols-[3fr_1fr] gap-3 flex-1 min-h-0">
+        <div className="flex gap-3 flex-1 min-h-0">
 
-          {/* 左栏 */}
-          <div className="flex flex-col gap-3 min-h-0 min-w-0 overflow-y-auto">
+          {/* 左栏：配置表单（flex-[3] 与右预览 flex-[1] 还原老 grid 3:1 比例） */}
+          <div className="flex flex-col gap-3 min-h-0 min-w-0 overflow-y-auto flex-[3]">
 
           {/* 预设 picker：dropdown 入口。0.8.2 起承认 version yaml 是 first-class
               「项目专属配置」，不再显示「绑定哪个预设」+「已自定义」标签 —— 这套
@@ -522,6 +673,8 @@ export default function TrainPage() {
             >
               {t('train.saveAsPreset')}
             </button>
+            {/* 自动保存指示（Settings / Presets 页同款）：600ms debounce 落盘后显示时间 */}
+            <SaveIndicator status={saveStatus} />
 
             {/* popover */}
             {pickerOpen && (
@@ -627,8 +780,24 @@ export default function TrainPage() {
                   </div>
                 </div>
                 {(droppedFields.length > 0 || defaultedFields.length > 0) && (
-                  <div className="mb-3 rounded-md border border-warn bg-warn-soft px-3.5 py-2.5 text-xs text-warn space-y-1">
-                    <span className="font-semibold">{t('presets.compatNoticeTitle')}</span>
+                  <div className="mb-3 rounded-md border border-amber-400/50 bg-amber-950/60 px-3.5 py-2.5 text-xs text-amber-100 space-y-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-semibold text-amber-300">{t('presets.compatNoticeTitle')}</span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const cur = configRef.current
+                          if (!cur) return
+                          void persistConfig(cur, true)
+                            .then(() => toast(t('presets.cleanLegacyDone'), 'success'))
+                            .catch((e) => toast(t('train.saveFailed', { error: e }), 'error'))
+                        }}
+                        className="shrink-0 rounded border border-amber-400/50 bg-transparent px-2 py-0.5 text-[11px] font-medium text-amber-200 hover:bg-amber-400/10 cursor-pointer"
+                        title={t('presets.cleanLegacyTitle')}
+                      >
+                        {t('presets.cleanLegacyBtn')}
+                      </button>
+                    </div>
                     {droppedFields.length > 0 && (
                       <div>{t('presets.droppedFieldsBody')}<code className="ml-1 text-[11px] opacity-80">{droppedFields.join(', ')}</code></div>
                     )}
@@ -640,46 +809,120 @@ export default function TrainPage() {
                 <SchemaForm
                   schema={schema}
                   values={config}
-                  onChange={setConfigSync}
+                  onChange={onFormChange}
                   disabledFields={disabledFields}
                   disabledHints={disabledHints}
                   autoHints={autoHints}
                   fieldSuffixes={makeResetSuffixes(config, setConfigSync)}
                   advancedMode={advancedMode}
                 />
+                {familySwitchTarget && config && (
+                  <FamilySwitchDialog
+                    target={familySwitchTarget}
+                    config={config}
+                    onApply={(switched) => {
+                      setConfigSync(switched)
+                      setFamilySwitchTarget(null)
+                    }}
+                    onCancel={() => setFamilySwitchTarget(null)}
+                  />
+                )}
               </section>
             ) : (
               <ConfigSkeleton label={t('train.loadingConfig')} />
             )}
           </div>
 
-        {/* 右栏：训练集 + 正则集分布 + 章节锚点导航 */}
-        <div className="flex flex-col min-h-0 min-w-0 overflow-y-auto">
-          <DatasetStatsPanel
-            activeVersion={activeVersion}
-            reg={reg}
-            config={config}
-          />
-          {configResp?.has_config && config && visibleGroups.length > 0 && (
-            <div className="mt-8">
-              <SchemaSectionIndex
-                groups={visibleGroups}
-                scrollContainer={schemaScrollRef}
-              />
-            </div>
-          )}
+        {/* 中栏：章节锚点导航（固定窄列，始终可见） */}
+        {configResp?.has_config && config && visibleGroups.length > 0 && (
+          <div className="shrink-0 w-[168px] overflow-y-auto">
+            <SchemaSectionIndex
+              groups={visibleGroups}
+              scrollContainer={schemaScrollRef}
+            />
+          </div>
+        )}
+
+        {/* 把手：单竖线 + 顶部圆圈 ›/‹ —— 分隔预览抽屉 */}
+        <div className="relative w-3 shrink-0 self-stretch flex justify-center">
+          <div className="w-px bg-subtle" />
+          <button
+            type="button"
+            onClick={() => setPreviewOpen((v) => !v)}
+            title={previewOpen ? t('train.collapsePreview') : t('train.expandPreview')}
+            aria-label={previewOpen ? t('train.collapsePreview') : t('train.expandPreview')}
+            className="absolute top-1 left-1/2 -translate-x-1/2 w-6 h-6 rounded-full border border-subtle bg-surface text-fg-tertiary hover:text-accent hover:border-accent flex items-center justify-center text-xs leading-none shadow-sm"
+          >
+            {previewOpen ? '›' : '‹'}
+          </button>
         </div>
+
+        {/* 右栏：预览抽屉（可收回），双 tab：数据分布 / YAML 预览。数据分布保持
+            与左表单 flex-[3] 的 3:1 老比例；YAML tab 加宽到 3:2（yaml 行长，1/4
+            宽不断折行看不清）。收起时整列不渲染、空间归表单。YAML 预览 = 按
+            show_when 裁剪后的 yaml，实时跟随表单，与落盘 config.yaml 同内容。 */}
+        {previewOpen && (
+          <div className={`${previewTab === 'config' ? 'flex-[2]' : 'flex-[1]'} min-w-0 flex flex-col min-h-0`}>
+            {/* tab 条靠右：切 YAML tab 时抽屉加宽、左缘会移动，右对齐锚在固定的
+                右缘上，切换时开关自身不跟着跳。 */}
+            <div className="shrink-0 mb-2 flex justify-end">
+              <div className="inline-flex rounded-md border border-subtle overflow-hidden text-xs">
+                <button
+                  type="button"
+                  onClick={() => setPreviewTab('stats')}
+                  className={`px-3 py-1 transition-colors ${previewTab === 'stats' ? 'bg-accent text-white' : 'bg-surface text-fg-secondary hover:bg-subtle'}`}
+                >
+                  {t('train.previewTabStats')}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPreviewTab('config')}
+                  className={`px-3 py-1 transition-colors ${previewTab === 'config' ? 'bg-accent text-white' : 'bg-surface text-fg-secondary hover:bg-subtle'}`}
+                >
+                  {t('train.previewTabYaml')}
+                </button>
+              </div>
+            </div>
+            {previewTab === 'stats' ? (
+              <div className="flex-1 min-h-0 overflow-y-auto">
+                <DatasetStatsPanel
+                  projectId={project.id}
+                  activeVersion={activeVersion}
+                  reg={reg}
+                  config={config}
+                />
+              </div>
+            ) : config ? (
+              <ConfigYamlPanel
+                config={config}
+                fileLabel="config.yaml"
+                className="flex-1 flex flex-col min-h-0"
+              />
+            ) : (
+              <div className="flex-1 flex items-center justify-center text-fg-tertiary text-sm rounded-md border border-dashed border-dim">
+                {t('train.noConfigHint')}
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
     </StepShell>
   )
 }
 
-/** Kohya 风格文件夹名「N_label」→ {repeat=N, label}。无前缀数字默认 1。 */
-function parseFolderRepeat(name: string): { repeat: number; label: string } {
-  const m = name.match(/^(\d+)_(.*)$/)
-  if (m) return { repeat: parseInt(m[1], 10), label: m[2] }
-  return { repeat: 1, label: name }
+/** config.resolution 归一成 number[]（schema 是 list[int]，旧 config / 标量也兜底）。 */
+function configResolutions(config: ConfigData | null): number[] {
+  const r = config?.resolution as unknown
+  if (Array.isArray(r)) return r.length ? (r as number[]) : [1024]
+  if (typeof r === 'number') return [r]
+  return [1024]
+}
+
+/** 文件夹有效样本数 = repeat × 图数 × 分辨率档数（px 文件夹固定 1 档；否则跟 config 列表）。 */
+function folderEffective(name: string, imageCount: number, resoCount: number): number {
+  const { reso, repeat } = parseFolderMeta(name)
+  return repeat * imageCount * (reso ? 1 : resoCount)
 }
 
 /** reg.files 形如 `5_concept/12345.png` —— 按首段文件夹聚合计数。 */
@@ -702,10 +945,12 @@ function aggregateRegFolders(files: string[]): Array<{ name: string; image_count
  * train / reg 分两块汇总，最后给出有效图数总和——这是 anima_train 单 epoch 的实际样本数。
  */
 function DatasetStatsPanel({
+  projectId,
   activeVersion,
   reg,
   config,
 }: {
+  projectId: number
   activeVersion: Version | null
   reg: RegStatus | null
   config: ConfigData | null
@@ -717,12 +962,13 @@ function DatasetStatsPanel({
     [reg]
   )
 
+  const resoCount = configResolutions(config).length
   const trainEffective = trainFolders.reduce(
-    (s, f) => s + parseFolderRepeat(f.name).repeat * f.image_count,
+    (s, f) => s + folderEffective(f.name, f.image_count, resoCount),
     0,
   )
   const regEffective = regFolders.reduce(
-    (s, f) => s + parseFolderRepeat(f.name).repeat * f.image_count,
+    (s, f) => s + folderEffective(f.name, f.image_count, resoCount),
     0,
   )
   const totalEffective = trainEffective + regEffective
@@ -758,6 +1004,7 @@ function DatasetStatsPanel({
           title="train/"
           folders={trainFolders}
           effective={trainEffective}
+          resoCount={resoCount}
           empty={t('train.noTrainImages')}
         />
 
@@ -767,6 +1014,7 @@ function DatasetStatsPanel({
           title="reg/"
           folders={regFolders}
           effective={regEffective}
+          resoCount={resoCount}
           empty={reg && !reg.exists ? t('train.regNotBuilt') : t('train.noRegImages')}
         />
 
@@ -796,6 +1044,108 @@ function DatasetStatsPanel({
           )}
         </div>
       </div>
+
+      <BucketPreview
+        projectId={projectId}
+        vid={activeVersion?.id ?? 0}
+        sig={JSON.stringify([
+          config?.resolution,
+          config?.aspect_ratio_limit,
+          // 文件夹名单（含 px 前缀 / repeat / 图数）—— 改名加 px 也要触发重取，不能只看总数
+          activeVersion?.stats?.train_folders,
+        ])}
+      />
+
+      <MaskedLossHint
+        projectId={projectId}
+        vid={activeVersion?.id ?? 0}
+        maskedLoss={config?.masked_loss === true}
+      />
+    </div>
+  )
+}
+
+/** 训练集有 mask 但 masked_loss 关闭时的提示（决策 D7：只提示不代开）。 */
+function MaskedLossHint({
+  projectId, vid, maskedLoss,
+}: {
+  projectId: number
+  vid: number
+  maskedLoss: boolean
+}) {
+  const { t } = useTranslation()
+  const [maskCount, setMaskCount] = useState(0)
+
+  useEffect(() => {
+    if (!projectId || !vid) return
+    let cancelled = false
+    api.listCropWorkspaceTrain(projectId, vid)
+      .then((r) => {
+        if (!cancelled) {
+          setMaskCount(r.images.filter((im) => im.mask_mtime != null).length)
+        }
+      })
+      .catch(() => { if (!cancelled) setMaskCount(0) })
+    return () => { cancelled = true }
+  }, [projectId, vid])
+
+  if (maskCount === 0 || maskedLoss) return null
+  return (
+    <div className="rounded-md border border-subtle bg-surface px-3 py-2.5 text-xs text-fg-secondary leading-relaxed">
+      {t('train.maskedLossHint', { n: maskCount })}
+    </div>
+  )
+}
+
+/** 训练集实际桶分布（后端用真 BucketManager 算）。按分辨率档分组、每桶有效图数。
+ *  trainer 用 drop_last=False —— 桶不满只出短 batch、不丢图，所以这里不做丢图警告。 */
+function BucketPreview({
+  projectId, vid, sig,
+}: {
+  projectId: number
+  vid: number
+  sig: string
+}) {
+  const { t } = useTranslation()
+  const [dist, setDist] = useState<BucketDistribution | null>(null)
+
+  useEffect(() => {
+    if (!projectId || !vid) return
+    let cancelled = false
+    api.getBucketDistribution(projectId, vid)
+      .then((d) => { if (!cancelled) setDist(d) })
+      .catch(() => { if (!cancelled) setDist(null) })
+    return () => { cancelled = true }
+  }, [projectId, vid, sig])
+
+  if (!dist || dist.groups.length === 0) return null
+
+  return (
+    <div className="rounded-md border border-subtle bg-surface px-3 py-2.5">
+      <div className="flex items-center gap-1.5 mb-2.5">
+        <span className="inline-block w-1.5 h-1.5 rounded-full bg-accent shrink-0" />
+        <span className="caption uppercase tracking-[0.06em] text-xs">{t('train.bucketDistTitle')}</span>
+      </div>
+      <div className="flex flex-col gap-2">
+        {dist.groups.map((g) => (
+          <div key={g.reso}>
+            <div className="text-xs font-mono text-fg-secondary mb-1">{g.reso}px</div>
+            <div className="flex flex-col gap-0.5">
+              {g.buckets.map((b) => (
+                <div
+                  key={`${b.w}x${b.h}`}
+                  className="flex items-baseline gap-1.5 text-xs font-mono pl-1"
+                >
+                  <span className="text-fg-tertiary">{b.w}×{b.h}</span>
+                  <span className="flex-1 border-b border-dotted border-subtle self-end mb-1" />
+                  <span className="text-fg-primary">{b.count}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="text-[10px] text-fg-tertiary mt-2">{t('train.bucketDistHint')}</div>
     </div>
   )
 }
@@ -804,13 +1154,16 @@ function FolderSection({
   title,
   folders,
   effective,
+  resoCount,
   empty,
 }: {
   title: string
   folders: Array<{ name: string; image_count: number }>
   effective: number
+  resoCount: number
   empty: string
 }) {
+  const { t } = useTranslation()
   return (
     <div>
       <div className="flex items-baseline justify-between text-xs mb-1">
@@ -824,20 +1177,31 @@ function FolderSection({
       ) : (
         <div className="flex flex-col gap-0.5">
           {folders.map((f) => {
-            const { repeat, label } = parseFolderRepeat(f.name)
-            const eff = repeat * f.image_count
+            const { reso, repeat, label } = parseFolderMeta(f.name)
+            const folderResos = reso ? 1 : resoCount
+            const eff = repeat * f.image_count * folderResos
+            const resoTag = reso ? `${reso}px` : null
             return (
               <div
                 key={f.name}
                 className="flex items-baseline gap-1.5 text-xs font-mono text-fg-secondary pl-1"
-                title={`${f.name}：${repeat} repeat × ${f.image_count} = ${eff}`}
+                title={folderResos > 1
+                  ? t('train.folderTipReso', { name: f.name, repeat, imgs: f.image_count, resos: folderResos, total: eff })
+                  : t('train.folderTip', { name: f.name, repeat, imgs: f.image_count, total: eff })}
               >
                 <span className="text-fg-tertiary">{label}</span>
+                {resoTag && <span className="text-[10px] text-accent">{resoTag}</span>}
                 <span className="flex-1 border-b border-dotted border-subtle self-end mb-1" />
                 <span>
                   <span className="text-accent">{repeat}</span>
                   <span className="text-fg-tertiary"> × </span>
                   <span className="text-fg-primary">{f.image_count}</span>
+                  {folderResos > 1 && (
+                    <>
+                      <span className="text-fg-tertiary"> × </span>
+                      <span className="text-accent">{folderResos}</span>
+                    </>
+                  )}
                   <span className="text-fg-tertiary"> = </span>
                   <span className="text-fg-primary font-semibold">{eff}</span>
                 </span>

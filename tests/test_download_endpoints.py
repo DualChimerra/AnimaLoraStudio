@@ -26,9 +26,11 @@ def isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             "gelbooru": {
                 "user_id": "u",
                 "api_key": "k",
+            },
+            "download": {
                 "convert_to_png": False,
                 "remove_alpha_channel": False,
-            }
+            },
         }
     )
     return {"db": dbfile}
@@ -37,6 +39,12 @@ def isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 class _StubSupervisor:
     def __init__(self) -> None:
         self.canceled: list[int] = []
+
+    def cancel(self, jid: int) -> bool:  # R-5 台账合并后 queue cancel 走 supervisor.cancel
+        return self.cancel_job(jid)
+
+    def is_task_pausable(self, tid: int) -> bool:  # GET /api/queue/{id} 需要
+        return False
 
     def cancel_job(self, jid: int) -> bool:
         with db.connection_for() as conn:
@@ -102,7 +110,7 @@ def test_start_download_requires_credentials(
         json={"tag": "x", "count": 1, "api_source": "gelbooru"},
     )
     assert resp.status_code == 400
-    assert "gelbooru" in resp.json()["detail"]
+    assert "gelbooru" in resp.json()["error"]["message"]
 
 
 def test_start_download_danbooru_does_not_require_credentials(
@@ -198,8 +206,9 @@ def test_get_job_log_returns_tail(client: TestClient, isolated) -> None:
     log_path = Path(job["log_path"])
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text("a\nb\nc\nd\n", encoding="utf-8")
-    r = client.get(f"/api/jobs/{job['id']}/log?tail=2").json()
-    assert r["content"].splitlines() == ["c", "d"]
+    # R-5 后统一走 /api/logs/{id}（无 tail 参数，前端自截）
+    r = client.get(f"/api/logs/{job['id']}").json()
+    assert r["content"].splitlines()[-2:] == ["c", "d"]
 
 
 # ---------------------------------------------------------------------------
@@ -430,7 +439,7 @@ def test_upload_convert_to_png_renames_and_dedups(
     from PIL import Image
     from studio import secrets
 
-    secrets.update({"gelbooru": {"convert_to_png": True}})
+    secrets.update({"download": {"convert_to_png": True}})
 
     def _png(color):
         buf = _io.BytesIO()
@@ -498,9 +507,9 @@ def test_cancel_pending_job_endpoint(client: TestClient) -> None:
         f"/api/projects/{p['id']}/download",
         json={"tag": "x", "count": 1},
     ).json()
-    r = client.post(f"/api/jobs/{job['id']}/cancel")
+    r = client.post(f"/api/queue/{job['id']}/cancel")
     assert r.status_code == 200
-    again = client.get(f"/api/jobs/{job['id']}").json()
+    again = client.get(f"/api/queue/{job['id']}").json()
     assert again["status"] == "canceled"
 
 
@@ -512,5 +521,5 @@ def test_cancel_terminal_job_400(client: TestClient) -> None:
     ).json()
     with db.connection_for() as conn:
         project_jobs.mark_done(conn, job["id"])
-    r = client.post(f"/api/jobs/{job['id']}/cancel")
+    r = client.post(f"/api/queue/{job['id']}/cancel")
     assert r.status_code == 400

@@ -6,6 +6,9 @@ title 和 note 可改。
 
 删除：直接 rmtree 项目目录 + DELETE db 行（CASCADE 清 versions /
 project_jobs）。无回收站、不可恢复 —— UI 层 confirm 提示用户。
+
+归档（v12）：archived_at 非 NULL = 归档，仅做列表软隐藏（目录 / versions /
+任务全部原样）。UI 上"×"先归档，归档视图里再删才走 delete_project。
 """
 from __future__ import annotations
 
@@ -94,8 +97,14 @@ def create_project(
 ) -> dict[str, Any]:
     title = (title or "").strip()
     if not title:
-        raise ProjectError("title 不能为空")
-    base_slug = slug or slugify(title)
+        raise ProjectError(
+            "Project title is required", code="project.title_required",
+        )
+    # 用户可在创建时显式指定 slug（前端已校验为 ASCII）。这里仍统一过一遍
+    # slugify：既归一化大小写 / 非法字符，也防 API 直连绕过前端校验。留空 / 清理
+    # 后为空 → 回退到从 title 派生（全非 ASCII title 仍走 "project" 兜底）。
+    slug = (slug or "").strip()
+    base_slug = slugify(slug) if slug else slugify(title)
     final_slug = _unique_slug(conn, base_slug)
     now = time.time()
     cur = conn.execute(
@@ -126,7 +135,10 @@ def get_project(
 def _must_get(conn: sqlite3.Connection, project_id: int) -> dict[str, Any]:
     p = get_project(conn, project_id)
     if not p:
-        raise ProjectError(f"项目不存在: id={project_id}")
+        raise ProjectError(
+            "Project not found", code="project.not_found",
+            details={"id": project_id}, http_status=404,
+        )
     return p
 
 
@@ -155,6 +167,22 @@ def update_project(
     params.append(time.time())
     params.append(project_id)
     conn.execute(f"UPDATE projects SET {cols} WHERE id = ?", params)
+    conn.commit()
+    p = _must_get(conn, project_id)
+    _write_project_json(p)
+    return p
+
+
+def set_archived(
+    conn: sqlite3.Connection, project_id: int, archived: bool
+) -> dict[str, Any]:
+    """归档 / 取消归档。只写 archived_at，不动 updated_at —— 恢复后项目
+    在"按活跃时间"排序里回到原来的位置，而不是顶到最前。"""
+    _must_get(conn, project_id)
+    conn.execute(
+        "UPDATE projects SET archived_at = ? WHERE id = ?",
+        (time.time() if archived else None, project_id),
+    )
     conn.commit()
     p = _must_get(conn, project_id)
     _write_project_json(p)

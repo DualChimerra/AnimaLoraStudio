@@ -235,10 +235,9 @@ export default function PreprocessOverviewPage() {
       eyebrow={`Step 2 · ${project.title} / ${activeVersion?.label ?? '—'}`}
       title={t('steps.preprocess.title')}
       subtitle={t('preprocessOverview.subtitle')}
+      belowHeader={<PreprocessToolsBar current="overview" projectId={project.id} versionId={vid} />}
     >
       <div className="flex flex-col h-full gap-3 min-h-0">
-        <PreprocessToolsBar current="overview" projectId={project.id} versionId={vid} />
-
         <section className="flex flex-col flex-1 min-h-0 rounded-md border border-subtle bg-surface overflow-hidden">
           <header className="flex items-center gap-2 shrink-0 px-3 py-2 border-b border-subtle text-sm flex-wrap">
             <div className="flex items-center gap-1">
@@ -332,6 +331,8 @@ export default function PreprocessOverviewPage() {
           srcLabel={previewItem.compareSrc ? t('preprocessOverview.compareOriginal') : undefined}
           compareLabel={previewItem.compareSrc ? t('preprocessOverview.compareProcessed') : undefined}
           caption={previewItem.caption}
+          index={previewIdx!}
+          total={items.length}
           hasPrev={previewIdx! > 0}
           hasNext={previewIdx! < items.length - 1}
           onClose={() => setPreviewIdx(null)}

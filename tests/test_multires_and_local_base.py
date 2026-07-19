@@ -1,101 +1,67 @@
-"""多分辨率 ARB 分桶（可配置桶比例）+ 本地 base 模型注册的回归测试。
+"""本 fork：ARB 分桶显式旋钮（bucket_min/max_reso / bucket_step / bucket_max_ar 别名）。
 
-覆盖两块新功能：
-1. BucketManager 的 min/max/step/max_ar/area_tolerance 变成可配置，默认值
-   与前端 trainBuckets.ts DEFAULTS 对齐（默认集恒为 37 个桶）。
-2. selected_anima / resolve_anima_main_path / build_catalog 支持把
-   diffusion_models/ 里的本地 .safetensors 注册为自定义 base（镜像 upscaler custom）。
+0.20 backport 后：
+- 旋钮为 Optional（None = 按 base_reso 自动推导，与上游一致）；
+- 显式 512/2048/64 时桶集合与老版 fork 逐字节一致（trainBuckets.ts 预测依赖）；
+- ``bucket_max_ar`` 是 ``aspect_ratio_limit`` 的兼容别名（老配置迁移）。
+
+本地自定义 base 模型（旧 is_custom_anima / resolve_anima_main_path）已被上游
+#446 统一候选列表（models_storage + secrets.model_sources）取代，相关测试见
+tests/test_models_storage*.py。
 """
 from __future__ import annotations
 
 import importlib.util
+import sys
 from pathlib import Path
 
-import pytest
 
-
-# ---------------------------------------------------------------------------
-# 1) 多分辨率分桶
-# ---------------------------------------------------------------------------
-
-def _load_bucket_manager():
-    # 单独 load dataset.py，避开 training 包 __init__ 的重依赖（torch 等已装）。
-    # 注册进 sys.modules —— dataset.py 用 `from __future__ import annotations` +
-    # @dataclass，dataclass 需能从 sys.modules 解析字符串注解，否则 exec 报
-    # AttributeError('NoneType' has no __dict__)。
-    import sys
-    name = "ds_for_bucket"
-    spec = importlib.util.spec_from_file_location(
-        name, str(Path(__file__).resolve().parents[1] / "runtime" / "training" / "dataset.py")
-    )
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[name] = mod
-    spec.loader.exec_module(mod)
-    return mod.BucketManager
+# 0.20 后 dataset.py 内部走相对导入（families spec），不能再单文件 exec —— 直接
+# 包导入（conftest 已把 runtime/ 放进 sys.path；torch 在测试环境可用）。
+from training.dataset import BucketManager  # noqa: E402
 
 
 def test_bucket_defaults_yield_37():
-    BM = _load_bucket_manager()
-    # 与 studio/web/src/lib/trainBuckets.test.ts 的 count==37 不变量对齐。
-    assert len(BM().buckets) == 37
-    explicit = BM(base_reso=1024, min_reso=512, max_reso=2048, step=64,
-                  max_ar=2.0, area_tolerance=0.1)
-    assert explicit.buckets == BM().buckets
+    """默认（自动推导）在 base=1024 下与老版 512/2048/64 桶集合完全一致。"""
+    derived = BucketManager(1024, aspect_ratio_limit=2.0)
+    explicit = BucketManager(1024, min_reso=512, max_reso=2048, step=64,
+                             aspect_ratio_limit=2.0)
+    assert derived.buckets == explicit.buckets
+    assert len(derived.buckets) == 37
+
+
+def test_bucket_explicit_knobs_honored():
+    """显式旋钮改变桶集合（更粗 step → 更少桶）。"""
+    fine = BucketManager(1024, min_reso=512, max_reso=2048, step=64,
+                         aspect_ratio_limit=2.0)
+    coarse = BucketManager(1024, min_reso=512, max_reso=2048, step=128,
+                           aspect_ratio_limit=2.0)
+    assert len(coarse.buckets) < len(fine.buckets)
 
 
 def test_bucket_max_ar_configurable():
-    BM = _load_bucket_manager()
-    assert len(BM(max_ar=1.5).buckets) < 37 < len(BM(max_ar=3.0).buckets)
+    narrow = BucketManager(1024, aspect_ratio_limit=1.0)
+    wide = BucketManager(1024, aspect_ratio_limit=3.0)
+    assert len(narrow.buckets) < len(wide.buckets)
+    for w, h in wide.buckets:
+        assert max(w / h, h / w) <= 3.0 + 1e-9
 
 
 def test_bucket_schema_fields_and_validator():
-    from studio.schema import TrainingConfig
-    c = TrainingConfig(data_dir="x", output_dir="o", output_name="n")
-    assert (c.bucket_min_reso, c.bucket_max_reso, c.bucket_step, c.bucket_max_ar) == (512, 2048, 64, 2.0)
-    # min > max fail-fast
-    with pytest.raises(Exception):
-        TrainingConfig(data_dir="x", output_dir="o", output_name="n",
-                       bucket_min_reso=2048, bucket_max_reso=512)
+    """schema 端：旋钮字段存在、默认 None；bucket_max_ar 别名映射。"""
+    from studio.domain.training import TrainingConfig
 
+    c = TrainingConfig()
+    assert c.bucket_min_reso is None
+    assert c.bucket_max_reso is None
+    assert c.bucket_step is None
+    assert c.aspect_ratio_limit == 2.0
 
-# ---------------------------------------------------------------------------
-# 2) 本地 base 模型注册
-# ---------------------------------------------------------------------------
+    c2 = TrainingConfig(bucket_min_reso=512, bucket_max_reso=2048, bucket_step=64)
+    assert (c2.bucket_min_reso, c2.bucket_max_reso, c2.bucket_step) == (512, 2048, 64)
 
-@pytest.fixture()
-def models_root(tmp_path: Path) -> Path:
-    dm = tmp_path / "diffusion_models"
-    dm.mkdir(parents=True)
-    (dm / "anima-base-v1.0.safetensors").write_bytes(b"PRESET")   # 预设文件名
-    (dm / "my-finetune.safetensors").write_bytes(b"CUSTOM")       # 自定义本地 base
-    (dm / "notes.txt").write_bytes(b"junk")                       # 非白名单扩展名
-    return tmp_path
-
-
-def test_is_custom_anima_guards(models_root: Path):
-    from studio.services.models import paths as P
-    assert P.is_custom_anima("my-finetune.safetensors", models_root) is True
-    assert P.is_custom_anima("anima-base-v1.0.safetensors", models_root) is False  # 预设
-    assert P.is_custom_anima("../evil.safetensors", models_root) is False          # 穿越
-    assert P.is_custom_anima("missing.safetensors", models_root) is False          # 不存在
-    assert P.is_custom_anima("notes.txt", models_root) is False                    # 扩展名
-    assert P.is_custom_anima("1.0", models_root) is False                          # 预设 label
-
-
-def test_resolve_anima_main_path(models_root: Path):
-    from studio.services.models import paths as P
-    assert P.resolve_anima_main_path("1.0", models_root).name == "anima-base-v1.0.safetensors"
-    assert P.resolve_anima_main_path("my-finetune.safetensors", models_root) == \
-        models_root / "diffusion_models" / "my-finetune.safetensors"
-    # 未知值回退到 latest 预设路径
-    assert P.resolve_anima_main_path("gone.safetensors", models_root).name == "anima-base-v1.0.safetensors"
-
-
-def test_catalog_lists_custom_base(models_root: Path):
-    from studio.services.models.catalog import build_catalog
-    variants = build_catalog(models_root)["anima_main"]["variants"]
-    by_name = {v["variant"]: v for v in variants}
-    assert by_name["my-finetune.safetensors"]["kind"] == "custom"
-    assert by_name["my-finetune.safetensors"]["exists"] is True
-    assert by_name["1.0"]["kind"] == "preset"
-    assert "notes.txt" not in by_name
+    # 老 fork 配置的 bucket_max_ar → aspect_ratio_limit（显式后者优先）
+    c3 = TrainingConfig.model_validate({"bucket_max_ar": 3.0})
+    assert c3.aspect_ratio_limit == 3.0
+    c4 = TrainingConfig.model_validate({"bucket_max_ar": 3.0, "aspect_ratio_limit": 2.5})
+    assert c4.aspect_ratio_limit == 2.5

@@ -19,18 +19,26 @@ def parse_args():
     """从 studio.schema.TrainingConfig 自动生成 parser；额外补 schema 之外的
     CLI-only 开关（auto-install / interactive / no-live-curve / 已弃用的
     --repeats 和 --reg-repeats）。
+
+    suppress_defaults=True（config 管线刀 1 / R1）：schema 字段不填 argparse
+    默认值，parse 产物只含用户显式传入的键。完整默认值由 apply_yaml_config
+    经 TrainingConfig 构造统一补齐（迁移 / 族默认 overlay / 校验单点生效），
+    CLI-only 开关保留普通默认、始终存在于 namespace。
     """
     from studio.infrastructure.argparse_bridge import build_parser
     from studio.schema import TrainingConfig
 
-    p = build_parser(TrainingConfig, prog="anima_train", description="Anima LoRA Trainer v2")
+    p = build_parser(
+        TrainingConfig, prog="anima_train",
+        description="Anima LoRA Trainer v2", suppress_defaults=True,
+    )
     # schema 之外的 CLI-only 开关
     p.add_argument("--auto-install", action="store_true", help="自动安装缺失依赖")
     p.add_argument("--interactive", action="store_true", help="交互模式，提示输入缺失参数")
     p.add_argument("--no-live-curve", action="store_true", help="禁用实时 Loss 曲线刷新")
     # PP6.1 — 监控状态文件路径；不传则默认写到 output_dir/monitor_state.json
-    # 注：--no-monitor / --monitor-host / --monitor-port / --no-browser 由 schema
-    # 自动从 TrainingConfig 字段生成（保留只为兼容旧 yaml，运行时忽略）。
+    # 注：旧 monitor server 的 --no-monitor / --monitor-host / --monitor-port /
+    # --no-browser 已随 TrainingConfig 字段一并删除（yaml 老键静默丢弃）。
     p.add_argument(
         "--monitor-state-file",
         type=str,
@@ -139,7 +147,13 @@ def prompt_for_args(args):
     args.text_encoder_path = args.text_encoder_path or _ask_str("Qwen 模型目录", defaults["qwen"])
     args.output_dir = _ask_str("输出目录", args.output_dir)
     args.output_name = _ask_str("输出名称", args.output_name)
-    args.resolution = _ask_int("分辨率", args.resolution)
+    # resolution 现在是 list[int]。单值（含默认 [1024]）照常交互问一档；已设多分辨率
+    # （GUI / config 驱动）则不打扰。
+    _res = args.resolution
+    if not isinstance(_res, (list, tuple)):
+        args.resolution = [_ask_int("分辨率", int(_res))]
+    elif len(_res) <= 1:
+        args.resolution = [_ask_int("分辨率", int(_res[0]) if _res else 1024)]
     args.batch_size = _ask_int("Batch size", args.batch_size)
     args.grad_accum = _ask_int("梯度累积", args.grad_accum)
     args.learning_rate = _ask_float("学习率", args.learning_rate)

@@ -35,8 +35,10 @@ def test_create_version_builds_tree_and_activates(isolated) -> None:
         v = versions.create_version(conn, project_id=p["id"], label="baseline")
     vdir = versions.version_dir(p["id"], p["slug"], "baseline")
     assert vdir.exists()
-    for sub in ("train", "reg", "output", "samples"):
+    for sub in ("train", "reg", "output"):
         assert (vdir / sub).is_dir()
+    # 采样图归 task 档案（tasks/<id>/samples/），version 树不再预建空 samples/
+    assert not (vdir / "samples").exists()
     assert (vdir / "version.json").exists()
     # 项目里第一个版本自动设为 active
     with db.connection_for(isolated["db"]) as conn:
@@ -47,7 +49,9 @@ def test_create_version_builds_tree_and_activates(isolated) -> None:
 def test_create_version_rejects_invalid_label(isolated) -> None:
     p = _new_project(isolated)
     with db.connection_for(isolated["db"]) as conn:
-        for bad in ("has space", "../escape", "name/sub", "中文"):
+        # "." / ".." 单独列出：字符集本身放行点号，但纯点 label 会让
+        # version_dir 解析到 versions/ 之外（".." == project 根）。
+        for bad in ("has space", "../escape", "name/sub", "中文", ".", "..", "..."):
             with pytest.raises(versions.VersionError, match="label"):
                 versions.create_version(conn, project_id=p["id"], label=bad)
 
@@ -56,7 +60,7 @@ def test_create_version_rejects_duplicate_label(isolated) -> None:
     p = _new_project(isolated)
     with db.connection_for(isolated["db"]) as conn:
         versions.create_version(conn, project_id=p["id"], label="baseline")
-        with pytest.raises(versions.VersionError, match="已存在"):
+        with pytest.raises(versions.VersionError, match="already exists"):
             versions.create_version(conn, project_id=p["id"], label="baseline")
 
 
@@ -173,7 +177,7 @@ def test_fork_rejects_alien_source(isolated) -> None:
     b = _new_project(isolated, title="B")
     with db.connection_for(isolated["db"]) as conn:
         src = versions.create_version(conn, project_id=a["id"], label="baseline")
-        with pytest.raises(versions.VersionError, match="fork"):
+        with pytest.raises(versions.VersionError, match="copy from"):
             versions.create_version(
                 conn,
                 project_id=b["id"],
@@ -245,6 +249,26 @@ def test_stats_for_version_counts_train_and_reg(isolated) -> None:
         "5_concept": 2,
     }
     assert stats["has_output"] is False
+    assert stats["validation_image_count"] == 0
+    assert stats["validation_tagged_count"] == 0
+
+
+def test_stats_for_version_counts_validation(isolated) -> None:
+    p = _new_project(isolated)
+    with db.connection_for(isolated["db"]) as conn:
+        v = versions.create_version(conn, project_id=p["id"], label="v1")
+    vdir = versions.version_dir(p["id"], p["slug"], "v1")
+    val = vdir / "validation" / "1_data"
+    val.mkdir(parents=True)
+    (val / "a.png").write_bytes(b"x")
+    (val / "b.png").write_bytes(b"x")
+    (val / "b.txt").write_text("tag", encoding="utf-8")
+    stats = versions.stats_for_version(p, v)
+    assert stats["validation_image_count"] == 2
+    assert stats["validation_tagged_count"] == 1
+    # validation 不掺进训练集计数
+    assert stats["train_image_count"] == 0
+    assert stats["tagged_image_count"] == 0
 
 
 def test_create_version_provisions_default_train_folder(isolated) -> None:

@@ -16,8 +16,9 @@
     GET /reg/preview-tags   GET /reg   POST /reg/build
     GET /reg/caption   DELETE /reg
 
-  reg_ai (2)
-    POST /reg/generate-prior   GET /reg/generate-prior/{task_id}
+  reg_ai (3)
+    POST /reg/generate-prior   GET /reg/generate-prior/latest
+    GET /reg/generate-prior/{task_id}
 
   version_config (4)
     GET /config  PUT /config  POST /config/from_preset  POST /config/save_as_preset
@@ -31,6 +32,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from dataclasses import asdict
 from typing import Any, Optional
@@ -38,9 +40,11 @@ from typing import Any, Optional
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 
-from ...deps import _resolve_anima_model_paths, _supervisor
-from ...errors import _preset_err_code as _err_code, _safe_join_or_400
+from ...deps import _resolve_model_paths
+from ...errors import _safe_join_or_400
+from ..logs import read_task_log
 from ...responses import _thumb_response
+from ...schemas.queue import ScheduleTrainingRequest
 from ...schemas.training import (
     BatchOp,
     CaptionEdit,
@@ -61,6 +65,12 @@ from ._shared import (
     _version_train_dir_or_404,
 )
 from .... import db
+from ....domain.errors import (
+    ConflictError,
+    InvalidPathError,
+    NotFoundError,
+    ValidationError,
+)
 from ....services.presets import io as presets_io
 from ....services.projects import jobs as project_jobs, projects, versions
 from ....services.dataset import scan as datasets
@@ -75,6 +85,10 @@ from ....services.dataset import tagedit
 from ....services.dataset import curation as dataset_curation
 
 router = APIRouter()
+
+# 打标 scope 取单个 train 文件夹时的合法名（Kohya 风格，挡 path traversal），
+# 与 dataset.curation._FOLDER_PATTERN 同规则。
+_TAG_SCOPE_FOLDER_RE = re.compile(r"^([0-9]+_)?[A-Za-z][A-Za-z0-9_-]*$")
 logger = logging.getLogger(__name__)
 
 
@@ -106,7 +120,11 @@ def get_caption_endpoint(
     try:
         return tagedit.read_one(train, folder, filename)
     except FileNotFoundError as exc:
-        raise HTTPException(404, str(exc)) from exc
+        raise NotFoundError(
+            "Image not found",
+            code="image.not_found",
+            details={"folder": folder, "filename": filename},
+        ) from exc
 
 
 @router.put("/api/projects/{pid}/versions/{vid}/captions/{folder}/{filename}")
@@ -118,7 +136,11 @@ def put_caption_endpoint(
     try:
         return tagedit.write_one(train, folder, filename, body.tags)
     except FileNotFoundError as exc:
-        raise HTTPException(404, str(exc)) from exc
+        raise NotFoundError(
+            "Image not found",
+            code="image.not_found",
+            details={"folder": folder, "filename": filename},
+        ) from exc
 
 
 @router.post("/api/projects/{pid}/versions/{vid}/captions/snapshot")
@@ -136,24 +158,14 @@ def list_caption_snapshots(pid: int, vid: int) -> dict[str, Any]:
 @router.post("/api/projects/{pid}/versions/{vid}/captions/snapshots/{sid}/restore")
 def restore_caption_snapshot(pid: int, vid: int, sid: str) -> dict[str, Any]:
     _, _, vdir = _version_dir_or_404(pid, vid)
-    try:
-        return caption_snapshot.restore_snapshot(vdir, sid)
-    except FileNotFoundError as exc:
-        raise HTTPException(404, str(exc)) from exc
-    except caption_snapshot.SnapshotError as exc:
-        raise HTTPException(400, str(exc)) from exc
+    return caption_snapshot.restore_snapshot(vdir, sid)
 
 
 @router.delete("/api/projects/{pid}/versions/{vid}/captions/snapshots/{sid}")
 def delete_caption_snapshot(pid: int, vid: int, sid: str) -> dict[str, Any]:
     _, _, vdir = _version_dir_or_404(pid, vid)
-    try:
-        caption_snapshot.delete_snapshot(vdir, sid)
-        return {"deleted": sid}
-    except FileNotFoundError as exc:
-        raise HTTPException(404, str(exc)) from exc
-    except caption_snapshot.SnapshotError as exc:
-        raise HTTPException(400, str(exc)) from exc
+    caption_snapshot.delete_snapshot(vdir, sid)
+    return {"deleted": sid}
 
 
 @router.post("/api/projects/{pid}/versions/{vid}/captions/commit")
@@ -195,13 +207,19 @@ def batch_caption_endpoint(
         return {"op": op, "affected": tagedit.remove_tags(scope, train, body.tags or [])}
     if op == "replace":
         if not body.old or not body.new:
-            raise HTTPException(400, "replace 需要 old 和 new")
+            raise ValidationError(
+                "Replace requires both the old and new tag",
+                code="tag.replace_args_required", http_status=400,
+            )
         return {"op": op, "affected": tagedit.replace_tag(scope, train, body.old, body.new)}
     if op == "dedupe":
         return {"op": op, "affected": tagedit.dedupe(scope, train)}
     if op == "stats":
         return {"op": op, "items": tagedit.stats(scope, train, top=max(1, body.top))}
-    raise HTTPException(400, f"unknown op: {op}")
+    raise ValidationError(
+        f'Unknown operation: "{op}"',
+        code="tag.op_invalid", details={"op": op}, http_status=400,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -254,25 +272,46 @@ _REG_TAGGER_ALLOWED = {"wd14", "cltagger"}
 @router.post("/api/projects/{pid}/versions/{vid}/reg/build")
 def start_reg_build(pid: int, vid: int, body: RegBuildRequest) -> dict[str, Any]:
     if body.api_source not in {"gelbooru", "danbooru"}:
-        raise HTTPException(400, "api_source must be gelbooru|danbooru")
+        raise ValidationError(
+            "Image source must be Gelbooru or Danbooru",
+            code="reg.api_source_invalid", http_status=400,
+        )
     if body.postprocess_method not in {"smart", "stretch", "crop"}:
-        raise HTTPException(400, "postprocess_method must be smart|stretch|crop")
+        raise ValidationError(
+            "Postprocess method must be smart, stretch, or crop",
+            code="reg.postprocess_method_invalid", http_status=400,
+        )
     if not (0.05 <= body.postprocess_max_crop_ratio <= 0.5):
-        raise HTTPException(400, "postprocess_max_crop_ratio must be 0.05–0.5")
+        raise ValidationError(
+            "Max crop ratio must be between 0.05 and 0.5",
+            code="reg.crop_ratio_out_of_range", http_status=400,
+        )
     if body.aspect_ratio_filter_enabled and not (
         0.0 < body.min_aspect_ratio < body.max_aspect_ratio
     ):
-        raise HTTPException(400, "min_aspect_ratio must be < max_aspect_ratio (both > 0)")
+        raise ValidationError(
+            "Min aspect ratio must be less than max aspect ratio, "
+            "and both must be greater than 0",
+            code="reg.aspect_ratio_invalid", http_status=400,
+        )
     if body.auto_tag_kind not in _REG_TAGGER_ALLOWED:
-        raise HTTPException(
-            422,
-            f"auto_tag_kind must be one of {sorted(_REG_TAGGER_ALLOWED)}",
+        _allowed = sorted(_REG_TAGGER_ALLOWED)
+        raise ValidationError(
+            f"Auto-tag mode must be one of: {_allowed}",
+            code="reg.auto_tag_kind_invalid", details={"allowed": _allowed},
+            http_status=422,
         )
     # B1 — build_mode + target_count 校验
     if body.build_mode not in {"mirror", "flat"}:
-        raise HTTPException(422, "build_mode must be 'mirror' or 'flat'")
+        raise ValidationError(
+            "Build mode must be mirror or flat",
+            code="reg.build_mode_invalid", http_status=422,
+        )
     if body.target_count is not None and body.target_count <= 0:
-        raise HTTPException(422, "target_count must be > 0 or null")
+        raise ValidationError(
+            "Target count must be greater than 0 or empty",
+            code="reg.target_count_invalid", http_status=422,
+        )
     _, v, vdir = _version_dir_or_404(pid, vid)
     train = vdir / "train"
     has_image = train.exists() and any(
@@ -280,7 +319,10 @@ def start_reg_build(pid: int, vid: int, body: RegBuildRequest) -> dict[str, Any]
         for f in train.rglob("*")
     )
     if not has_image:
-        raise HTTPException(400, "train 还没有图片，先去 ① 整理 / ② 下载")
+        raise ValidationError(
+            "Add images to the training set first",
+            code="train.no_images", http_status=400,
+        )
 
     with db.connection_for() as conn:
         job = project_jobs.create_job(
@@ -314,21 +356,35 @@ def start_reg_build(pid: int, vid: int, body: RegBuildRequest) -> dict[str, Any]
 def get_reg_caption(pid: int, vid: int, path: str) -> dict[str, Any]:
     """读 reg 集中单张图的 caption。`path` 是相对 reg/ 的路径（含子文件夹）。"""
     if not path:
-        raise HTTPException(400, "invalid path")
+        raise InvalidPathError("Invalid path", code="path.invalid")
     _, _, vdir = _version_dir_or_404(pid, vid)
     rdir = _reg_dir(vdir)
     # path 允许含 `/` 子目录；按分隔符拆成片段交给 safe_join 做组件校验 + containment
     parts = [p for p in path.replace("\\", "/").split("/") if p]
     img = _safe_join_or_400(rdir, *parts)
     if not img.exists() or img.suffix.lower() not in datasets.IMAGE_EXTS:
-        raise HTTPException(404, "image not found")
+        raise NotFoundError(
+            "Image not found", code="image.not_found", details={"path": path},
+        )
     return {"path": path, "tags": tagedit.read_tags(img)}
 
 
 @router.post("/api/projects/{pid}/versions/{vid}/reg/generate-prior")
 def reg_generate_prior(pid: int, vid: int, body: RegAiRequest) -> dict[str, Any]:
-    """启动先验生成 task —— base 模型给每张 train 图的 tag 反向出对照图。"""
-    model_paths = _resolve_anima_model_paths()
+    """启动先验生成 task —— base 模型给每张 train 图的 tag 反向出对照图。
+
+    模型族跟随该 version 的训练配置（先验生成是 version 级操作，不是请求级
+    选择）：无 config 或未声明时按 anima。
+    """
+    project, ver = _project_and_version_or_404(pid, vid)
+    family = "anima"
+    if version_config.has_version_config(project, ver):
+        try:
+            vc = version_config.read_version_config(project, ver)
+            family = str(vc.get("model_family") or "anima")
+        except version_config.VersionConfigError:
+            pass  # 坏 config 不阻塞先验生成，按 anima 兜底
+    model_paths = _resolve_model_paths(body.base_model, family=family)
     _, _, vdir = _version_dir_or_404(pid, vid)
     train = vdir / "train"
     has_image = train.exists() and any(
@@ -336,7 +392,10 @@ def reg_generate_prior(pid: int, vid: int, body: RegAiRequest) -> dict[str, Any]
         for f in train.rglob("*")
     )
     if not has_image:
-        raise HTTPException(400, "train 还没有图片，请先完成 Step 1（下载）或 Step 2（筛选）")
+        raise ValidationError(
+            "Add images to the training set first",
+            code="train.no_images", http_status=400,
+        )
 
     # 「最新一次点击优先」：再点生成 = 放弃同 version 所有旧 reg_ai（pending + running），
     # 只跑这次新建的。否则 UI badge 卡住时（SSE 死，见 anima-phase-cursor-sse-desync）
@@ -367,9 +426,12 @@ def reg_generate_prior(pid: int, vid: int, body: RegAiRequest) -> dict[str, Any]
     rdir = _reg_dir(vdir)
     rdir.mkdir(parents=True, exist_ok=True)
 
+    from ....domain.common import FAMILY_SAMPLING
     from ....services.runtime.xformers import detect_attention_backend
+    sampling = FAMILY_SAMPLING[family]
     cfg = RegAiConfig(
         **model_paths,
+        model_family=family,
         train_dir=str(train),
         reg_dir=str(rdir),
         excluded_tags=list(body.excluded_tags),
@@ -378,8 +440,8 @@ def reg_generate_prior(pid: int, vid: int, body: RegAiRequest) -> dict[str, Any]
         height=body.height,
         steps=body.steps,
         cfg_scale=body.cfg_scale,
-        sampler_name=body.sampler_name,
-        scheduler=body.scheduler,
+        sampler_name=body.sampler_name or sampling["samplers"][0],
+        scheduler=body.scheduler or sampling["schedulers"][0],
         seed=body.seed,
         incremental=body.incremental,
         repeat=body.repeat,
@@ -409,12 +471,34 @@ def reg_generate_prior(pid: int, vid: int, body: RegAiRequest) -> dict[str, Any]
     return task or {"id": task_id}
 
 
+@router.get("/api/projects/{pid}/versions/{vid}/reg/generate-prior/latest")
+def get_latest_reg_prior_task(pid: int, vid: int) -> dict[str, Any]:
+    """页面 hydrate 用：返回当前 version 最近一次 AI 先验 task + 全量日志。"""
+    with db.connection_for() as conn:
+        row = conn.execute(
+            """
+            SELECT * FROM tasks
+            WHERE project_id = ? AND version_id = ? AND task_type = 'reg_ai'
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            """,
+            (pid, vid),
+        ).fetchone()
+    task = dict(row) if row else None
+    return {
+        "task": task,
+        "log": read_task_log(int(task["id"])) if task else "",
+    }
+
+
 @router.get("/api/projects/{pid}/versions/{vid}/reg/generate-prior/{task_id}")
 def get_reg_prior_task(pid: int, vid: int, task_id: int) -> dict[str, Any]:
     with db.connection_for() as conn:
         task = db.get_task(conn, task_id)
     if not task or task.get("task_type") != "reg_ai":
-        raise HTTPException(404)
+        raise NotFoundError(
+            "Task not found", code="task.not_found", details={"id": task_id},
+        )
     return task
 
 
@@ -480,11 +564,15 @@ def delete_reg_files(
     走 _safe_join_or_400 抛 400。
     """
     if not body.relative_paths:
-        raise HTTPException(400, "relative_paths is empty")
+        raise ValidationError(
+            "No files selected", code="reg.paths_empty", http_status=400,
+        )
     _, _, vdir = _version_dir_or_404(pid, vid)
     rdir = _reg_dir(vdir)
     if not rdir.exists():
-        raise HTTPException(404, "reg dir not found")
+        raise NotFoundError(
+            "Regularization set not found", code="reg.not_found",
+        )
 
     # 端点入口：每条路径走 _safe_join_or_400 防 traversal；合法的转回 rdir
     # 相对形式喂给 reg_dedup.purge_paths。worker 走 dedup.scan_for_dedup
@@ -515,7 +603,9 @@ def dedup_purge_reg(pid: int, vid: int) -> dict[str, Any]:
     _, _, vdir = _version_dir_or_404(pid, vid)
     rdir = _reg_dir(vdir)
     if not rdir.exists():
-        raise HTTPException(404, "reg dir not found")
+        raise NotFoundError(
+            "Regularization set not found", code="reg.not_found",
+        )
 
     to_delete = reg_dedup.scan_for_dedup(rdir)
     scanned = sum(
@@ -552,21 +642,30 @@ def get_version_config_endpoint(pid: int, vid: int) -> dict[str, Any]:
     """
     project, ver = _project_and_version_or_404(pid, vid)
     psf = sorted(version_config.PROJECT_SPECIFIC_FIELDS)
-    psd = {
-        **version_config.project_specific_overrides(project, ver),
-        **model_downloader.default_paths_for_new_version(),
-    }
+
+    def _psd(family: str) -> dict[str, Any]:
+        return {
+            **version_config.project_specific_overrides(project, ver),
+            **model_downloader.default_paths_for_new_version(family=family),
+        }
+
     if not version_config.has_version_config(project, ver):
         return {
             "has_config": False,
             "config": None,
             "project_specific_fields": psf,
-            "project_specific_defaults": psd,
+            "project_specific_defaults": _psd("anima"),
         }
     try:
         cfg, dropped, defaulted = version_config.read_version_config_with_warnings(project, ver)
     except version_config.VersionConfigError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        raise ValidationError(
+            f"Training configuration is invalid: {exc}",
+            code="version.config_invalid", details={"reason": str(exc)},
+            http_status=422,
+        ) from exc
+    # 路径 hint 跟随 version 已声明的族（krea2 版本不该收到 anima 路径预填）
+    psd = _psd(str(cfg.get("model_family") or "anima"))
     return {
         "has_config": True,
         "config": cfg,
@@ -575,6 +674,34 @@ def get_version_config_endpoint(pid: int, vid: int) -> dict[str, Any]:
         "dropped_fields": dropped,
         "defaulted_fields": defaulted,
     }
+
+
+@router.get("/api/projects/{pid}/versions/{vid}/bucket-distribution")
+def get_bucket_distribution_endpoint(pid: int, vid: int) -> dict[str, Any]:
+    """训练集 ARB 桶分布预览（用真 BucketManager 算，与实际训练逐桶一致）。
+
+    按 version config 的 resolution 列表 + aspect_ratio_limit + 文件夹 px/repeat
+    把每张图落桶，返回各分辨率档的桶 + 有效样本数。无 config 用 schema 默认值，
+    空数据集返回空 groups。
+    """
+    project, ver, train_dir = _version_train_dir_or_404(pid, vid)
+    resolutions: list[int] = [1024]
+    ar_limit = 2.0
+    prefer_json = True
+    if version_config.has_version_config(project, ver):
+        try:
+            cfg, _dropped, _defaulted = version_config.read_version_config_with_warnings(project, ver)
+            r = cfg.get("resolution")
+            if isinstance(r, list) and r:
+                resolutions = [int(x) for x in r]
+            elif isinstance(r, (int, float)):
+                resolutions = [int(r)]
+            ar_limit = float(cfg.get("aspect_ratio_limit", 2.0) or 2.0)
+            prefer_json = bool(cfg.get("prefer_json", True))
+        except version_config.VersionConfigError:
+            pass
+    groups = versions.compute_bucket_histogram(train_dir, resolutions, ar_limit, prefer_json)
+    return {"resolutions": resolutions, "aspect_ratio_limit": ar_limit, "groups": groups}
 
 
 @router.put("/api/projects/{pid}/versions/{vid}/config")
@@ -595,7 +722,11 @@ def put_version_config_endpoint(
         )
         cfg = version_config.read_version_config(project, ver)
     except version_config.VersionConfigError as exc:
-        raise HTTPException(400, str(exc)) from exc
+        raise ValidationError(
+            f"Training configuration is invalid: {exc}",
+            code="version.config_invalid", details={"reason": str(exc)},
+            http_status=400,
+        ) from exc
     return {"has_config": True, "config": cfg}
 
 
@@ -609,10 +740,12 @@ def fork_preset_for_version_endpoint(
         cfg, dropped, defaulted = preset_flow.fork_preset_for_version_with_warnings(
             body.name, project, ver
         )
-    except presets_io.PresetError as exc:
-        _err_code(exc); raise  # PR-2 C4: DomainError handler 翻 envelope
     except version_config.VersionConfigError as exc:
-        raise HTTPException(400, str(exc)) from exc
+        raise ValidationError(
+            f"Training configuration is invalid: {exc}",
+            code="version.config_invalid", details={"reason": str(exc)},
+            http_status=400,
+        ) from exc
     # 同步 versions.config_name = 来源 preset 名（informational only）
     with db.connection_for() as conn:
         versions.update_version(conn, vid, config_name=body.name)
@@ -635,41 +768,64 @@ def save_version_config_as_preset_endpoint(
         cfg = preset_flow.save_version_config_as_preset(
             project, ver, body.name, overwrite=body.overwrite,
         )
-    except presets_io.PresetError as exc:
-        _err_code(exc); raise  # PR-2 C4: DomainError handler 翻 envelope
     except version_config.VersionConfigError as exc:
-        raise HTTPException(400, str(exc)) from exc
+        raise ValidationError(
+            f"Training configuration is invalid: {exc}",
+            code="version.config_invalid", details={"reason": str(exc)},
+            http_status=400,
+        ) from exc
     return {"saved_preset": body.name, "config": cfg}
 
 
 @router.post("/api/projects/{pid}/versions/{vid}/queue")
-def enqueue_version_training(pid: int, vid: int) -> dict[str, Any]:
+def enqueue_version_training(
+    pid: int, vid: int, body: Optional[ScheduleTrainingRequest] = None,
+) -> dict[str, Any]:
     """PP6.3 — 把 version 入队训练。
 
     校验：
     - version 已配置训练参数（version_config 存在）
-    - 该 version 没有 active task（pending / running）
+    - 该 version 没有 active task（pending / running / scheduled）
+
+    0.17 P-B：body 带 scheduled_at（unix 秒）→ task 建成 scheduled，到点由
+    supervisor 提升为 pending；不带 body / 不带该字段 → 立即 pending（原行为）。
     """
     project, ver = _project_and_version_or_404(pid, vid)
     if not version_config.has_version_config(project, ver):
-        raise HTTPException(
-            400, "请先在 ⑥ 训练页选预设并保存配置后再入队",
+        raise ValidationError(
+            "Training configuration is not set for this version",
+            code="version.config_missing", http_status=400,
         )
     cfg_path = version_config.version_config_path(project, ver)
+    # auto_sync_paths=ON：入队时把全局模型路径同步落盘——trainer 子进程
+    # 直接读 yaml（不经 studio 读取面的 overlay），全局 selected /
+    # selected_te 切换后训练必须用当前值（Train 页字段锁定并承诺
+    # 「自动 · 全局设置」）。OFF 时 read 不 overlay，写回幂等。
+    try:
+        synced = version_config.read_version_config(project, ver)
+        version_config.write_version_config(
+            project, ver, synced, force_project_overrides=True,
+        )
+    except version_config.VersionConfigError:
+        pass  # 坏 config 由下游校验报错，不在此处中断
+    scheduled_at = body.scheduled_at if body else None
 
     with db.connection_for() as conn:
-        # 该 version 当前是否已有 active task
+        # 该 version 当前是否已有 active GPU task（R-5：台账合并后 tasks 也装
+        # 数据作业，pending 打标不该挡训练入队——只查 GPU 类型）
         active = conn.execute(
             "SELECT id, status FROM tasks "
-            "WHERE version_id = ? AND status IN ('pending', 'running') "
+            "WHERE version_id = ? AND status IN ('pending', 'running', 'scheduled') "
+            "AND COALESCE(task_type, 'train') IN ('train', 'reg_ai', 'generate') "
             "LIMIT 1",
             (vid,),
         ).fetchone()
         if active:
-            raise HTTPException(
-                409,
-                f"该版本已有 active task #{active['id']}（{active['status']}），"
-                "请等其完成或取消",
+            raise ConflictError(
+                "This version already has a running task; "
+                "wait for it to finish or cancel it",
+                code="version.has_active_task",
+                details={"task_id": active["id"], "status": active["status"]},
             )
 
         # 创建 task
@@ -677,14 +833,16 @@ def enqueue_version_training(pid: int, vid: int) -> dict[str, Any]:
         label = ver["label"]
         task_name = f"{slug}_{label}"
         config_name = ver["config_name"] or f"proj_{pid}_{label}"  # informational
+        status = "scheduled" if scheduled_at is not None else "pending"
         # ADR-0009 PR-1 C6: 同 db.create_task — 存 ContextVar trace_id
         from studio.infrastructure.logging import get_trace_id, new_trace_id
         req_tid = get_trace_id() or f"bg-{new_trace_id()}"
         cur = conn.execute(
             "INSERT INTO tasks(name, config_name, status, priority, created_at, "
-            "project_id, version_id, config_path, request_trace_id) "
-            "VALUES (?, ?, 'pending', 0, ?, ?, ?, ?, ?)",
-            (task_name, config_name, time.time(), pid, vid, str(cfg_path), req_tid),
+            "project_id, version_id, config_path, request_trace_id, scheduled_at) "
+            "VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?)",
+            (task_name, config_name, status, time.time(), pid, vid,
+             str(cfg_path), req_tid, scheduled_at),
         )
         tid = int(cur.lastrowid)
         conn.commit()
@@ -694,7 +852,7 @@ def enqueue_version_training(pid: int, vid: int) -> dict[str, Any]:
     bus.publish({
         "type": "task_state_changed",
         "task_id": tid,
-        "status": "pending",
+        "status": status,
     })
     return task or {}
 
@@ -709,17 +867,19 @@ def version_thumb(
     name: str = "",
     size: int = 256,
 ) -> FileResponse:
-    if bucket not in {"train", "reg", "samples"}:
-        raise HTTPException(400, f"非法 bucket: {bucket}")
+    if bucket not in {"train", "reg", "samples", "validation"}:
+        raise InvalidPathError("Invalid path", code="path.invalid")
     with db.connection_for() as conn:
         v = versions.get_version(conn, vid)
         p = projects.get_project(conn, pid)
     if not v or not p or v["project_id"] != pid:
-        raise HTTPException(404, "版本不存在")
+        raise NotFoundError(
+            "Version not found", code="version.not_found", details={"id": vid},
+        )
     vdir = versions.version_dir(p["id"], p["slug"], v["label"]) / bucket
-    if bucket in {"train", "reg"}:
+    if bucket in {"train", "reg", "validation"}:
         if not folder:
-            raise HTTPException(400, "invalid folder")
+            raise InvalidPathError("Invalid path", code="path.invalid")
         f = _safe_join_or_400(vdir, folder, name)
     else:
         f = _safe_join_or_400(vdir, name)
@@ -728,5 +888,5 @@ def version_thumb(
             "version thumb 404: pid=%s vid=%s bucket=%s folder=%s name=%s -> %s",
             pid, vid, bucket, folder, name, f,
         )
-        raise HTTPException(404)
+        raise NotFoundError("Image not found", code="image.not_found")
     return _thumb_response(f, size)

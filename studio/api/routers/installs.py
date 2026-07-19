@@ -34,6 +34,7 @@ from ..schemas.installs import (
     WD14InstallRequest,
 )
 from ... import secrets
+from ...domain.errors import DomainError, ValidationError
 from ...services.runtime import (
     flash_attention as flash_attention_setup,
     onnxruntime as onnxruntime_setup,
@@ -64,8 +65,12 @@ def wd14_install(body: WD14InstallRequest) -> dict[str, Any]:
     重装不能热替换已 import 的 .pyd/.so）。返回 `restart_required=True` 让前端
     显式提示。
     """
-    if body.target not in ("auto", "gpu", "cpu"):
-        raise HTTPException(400, "target must be auto|gpu|cpu")
+    if body.target not in ("auto", "gpu", "cpu", "directml"):
+        raise ValidationError(
+            "Unsupported runtime target",
+            code="install.target_invalid",
+            details={"target": body.target}, http_status=400,
+        )
     try:
         res = onnxruntime_setup.install_runtime(body.target)
     except RuntimeError as exc:
@@ -109,7 +114,11 @@ def torch_reinstall(body: TorchReinstallRequest) -> dict[str, Any]:
     try:
         tag = torch_setup._decide_target_tag(body.target)
     except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
+        raise ValidationError(
+            "Unsupported runtime target",
+            code="install.target_invalid",
+            details={"target": body.target}, http_status=400,
+        ) from exc
     pending_install.register_torch_reinstall(body.target)
     return {
         "pending": True,
@@ -130,15 +139,40 @@ def flash_attn_status() -> dict[str, Any]:
     候选最多取前 20 个，避免 GitHub 历史 release 一大坨刷屏。
     fetch_error 非 None 表示 GitHub API 请求失败（限流 / 网络 / 国内防火墙）；
     UI 要展示这条让用户能选择手动粘 URL。
+
+    任何意外异常都包成 fetch_error 返回 200 —— 这是 Settings 页 mount 就拉的诊断
+    数据，宁可降级显示「无法拉候选」也不要 500 把整段 UI 打成「加载失败」让用户
+    误以为后端坏了。真出问题靠 server log 里的 traceback 排查。
     """
-    status = flash_attention_setup.current_status()
-    env = flash_attention_setup.detect_env()
-    candidates, fetch_error = flash_attention_setup.find_candidates(env)
-    slim = [
-        {"url": c["url"], "name": c["name"], "notes": c["notes"], "usable": c["usable"]}
-        for c in candidates[:20]
-    ]
-    return {**status, "env": env, "candidates": slim, "fetch_error": fetch_error}
+    try:
+        status = flash_attention_setup.current_status()
+        env = flash_attention_setup.detect_env()
+        candidates, fetch_error = flash_attention_setup.find_candidates(env)
+        slim = [
+            {"url": c["url"], "name": c["name"], "notes": c["notes"], "usable": c["usable"]}
+            for c in candidates[:20]
+        ]
+        return {**status, "env": env, "candidates": slim, "fetch_error": fetch_error}
+    except Exception as exc:  # noqa: BLE001
+        # logger.exception 把 traceback 落盘 + 带 trace_id（trace middleware bound）
+        import logging  # noqa: PLC0415
+        logging.getLogger(__name__).exception("flash_attn status endpoint failed")
+        return {
+            "installed": False,
+            "version": None,
+            "env": {
+                "python_tag": None,
+                "cuda_tag": None,
+                "cuda_ver": None,
+                "driver_cuda_ver": None,
+                "torch_tag": None,
+                "torch_ver": None,
+                "torch_cuda_build": None,
+                "platform": None,
+            },
+            "candidates": [],
+            "fetch_error": f"诊断失败：{type(exc).__name__}: {exc}",
+        }
 
 
 @router.post("/api/flash-attention/install")
@@ -212,7 +246,10 @@ def refresh_llm_tagger_models(body: LLMModelsRefreshRequest) -> dict[str, Any]:
         else body.api_key.strip()
     )
     if not base_url:
-        raise HTTPException(400, "base_url is required")
+        raise ValidationError(
+            "API base URL is required",
+            code="llm_tagger.base_url_required", http_status=400,
+        )
     try:
         model_ids = llm_tagger_svc.fetch_openai_compatible_models(
             base_url,
@@ -220,7 +257,11 @@ def refresh_llm_tagger_models(body: LLMModelsRefreshRequest) -> dict[str, Any]:
             timeout=body.timeout or target.timeout,
         )
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(502, str(exc)) from exc
+        raise DomainError(
+            f"Could not reach the model service: {exc}",
+            code="llm_tagger.connect_failed",
+            details={"reason": str(exc)}, http_status=502,
+        ) from exc
     selected = target.model if target.model in model_ids else (model_ids[0] if model_ids else target.model)
     preset_patch: dict[str, Any] = {
         "id": target.id,
@@ -258,9 +299,15 @@ def test_llm_tagger_connection(body: LLMConnectionTestRequest) -> dict[str, Any]
         merged["api_key"] = body.api_key
     cfg = secrets.LLMPresetConfig(**merged)
     if not cfg.base_url.strip():
-        raise HTTPException(400, "base_url is required")
+        raise ValidationError(
+            "API base URL is required",
+            code="llm_tagger.base_url_required", http_status=400,
+        )
     if not cfg.model.strip():
-        raise HTTPException(400, "model is required")
+        raise ValidationError(
+            "A model must be selected",
+            code="llm_tagger.model_required", http_status=400,
+        )
     return llm_tagger_svc.test_openai_compatible_connection(
         cfg.base_url,
         cfg.api_key,

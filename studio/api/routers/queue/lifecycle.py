@@ -1,16 +1,17 @@
 """Queue 任务生命周期（PR-6 commit 6 从 server.py 抽出）。
 
-12 routes：
+13 routes：
     GET   /api/queue                 list（默认隐藏 generate / reg_ai）
-    POST  /api/queue                 enqueue（按 preset 名）
+    POST  /api/queue                 enqueue（按 preset 名，可带 scheduled_at 定时）
+    POST  /api/queue/{task_id}/start_now  scheduled 手动提前转 pending（0.17 P-B）
     GET   /api/queue/hold            查队列挂起状态 + 等待恢复 pending 数
     POST  /api/queue/hold            挂起队列（dispatcher 停拉新 task）
     POST  /api/queue/release         恢复调度
     POST  /api/queue/reorder         按 id 列表重排
-    GET   /api/queue/{task_id}       task DB 行（含 is_pausable 信号）
+    GET   /api/queue/{task_id}       task DB 行（含 is_pausable / is_resumable 信号）
     POST  /api/queue/{task_id}/cancel
     POST  /api/queue/{task_id}/pause   ADR 0006 §4.1
-    POST  /api/queue/{task_id}/resume  ADR 0006 §6 路径 A
+    POST  /api/queue/{task_id}/resume  ADR 0006 §6 路径 A + Addendum 2（paused/failed/canceled）
     POST  /api/queue/{task_id}/retry   复制 config_path / project_id / version_id 起新 task
     DELETE /api/queue/{task_id}       仅 terminal task 可删
 """
@@ -24,55 +25,224 @@ from fastapi import APIRouter, HTTPException
 from ...deps import _supervisor
 from ...schemas.queue import EnqueueRequest, ReorderRequest
 from .... import db
+from ....domain.errors import (
+    ConflictError,
+    DomainError,
+    NotFoundError,
+    PresetNotFoundError,
+    ValidationError,
+)
 from ....infrastructure.event_bus import bus
 from ....paths import USER_PRESETS_DIR, task_dir
+from ....supervisor.resources import (
+    JOB_KIND_RESOURCE_CLASS,
+    RESOURCE_EXCLUSIVE,
+    TASK_TYPE_RESOURCE_CLASS,
+)
 
 router = APIRouter()
+
+# R-5 档位视图：GPU 视图 = exclusive 档（train/reg_ai/generate/eval_samples），
+# 数据视图 = light + io 档。由 resources.py 档位映射派生，防漂移。
+EXCLUSIVE_VIEW_TYPES: tuple[str, ...] = tuple(TASK_TYPE_RESOURCE_CLASS) + tuple(
+    k for k, c in JOB_KIND_RESOURCE_CLASS.items() if c == RESOURCE_EXCLUSIVE
+)
+DATA_VIEW_TYPES: tuple[str, ...] = tuple(
+    k for k, c in JOB_KIND_RESOURCE_CLASS.items() if c != RESOURCE_EXCLUSIVE
+)
+_RESOURCE_CLASS_TYPES = {"exclusive": EXCLUSIVE_VIEW_TYPES, "data": DATA_VIEW_TYPES}
+
+# resume 允许的起点状态（ADR 0006 Addendum 2）。done 不进 — 语义是重训，
+# 走 retry / ResumeFieldPicker。
+RESUMABLE_STATUSES = ("paused", "failed", "canceled")
+
+
+def _resume_source_paths(task: dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
+    """按 status 取恢复点 (state_path, config_path)。
+
+    paused 用 paused_*（pause 流程写入，指向 auto_epoch_state.pt）；
+    failed/canceled 用 last_*（supervisor 每 epoch 收 auto_epoch_backup_written
+    事件落 DB，ADR Addendum 2）；其余状态无恢复点。
+    """
+    status = task.get("status")
+    if status == "paused":
+        return task.get("paused_state_path"), task.get("paused_config_path")
+    if status in ("failed", "canceled"):
+        return task.get("last_state_path"), task.get("last_config_path")
+    return None, None
+
+
+def _is_resumable(task: dict[str, Any]) -> bool:
+    """UI "继续训练" 按钮显隐信号。跟 resume endpoint 的放行条件保持一致：
+    state 文件必须在；config snapshot 路径有值时文件也必须在（严格 freeze）。
+    """
+    state_path, config_path = _resume_source_paths(task)
+    if not state_path or not Path(state_path).exists():
+        return False
+    if config_path and not Path(config_path).exists():
+        return False
+    return True
+
+
+def _enrich_tasks(items: list[dict[str, Any]]) -> None:
+    """给每行注入 is_pausable（ADR 0006 PR-4 §8.1）+ is_resumable（Addendum 2）。就地改。"""
+    try:
+        sup = _supervisor()
+        for it in items:
+            it["is_pausable"] = sup.is_task_pausable(int(it["id"]))
+    except (HTTPException, DomainError):
+        for it in items:
+            it["is_pausable"] = False
+    for it in items:
+        it["is_resumable"] = _is_resumable(it)
+
+
+# 0.17 P-E — history 分页 page_size 上限，防一次拉爆。
+_MAX_PAGE_SIZE = 100
 
 
 @router.get("/api/queue")
 def list_queue(
     status: Optional[str] = None,
     include_generate: bool = False,
+    group: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 20,
+    q: Optional[str] = None,
+    types: Optional[str] = None,
+    resource_class: Optional[str] = None,
 ) -> dict[str, Any]:
-    """队列默认隐藏 generate 测试出图任务（commit 15 P0-2）。
+    """队列任务列表。
 
-    generate task 走 daemon 不占 train slot，且生命周期短（出完图就结束），
-    出现在队列里只会让用户混淆"为什么队列卡住"。需要排查时加
-    `?include_generate=true` 兜底。
+    - 不传 group：全量返回，**仍隐藏 generate/reg_ai**（兼容 Overview / Generate /
+      Topbar / Monitor 的 `listQueue()`——它们靠这个默认避免把 generate 当训练任务、
+      或自锁）。
+    - `group=live`：进行中 + 等待（running/paused/pending），不分页，`{items}`。
+    - `group=history`：已结束（done/failed/canceled），分页返回
+      `{items, total, page, page_size}`；`status` 作终态子过滤，`q` 搜 name/config_name。
+
+    0.17 P-F：**live/history 不再隐藏 generate/reg_ai**（队列页要全类型可见），改由
+    `types`（逗号分隔 train/reg_ai/generate）做正向类型过滤，下沉 SQL 保证分页 total 准。
     """
     if status and status not in db.VALID_STATUSES:
-        raise HTTPException(400, f"unknown status: {status}")
+        raise ValidationError(
+            f"Unsupported status filter: {status}",
+            code="queue.status_filter_invalid", details={"status": status},
+            http_status=400,
+        )
+    if group is not None and group not in ("live", "history"):
+        raise ValidationError(
+            f"Unsupported queue group: {group}",
+            code="queue.group_invalid", details={"group": group},
+            http_status=400,
+        )
+    type_tuple: tuple[str, ...] = ()
+    if types:
+        type_tuple = tuple(t for t in (s.strip() for s in types.split(",")) if t)
+        bad = [t for t in type_tuple if t not in db.VALID_TASK_TYPES]
+        if bad:
+            raise ValidationError(
+                f"Unsupported task type filter: {','.join(bad)}",
+                code="queue.type_filter_invalid", details={"types": bad},
+                http_status=400,
+            )
+    # R-5 档位视图参数：显式 types 优先（单类型已隐含档位）；否则按档位展开。
+    if resource_class is not None:
+        if resource_class not in _RESOURCE_CLASS_TYPES:
+            raise ValidationError(
+                f"Unsupported resource class: {resource_class}",
+                code="queue.resource_class_invalid",
+                details={"resource_class": resource_class}, http_status=400,
+            )
+        if not type_tuple:
+            type_tuple = _RESOURCE_CLASS_TYPES[resource_class]
+
+    # R-3 台账合并：数据作业进了 tasks 表。GPU 视图（本端点）在 R-5 档位化前
+    # 默认排除 JOB_TASK_TYPES——显式 types 过滤时不排（调用方自己指定）。
+    if group is None:
+        # 兼容旧行为：全量 + 隐藏 generate/reg_ai（无 group 调用方依赖此默认）
+        # + 隐藏数据作业（保护 Topbar/Overview/Monitor 不把它们当训练任务）。
+        with db.connection_for() as conn:
+            items = db.list_tasks(conn, status=status)
+        items = db.filter_out_task_types(items, db.JOB_TASK_TYPES)
+        if not include_generate:
+            items = db.filter_out_task_types(items, ("generate", "reg_ai"))
+        _enrich_tasks(items)
+        return {"items": items}
+
+    exclude = () if type_tuple else db.JOB_TASK_TYPES
+    if group == "live":
+        with db.connection_for() as conn:
+            items = db.list_tasks_page(
+                conn, statuses=db.LIVE_STATUSES, q=q, types=type_tuple,
+                exclude_types=exclude,
+            )
+        _enrich_tasks(items)
+        return {"items": items}
+
+    # group == "history" —— 分页
+    statuses = (
+        (status,) if status in db.HISTORY_STATUSES else db.HISTORY_STATUSES
+    )
+    page = max(1, page)
+    page_size = min(_MAX_PAGE_SIZE, max(1, page_size))
+    offset = (page - 1) * page_size
     with db.connection_for() as conn:
-        items = db.list_tasks(conn, status=status)
-    if not include_generate:
-        items = db.filter_out_task_types(items, ("generate", "reg_ai"))
-    # ADR 0006 PR-4 — is_pausable 信号每行注入（§8.1 / 上面 get_queue_item 注释）
-    try:
-        sup = _supervisor()
-        for it in items:
-            it["is_pausable"] = sup.is_task_pausable(int(it["id"]))
-    except HTTPException:
-        for it in items:
-            it["is_pausable"] = False
-    return {"items": items}
+        total = db.count_tasks(
+            conn, statuses=statuses, q=q, types=type_tuple, exclude_types=exclude,
+        )
+        items = db.list_tasks_page(
+            conn, statuses=statuses, q=q, types=type_tuple, exclude_types=exclude,
+            limit=page_size, offset=offset,
+        )
+    _enrich_tasks(items)
+    return {"items": items, "total": total, "page": page, "page_size": page_size}
 
 
 @router.post("/api/queue")
 def enqueue(body: EnqueueRequest) -> dict[str, Any]:
     cfg_path = USER_PRESETS_DIR / f"{body.config_name}.yaml"
     if not cfg_path.exists():
-        raise HTTPException(404, f"preset not found: {body.config_name}")
+        raise PresetNotFoundError(
+            f'Preset "{body.config_name}" not found',
+            code="preset.not_found", details={"name": body.config_name},
+        )
     name = body.name or body.config_name
     with db.connection_for() as conn:
         task_id = db.create_task(
-            conn, name=name, config_name=body.config_name, priority=body.priority
+            conn, name=name, config_name=body.config_name, priority=body.priority,
+            scheduled_at=body.scheduled_at,
         )
         task = db.get_task(conn, task_id)
+    bus.publish({
+        "type": "task_state_changed",
+        "task_id": task_id,
+        "status": task["status"] if task else "pending",
+    })
+    return task or {"id": task_id}
+
+
+@router.post("/api/queue/{task_id}/start_now")
+def start_scheduled_now(task_id: int) -> dict[str, Any]:
+    """0.17 P-B —— scheduled task 手动提前：立即转 pending 参与调度。
+
+    scheduled_at 保留作记录（「原计划 3:00，手动提前」可追溯）；仅 scheduled
+    状态可调，其余 409。
+    """
+    with db.connection_for() as conn:
+        task = db.get_task(conn, task_id)
+        if not task:
+            raise NotFoundError("Task not found", code="task.not_found", details={"task_id": task_id})
+        if task["status"] != "scheduled":
+            raise ConflictError(
+                "Only scheduled tasks can be started early",
+                code="task.not_scheduled", details={"status": task["status"]},
+            )
+        db.update_task(conn, task_id, status="pending")
     bus.publish(
         {"type": "task_state_changed", "task_id": task_id, "status": "pending"}
     )
-    return task or {"id": task_id}
+    return {"task_id": task_id, "status": "pending"}
 
 
 @router.get("/api/queue/hold")
@@ -118,13 +288,14 @@ def get_queue_item(task_id: int) -> dict[str, Any]:
     with db.connection_for() as conn:
         task = db.get_task(conn, task_id)
     if not task:
-        raise HTTPException(404)
+        raise NotFoundError("Task not found", code="task.not_found", details={"task_id": task_id})
     # ADR 0006 PR-4 — is_pausable 信号让 UI 决定是否显示暂停按钮（§8.1）。
     # 仅 supervisor 跑得起来时计算；空载（test / 启动期）默认 False。
     try:
         task["is_pausable"] = _supervisor().is_task_pausable(task_id)
-    except HTTPException:
+    except (HTTPException, DomainError):
         task["is_pausable"] = False
+    task["is_resumable"] = _is_resumable(task)
     return task
 
 
@@ -135,10 +306,15 @@ def cancel_task(task_id: int) -> dict[str, Any]:
         with db.connection_for() as conn:
             task = db.get_task(conn, task_id)
         if not task:
-            raise HTTPException(404)
+            raise NotFoundError("Task not found", code="task.not_found", details={"task_id": task_id})
         if task["status"] in db.TERMINAL_STATUSES:
-            raise HTTPException(400, f"task already {task['status']}")
-        raise HTTPException(409, "cancel rejected (state mismatch)")
+            raise ValidationError(
+                "This task has already finished",
+                code="task.already_finished", http_status=400,
+            )
+        raise ConflictError(
+            "Cannot cancel this task in its current state", code="task.cancel_rejected",
+        )
     return {"task_id": task_id, "canceled": True}
 
 
@@ -155,58 +331,91 @@ def pause_task(task_id: int) -> dict[str, Any]:
         with db.connection_for() as conn:
             task = db.get_task(conn, task_id)
         if not task:
-            raise HTTPException(404, "task not found")
-        raise HTTPException(409, reason or "pause rejected")
+            raise NotFoundError("Task not found", code="task.not_found", details={"task_id": task_id})
+        raise ConflictError(
+            "Cannot pause this task right now",
+            code="task.pause_rejected",
+            details={"reason": reason} if reason else None,
+        )
     return {"task_id": task_id, "pause_pending": True}
 
 
 @router.post("/api/queue/{task_id}/resume")
 def resume_task(task_id: int) -> dict[str, Any]:
-    """恢复 paused task（ADR 0006 §6 路径 A）。
+    """恢复 paused / failed / canceled task（ADR 0006 §6 路径 A + Addendum 2）。
 
     流程：
-      1. 校验 status == 'paused' + paused_state_path 文件存在
-      2. task → pending（**保留 paused_* 字段**，cmd_builder 下轮 dispatch 读它）
-      3. supervisor 下次 _tick 自然 pick up，cmd 加 `--resume-state <pt>`，
-         bootstrap_phase 读 sibling .config.json snapshot 覆盖 args
+      1. 校验 status ∈ RESUMABLE_STATUSES + 恢复点文件存在
+         （paused 读 paused_*；failed/canceled 读 last_*，即 epoch 末 auto backup）
+      2. task → pending；failed/canceled 把 last_* 复制进 paused_* —— 复用
+         paused 管道，cmd_builder（--resume-state 注入）/ bootstrap_phase
+         （sibling .config.json snapshot freeze）整条下游零改动
+      3. supervisor 下次 _tick 自然 pick up
       4. 子进程 load_training_state 成功后 emit `resume_state_loaded` →
-         supervisor `_clear_pause_artifacts` 清文件对 + db 字段
+         supervisor `_clear_pause_fields` 清 db 字段（文件保留，Addendum 2）
+      5. failed/canceled 曾把 version finalize 成 failed/canceled —— 复活后
+         reconcile 派生回 training 并 publish version_state_changed
 
     文件丢失 → 409（ADR §5.5：引导用户走 ResumeFieldPicker 起新 task）。
+    done 不可 resume（语义是重训，走 retry / ResumeFieldPicker）。
     """
+    corrected_version: Optional[dict[str, Any]] = None
     with db.connection_for() as conn:
         task = db.get_task(conn, task_id)
         if not task:
-            raise HTTPException(404, "task not found")
-        if task["status"] != "paused":
-            raise HTTPException(
-                409, f"task status is {task['status']!r}, not paused"
+            raise NotFoundError("Task not found", code="task.not_found", details={"task_id": task_id})
+        status = task["status"]
+        if status not in RESUMABLE_STATUSES:
+            raise ConflictError(
+                "This task cannot be resumed",
+                code="task.not_resumable", details={"status": status},
             )
-        state_path = task.get("paused_state_path")
-        config_path = task.get("paused_config_path")
+        state_path, config_path = _resume_source_paths(task)
         if not state_path or not Path(state_path).exists():
-            raise HTTPException(
-                409,
-                f"paused state file missing: {state_path!r}; "
-                f"use ResumeFieldPicker to start a fresh task from another .pt",
+            raise ConflictError(
+                "The saved training state is missing; start a new run instead",
+                code="task.resume_state_missing",
             )
         if config_path and not Path(config_path).exists():
             # snapshot 缺失虽然不致命（bootstrap_phase 会沿用 args.config yaml），
             # 但 resume 语义会漂；按 ADR §5.7 严格 freeze 原则，拒绝继续。
-            raise HTTPException(
-                409,
-                f"paused config snapshot missing: {config_path!r}; "
-                f"cannot guarantee config freeze, refusing to resume",
+            raise ConflictError(
+                "The saved training state is missing; start a new run instead",
+                code="task.resume_state_missing",
             )
-        db.update_task(
-            conn, task_id,
+        fields: dict[str, Any] = dict(
             status="pending",
             started_at=None,
             finished_at=None,
             exit_code=None,
             error_msg=None,
         )
+        if status in ("failed", "canceled"):
+            # ADR Addendum 2 决策 3：把恢复点搬进 paused_* 走既有管道。
+            fields["paused_state_path"] = state_path
+            fields["paused_config_path"] = config_path
+            fields["paused_step"] = task.get("last_state_step")
+        db.update_task(conn, task_id, **fields)
+        if status in ("failed", "canceled") and task.get("version_id"):
+            # ADR Addendum 2 决策 5：version status 从 failed/canceled 派生回
+            # training（task 已 pending）。dispatch 时 _write_task_running_to_db
+            # 还会再写一次，这里先改是为了 UI 立即一致。
+            from ....services.projects import versions as _versions
+            v, was_corrected = _versions.reconcile_version_status(
+                conn, int(task["version_id"])
+            )
+            if was_corrected and v:
+                corrected_version = v
     bus.publish({"type": "task_state_changed", "task_id": task_id, "status": "pending"})
+    if corrected_version is not None:
+        from ....services.projects import versions as _versions
+        bus.publish({
+            "type": "version_state_changed",
+            "project_id": corrected_version["project_id"],
+            "version_id": corrected_version["id"],
+            "status": _versions.get_status(corrected_version),
+            "phase": _versions.get_phase(corrected_version),
+        })
     return {"task_id": task_id, "status": "pending"}
 
 
@@ -226,9 +435,12 @@ def retry_task(task_id: int) -> dict[str, Any]:
     with db.connection_for() as conn:
         original = db.get_task(conn, task_id)
         if not original:
-            raise HTTPException(404)
+            raise NotFoundError("Task not found", code="task.not_found", details={"task_id": task_id})
         if original["status"] not in db.TERMINAL_STATUSES:
-            raise HTTPException(400, "only terminal tasks can be retried")
+            raise ValidationError(
+                "Only finished tasks can be retried",
+                code="task.not_retryable", http_status=400,
+            )
         new_id = db.create_task(
             conn,
             name=original["name"],
@@ -236,7 +448,9 @@ def retry_task(task_id: int) -> dict[str, Any]:
             priority=original["priority"],
         )
         copy_fields: dict[str, Any] = {}
-        for k in ("config_path", "project_id", "version_id"):
+        # R-3：task_type / params 必须一并复制——数据作业类 task 重跑靠它们
+        # 路由 worker 与还原参数（漏了会退化成 train 跑错脚本）。
+        for k in ("config_path", "project_id", "version_id", "task_type", "params"):
             if original.get(k) is not None:
                 copy_fields[k] = original[k]
         if copy_fields:
@@ -253,9 +467,12 @@ def delete_queue_item(task_id: int) -> dict[str, Any]:
     with db.connection_for() as conn:
         task = db.get_task(conn, task_id)
         if not task:
-            raise HTTPException(404)
+            raise NotFoundError("Task not found", code="task.not_found", details={"task_id": task_id})
         if task["status"] not in db.TERMINAL_STATUSES:
-            raise HTTPException(400, "only terminal tasks can be deleted")
+            raise ValidationError(
+                "Only finished tasks can be deleted",
+                code="task.not_deletable", http_status=400,
+            )
         db.delete_task(conn, task_id)
     # task-scoped 档案（snapshot/config.yaml / monitor/state.json / samples/ /
     # run.log）跟 task DB 行同生命周期 —— 删 task 一并清。老 task 散在
@@ -265,4 +482,15 @@ def delete_queue_item(task_id: int) -> dict[str, Any]:
     tdir = task_dir(task_id)
     if tdir.exists():
         shutil.rmtree(tdir, ignore_errors=True)
+    # ADR Addendum 2 决策 4：**旧布局**恢复点（<version>/output/state/task_<id>/，
+    # 本 Addendum 之前的存量）不在 task_dir 下，单独清；新布局
+    # （tasks/<id>/state/）已被上面的 task_dir rmtree 覆盖。目录名必须
+    # 精确等于 task_<id> 才动手 —— 防 DB 路径异常时误删别的目录。
+    for col in ("last_state_path", "paused_state_path"):
+        p = task.get(col)
+        if not p:
+            continue
+        state_dir = Path(p).parent
+        if state_dir.name == f"task_{task_id}" and state_dir.exists():
+            shutil.rmtree(state_dir, ignore_errors=True)
     return {"deleted": task_id}

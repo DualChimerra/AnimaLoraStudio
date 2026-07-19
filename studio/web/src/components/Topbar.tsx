@@ -21,6 +21,7 @@ const QueueIcon = (
   </svg>
 )
 
+
 // ── 格式化工具 ──────────────────────────────────────────────────────────────
 
 function formatETA(seconds: number): string {
@@ -248,6 +249,10 @@ export default function Topbar() {
             <span>{t('topbar.pendingCount', { n: pendingCount })}</span>
           </button>
         )}
+
+        <SystemStats />
+
+        {/* 本 fork：公告栏铃铛随 in-app updater/announcements 移除 */}
 
         <button
           ref={searchBtnRef}

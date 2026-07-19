@@ -1,17 +1,16 @@
 """CAME optimizer build wrapper（ADR 0003 PR-C）。
 
-CAME = Confidence-guided Adaptive Memory Efficient（Luo et al., ACL 2023,
-arxiv 2307.02047）。外部 lr + scheduler 系（同 AdamW / Lion）：不自适应 lr、非
-schedule-free，所以不需要 validate()（无 lr=1.0 / lr_scheduler=none 约束）。
-
-读 6 个 came_* 参数组装成 CAME 的 betas 三元组 + eps 二元组 + clip_threshold。
+CAME = Confidence-guided Adaptive Memory Efficient optimizer
+（Luo et al., 2023, ACL 2023, arxiv 2307.02047）。Adafactor 式分解二阶矩省显存
++ 置信度引导压制更新噪声。常规优化器：真实 lr（AdamW 量级）、可配 lr_scheduler、
+无 train()/eval() 切换。实现在 utils/optimizer_utils.py `class CAME`。
 """
 
 from __future__ import annotations
 
 
 def build(args, params, lr: float, weight_decay: float):
-    """实例化 CAME，读 came_beta1/2/3、came_eps1/2、came_clip_threshold。"""
+    """实例化 CAME，读 came_* 参数。"""
     from utils.optimizer_utils import create_optimizer
 
     return create_optimizer(

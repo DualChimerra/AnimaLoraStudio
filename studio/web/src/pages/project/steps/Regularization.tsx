@@ -242,7 +242,7 @@ export default function RegularizationPage() {
             if (j.status === 'done') setActiveTab('images')
           }
         }).catch(() => {})
-        void api.getJobLog(jid).then((r) => {
+        void api.getLog(jid).then((r) => {
           setLogs(r.content ? r.content.split('\n') : [])
         }).catch(() => {})
       }

@@ -16,6 +16,7 @@ import MonitorDashboard from '../components/MonitorDashboard'
 type Tab = 'overview' | 'log' | 'monitor' | 'outputs' | 'snapshot'
 
 const STATUS_BADGE: Record<TaskStatus, string> = {
+  scheduled: 'badge badge-neutral',
   pending: 'badge badge-neutral',
   running: 'badge badge-accent',
   done: 'badge badge-ok',
@@ -194,6 +195,7 @@ export default function QueueDetailPage() {
   }
 
   const STATUS_LABEL: Record<TaskStatus, string> = {
+    scheduled: t('status.pending'),
     pending: t('status.pending'),
     running: t('status.running'),
     done: t('status.done'),

@@ -19,12 +19,19 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # 真正给用户看的入口是 /studio/（前端 SPA），裸根路径只是兼容旧 monitor。
-    print(f"[AnimaStudio] http://{args.host}:{args.port}/studio/")
+    # ADR 0012：SPA 入口在根路径 /（不再用 /studio 子路径）。
+    print(f"[AnimaStudio] http://{args.host}:{args.port}/")
     uvicorn.run(
         "studio.server:app",
         host=args.host,
         port=args.port,
         reload=args.reload,
         log_level="info",
+        # 浏览器开着时 /api/events 的 SSE 长连接不会主动断，graceful shutdown
+        # 默认无限等 →「Waiting for connections to close」卡死；且 py3.12+ 的
+        # Server.wait_closed() 等全部活跃连接，二次 Ctrl+C 的 force_exit 也
+        # 解不开（transport 不被强关）。给 graceful 一个上限：超时后 uvicorn
+        # cancel 剩余连接 task → 连接关闭 → lifespan 正常收尾（supervisor /
+        # daemon 优雅停）。
+        timeout_graceful_shutdown=3,
     )
