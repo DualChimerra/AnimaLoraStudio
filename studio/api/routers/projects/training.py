@@ -801,10 +801,14 @@ def enqueue_version_training(
     # 直接读 yaml（不经 studio 读取面的 overlay），全局 selected /
     # selected_te 切换后训练必须用当前值（Train 页字段锁定并承诺
     # 「自动 · 全局设置」）。OFF 时 read 不 overlay，写回幂等。
+    #
+    # reset_resume=False：这是一次「读出来再写回去」，不是新建/fork —— 强制
+    # 重置 resume_lora / resume_state 会把用户刚设的接续起点在点「开始训练」
+    # 的瞬间抹掉（静默，无报错），训练从零开始。
     try:
         synced = version_config.read_version_config(project, ver)
         version_config.write_version_config(
-            project, ver, synced, force_project_overrides=True,
+            project, ver, synced, force_project_overrides=True, reset_resume=False,
         )
     except version_config.VersionConfigError:
         pass  # 坏 config 由下游校验报错，不在此处中断

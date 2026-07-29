@@ -161,6 +161,46 @@ def test_write_forces_project_overrides(env) -> None:
     assert out["output_name"] == f"{p['slug']}_baseline"
 
 
+def test_overrides_keep_resume_when_reset_disabled(env) -> None:
+    """reset_resume=False：不返回 RESUME_FIELDS，调用方保留 config 现值。"""
+    p, v = _make_pv(env)
+    ov = version_config.project_specific_overrides(p, v, reset_resume=False)
+    vdir = versions.version_dir(p["id"], p["slug"], "baseline")
+    assert ov["data_dir"] == str(vdir / "train")  # 路径字段照常派生
+    assert "resume_lora" not in ov
+    assert "resume_state" not in ov
+
+
+def test_write_keeps_resume_when_reset_disabled(env, tmp_path) -> None:
+    """幂等回写不得抹掉用户设的接续起点，但路径字段仍被强制刷新。"""
+    p, v = _make_pv(env)
+    ckpt = tmp_path / "prev.safetensors"
+    ckpt.write_bytes(b"x")
+    cfg = _minimal_config(resume_lora=str(ckpt), data_dir="/some/wrong/path")
+    version_config.write_version_config(
+        p, v, cfg, force_project_overrides=True, reset_resume=False,
+    )
+    out = version_config.read_version_config(p, v)
+    vdir = versions.version_dir(p["id"], p["slug"], "baseline")
+    assert out["resume_lora"] == str(ckpt)
+    assert out["data_dir"] == str(vdir / "train")
+
+
+def test_enqueue_keeps_user_resume_lora(env, tmp_path) -> None:
+    """回归：入队同步全局模型路径时清空 resume_lora → 训练静默从零开始。"""
+    p, v = _make_pv(env)
+    ckpt = tmp_path / "prev.safetensors"
+    ckpt.write_bytes(b"x")
+    version_config.write_version_config(
+        p, v, _minimal_config(resume_lora=str(ckpt)),
+        force_project_overrides=False,
+    )
+    client = TestClient(server.app)
+    resp = client.post(f"/api/projects/{p['id']}/versions/{v['id']}/queue")
+    assert resp.status_code == 200, resp.text
+    assert version_config.read_version_config(p, v)["resume_lora"] == str(ckpt)
+
+
 def test_read_missing_raises(env) -> None:
     p, v = _make_pv(env)
     with pytest.raises(version_config.VersionConfigError):
