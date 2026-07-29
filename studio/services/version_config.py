@@ -50,15 +50,27 @@ PROJECT_SPECIFIC_FIELDS: frozenset[str] = frozenset({
     "trigger_word",
 })
 
+# 续训字段。跟其余 PROJECT_SPECIFIC_FIELDS 不同：那些是**派生**的（由 project +
+# version 唯一确定，任何时候重算都得同一个值），这两个是**用户显式设的**，重算
+# 只能得到 None。fork preset / 从源 version 复制时该清空（防路径跨项目泄漏），
+# 但幂等回写（入队时同步全局模型路径）必须留住 —— 否则用户刚设的接续起点会在
+# 点「开始训练」的瞬间被抹掉，且不报错，训练静默地从零开始。
+RESUME_FIELDS: frozenset[str] = frozenset({
+    "resume_lora",
+    "resume_state",
+})
+
 
 def project_specific_overrides(
-    project: dict[str, Any], version: dict[str, Any]
+    project: dict[str, Any], version: dict[str, Any], *,
+    reset_resume: bool = True,
 ) -> dict[str, Any]:
     """根据 project + version 算出项目特定字段的值。
 
     `data_dir` / `output_dir` / `output_name` 永远确定地填上；
     `reg_data_dir` 只有 reg 集存在（meta.json）才填，否则空（让 trainer 走默认）。
-    `resume_lora` / `resume_state` 默认空 —— 用户要接续训练时显式 PUT 改写。
+    `resume_lora` / `resume_state` 默认空 —— 用户要接续训练时显式 PUT 改写；
+    `reset_resume=False` 时不返回这两个键，调用方保留 config 里的现值。
     `trigger_word` 来自 version 表（Step 4 Tagging 写入），保证 yaml 与 caption
     同源，runtime bootstrap_phase 会据此把 trigger 注入 sample_prompt。
     """
@@ -79,6 +91,9 @@ def project_specific_overrides(
         overrides["reg_data_dir"] = str(vdir / "reg")
     else:
         overrides["reg_data_dir"] = None
+    if not reset_resume:
+        for f in RESUME_FIELDS:
+            overrides.pop(f, None)
     return overrides
 
 
@@ -169,16 +184,21 @@ def apply_global_path_overlay(data: dict[str, Any]) -> dict[str, Any]:
 
 def write_version_config(
     project: dict[str, Any], version: dict[str, Any], data: dict[str, Any],
-    *, force_project_overrides: bool = True,
+    *, force_project_overrides: bool = True, reset_resume: bool = True,
 ) -> Path:
     """写 version 私有 config。
 
     `force_project_overrides=True`（默认）：用 `project_specific_overrides`
     强制覆盖 PROJECT_SPECIFIC_FIELDS，防止用户绕过前端 disabled 改路径。
+
+    `reset_resume=False`：路径字段照常强制刷新，但 RESUME_FIELDS 保留 `data`
+    里的现值 —— 给「读出来再写回去」的幂等同步用（见 enqueue_version_training）。
     """
     payload = dict(data)
     if force_project_overrides:
-        payload.update(project_specific_overrides(project, version))
+        payload.update(
+            project_specific_overrides(project, version, reset_resume=reset_resume)
+        )
     cfg, _, _ = _tolerant_validate(payload)
     # 落盘前裁掉 show_when 为假的字段（UI 不可见 = 不生效），读取时 pydantic
     # 会把缺失字段补回 schema 默认值，GET 返回给前端的仍是完整 config。
