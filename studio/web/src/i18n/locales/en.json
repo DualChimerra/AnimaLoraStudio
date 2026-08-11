@@ -2967,5 +2967,40 @@
     "preset": "Preset",
     "messageSummary": "{{n}} messages · drag to reorder",
     "advanced": "Advanced parameters"
+  },
+  "runtimeMode": {
+    "title": "How do you want to run AnimaLora Studio?",
+    "subtitle": "Pick once — this sets sane defaults for where the server binds, whether a browser opens, and where your data lives. You can change it later in Settings.",
+    "recommended": "Detected",
+    "detectedAs": "Auto-detected: {{mode}}",
+    "noGpu": "No NVIDIA GPU detected",
+    "diskFree": "{{free}} free of {{total}}",
+    "changeLater": "Settings → Runtime mode",
+    "confirm": "Continue",
+    "saving": "Saving…",
+    "current": "Runtime mode",
+    "lockedBy": "Pinned by the {{env}} environment variable — change it where the server is launched.",
+    "switchTo": "Switch to {{mode}}",
+    "switched": "Runtime mode set to {{mode}}. Restart the server for the bind address to take effect.",
+    "local": {
+      "name": "Local machine",
+      "summary": "Studio runs on this computer, on your own GPU.",
+      "bullets": [
+        "Binds to 127.0.0.1 — reachable only from this machine",
+        "Opens your browser automatically on start",
+        "Data stays in studio_data/ next to the repo",
+        "Best launched via the AnimaLoraStudio launcher / studio.bat"
+      ]
+    },
+    "colab": {
+      "name": "Colab / cloud notebook",
+      "summary": "Studio runs in a hosted notebook container (Colab, Kaggle, a rented GPU).",
+      "bullets": [
+        "Binds to 0.0.0.0 so the notebook port proxy can reach it",
+        "Never tries to open a browser inside the container",
+        "Disk is ephemeral — sync studio_data to Drive before the runtime dies",
+        "Set ALS_STUDIO_DATA to a fast local disk, not the Drive mount"
+      ]
+    }
   }
 }

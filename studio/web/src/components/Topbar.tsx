@@ -5,6 +5,8 @@ import { useProjectCtx } from '../context/ProjectContext'
 import { api, type Task } from '../api/client'
 import { useEventStream, type StudioEvent } from '../lib/useEventStream'
 import { useMonitorProgress } from '../lib/useMonitorProgress'
+import { useRuntimeModeOptional } from '../lib/RuntimeMode'
+import { useSettingsDrawer } from '../lib/SettingsDrawer'
 import CommandPalette from './CommandPalette'
 import SystemStats from './SystemStats'
 
@@ -13,6 +15,31 @@ const SearchIcon = (
     <circle cx="11" cy="11" r="7" /><path d="m21 21-4.3-4.3" />
   </svg>
 )
+
+/** 运行模式徽标（本 fork）。点开设置抽屉的运行模式区。
+ *
+ *  常驻显示而不是"仅 colab 时显示"：模式选错的症状（本地起了 0.0.0.0、云端不
+ *  开浏览器）远看都像别的 bug，把当前值一直摆在眼前是最省事的排查入口。 */
+function RuntimeModeBadge() {
+  const { t } = useTranslation()
+  const runtime = useRuntimeModeOptional()
+  const drawer = useSettingsDrawer()
+  const info = runtime?.info
+  const mode = runtime?.mode ?? 'local'
+  if (!info) return null
+  return (
+    <button
+      onClick={() => drawer.open({ section: 'runtime-mode' })}
+      title={t('runtimeMode.current')}
+      className="flex items-center gap-1.5 px-2.5 py-1 rounded-[var(--r-pill)] text-xs font-mono text-fg-tertiary bg-surface border border-dim cursor-pointer hover:border-bold hover:text-fg-secondary transition-colors shrink-0"
+    >
+      <span className={`w-[6px] h-[6px] rounded-full shrink-0 ${
+        mode === 'colab' ? 'bg-accent' : 'bg-fg-tertiary'
+      }`} />
+      <span>{t(`runtimeMode.${mode}.name`)}</span>
+    </button>
+  )
+}
 
 const QueueIcon = (
   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
@@ -253,6 +280,8 @@ export default function Topbar() {
         <SystemStats />
 
         {/* 本 fork：公告栏铃铛随 in-app updater/announcements 移除 */}
+
+        <RuntimeModeBadge />
 
         <button
           ref={searchBtnRef}

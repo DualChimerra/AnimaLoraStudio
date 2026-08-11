@@ -31,6 +31,7 @@ from .routers import (
     models_storage,
     presets,
     root,
+    runtime,
     samples,
     secrets as secrets_router,
     studio_data,
@@ -78,6 +79,8 @@ app.include_router(data_exports.router)
 app.include_router(tagger.router)
 # PR-6 commit 2: admin router（secrets / models / upscalers）。jobs router 已删（R-5 台账合并，数据作业走 /api/queue）
 app.include_router(secrets_router.router)
+# 本 fork：Colab / Local 运行模式（前端首屏选择框 + 设置区切换）
+app.include_router(runtime.router)
 app.include_router(models.router)
 app.include_router(upscalers.router)
 app.include_router(tag_dictionary.router)

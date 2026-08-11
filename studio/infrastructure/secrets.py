@@ -618,6 +618,30 @@ class SystemConfig(BaseModel):
     enable_automagic_v2: bool = False  # 实验性：文件级开关，UI 不暴露
 
 
+class RuntimeConfig(BaseModel):
+    """运行模式（Colab / Local）—— 见 `infrastructure/runtime_mode.py`。
+
+    - `mode`：`""`（还没选过，前端进应用时弹选择框）/ `"local"` / `"colab"`。
+      非法值由 validator 归零成 `""`，宁可多问一次也不要静默按错模式跑。
+    - `asked`：用户是否已经过一次选择流程。`mode` 有值时它必然为 True；单独
+      留字段是为了未来"跳过一次、下次再问"的可能，现在只作只读标记。
+
+    环境变量 `ALS_RUNTIME_MODE` 覆盖本字段且不落盘（Colab notebook 注入）。
+    """
+    mode: str = ""
+    asked: bool = False
+
+    @model_validator(mode="after")
+    def _normalize_values(self) -> "RuntimeConfig":
+        text = str(self.mode or "").strip().lower()
+        # 这里刻意不 import runtime_mode：secrets 被 runtime_mode.stored() 反向
+        # import，函数内 import 能断环但模块级不行。取值集合就两个，直接内联。
+        self.mode = text if text in ("local", "colab") else ""
+        if self.mode:
+            self.asked = True
+        return self
+
+
 class ProxyConfig(BaseModel):
     """全局 HTTP/HTTPS 代理配置。"""
     enabled: bool = False
@@ -708,6 +732,8 @@ class Secrets(BaseModel):
     # 本 fork：in-app updater 移除，但 SystemConfig 保留（enable_automagic_v2
     # feature flag + 旧 secrets.json 的 update_channel 字段兼容）。
     system: SystemConfig = Field(default_factory=SystemConfig)
+    # 本 fork：Colab / Local 运行模式的持久化选择（infrastructure/runtime_mode.py）。
+    runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     proxy: ProxyConfig = Field(default_factory=ProxyConfig)
     # 统一模型来源候选：domain → 用户添加的候选列表。domain 白名单校验在
     # API 层（families 注册表在 services 层）。内置 preset 不在此存储——

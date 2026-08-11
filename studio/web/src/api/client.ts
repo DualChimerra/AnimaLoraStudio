@@ -552,6 +552,44 @@ export interface ProxyConfig {
     no_proxy: string;
 }
 
+/** 运行模式（本 fork）。`''` = 用户还没选过 → 首屏弹选择框。 */
+export type RuntimeMode = 'local' | 'colab'
+
+export interface RuntimeConfig {
+  /** `''` / `'local'` / `'colab'`。空串表示未选择。 */
+  mode: RuntimeMode | ''
+  /** 是否已走过一次选择流程（mode 非空时必为 true）。 */
+  asked: boolean
+}
+
+/** GET/PUT /api/runtime 的载荷。 */
+export interface RuntimeInfo {
+  /** 生效的用户选择（env override 优先）；`''` = 还没选过。 */
+  mode: RuntimeMode | ''
+  /** secrets 里落盘的选择（不含 env override）。 */
+  stored: RuntimeMode | ''
+  /** 后端探测结果，只用于预选，不代替用户决定。 */
+  detected: RuntimeMode
+  /** 「现在就要一个值」时的兜底：mode || detected。 */
+  effective: RuntimeMode
+  /** ALS_RUNTIME_MODE 的值（未设为 `''`）。 */
+  env_override: RuntimeMode | ''
+  /** true = 环境变量钉死了模式，UI 不弹框也不允许改。 */
+  locked: boolean
+  /** 探测判据，设置区展开可看（用户自查为什么被判成某模式）。 */
+  signals: Record<string, boolean>
+  modes: RuntimeMode[]
+  environment: {
+    platform: string
+    python: string
+    studio_data: string
+    studio_data_env: string
+    disk_total: number | null
+    disk_free: number | null
+    gpu: string
+  }
+}
+
 /** Tag 翻译词典 — meta 字段。kind=default：来自首启自动下载或用户点 "恢复默认"；
  *  kind=user：用户手动上传。前端 Settings UI 用 source_name / entry_count 显示。 */
 export interface TagDictionaryMeta {
@@ -592,6 +630,8 @@ export interface Secrets {
   models: ModelsConfig
   queue: QueueConfig
   generate: GenerateSecretsConfig
+  /** 本 fork：Colab / Local 运行模式的持久化选择。 */
+  runtime: RuntimeConfig
   proxy: ProxyConfig
 }
 
@@ -2056,6 +2096,16 @@ export const api = {
 
   // Secrets ------------------------------------------------------------
   getSecrets: () => req<Secrets>('/api/secrets'),
+
+  // Runtime mode (Colab / Local) ---------------------------------------
+  /** 首屏拉一次：mode 为空串 → 弹模式选择框。 */
+  getRuntime: () => req<RuntimeInfo>('/api/runtime'),
+  /** 持久化用户选择。env 钉死时后端返回 409（runtime.mode_locked）。 */
+  setRuntimeMode: (mode: RuntimeMode) =>
+    req<RuntimeInfo>('/api/runtime', {
+      method: 'PUT',
+      body: JSON.stringify({ mode }),
+    }),
 
   // Tag dictionary -----------------------------------------------------
   /** 当前词典 meta + 是否已加载。Settings UI 启动时 ping，决定显示"未初始化"还是详情。 */
