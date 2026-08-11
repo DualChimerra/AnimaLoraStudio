@@ -110,10 +110,11 @@ class GenerateConfig(BaseModel):
                     "performance=全部常驻显存，峰值最高、零搬运",
     )
     ram_guard: bool = Field(
-        True,
+        False,
         description="内存/显存水位保护：加载大模型前按权重文件实际大小预算系统内存与 GPU 空闲显存，"
                     "任一不足时中止并报错（含其他进程占用显存的情形）；"
-                    "关闭后资源不足时加载会继续，可能触发整机换页卡顿",
+                    "默认关（按文件大小的估算偏保守，在配置足够的机器上误拒率高），"
+                    "关闭时资源不足加载会继续，可能触发整机换页卡顿",
     )
 
     @model_validator(mode="after")

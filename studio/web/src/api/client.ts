@@ -537,12 +537,21 @@ export interface GenerateSecretsConfig {
    * 是否让位；save_vram=强制顺序化（峰值最低，每图多几秒搬运）；
    * performance=全部常驻显存（峰值最高、零搬运）。 */
   vram_policy: 'auto' | 'save_vram' | 'performance'
-  /** 系统内存水位保护：加载大模型前可用物理内存不足 6GB 时中止并报错
-   * （默认开）；关闭后继续加载，可能触发整机换页卡顿。 */
+  /** 内存/显存水位保护：加载大模型前按权重文件大小预算内存与空闲显存，
+   * 不足时中止并报错。**默认关**（估算偏保守，配置足够的机器误拒率高）；
+   * 关闭时资源不足会继续加载，可能触发整机换页卡顿。 */
   ram_guard: boolean
   /** 开后每次出图自动落盘到 studio_data/test/<date>/{single,xy}/image_N.png。
    * 默认关；compare 模式始终不落盘。 */
   save_test_images: boolean
+}
+
+/** 训练侧全局行为开关（Settings → 训练）。 */
+export interface TrainingSecretsConfig {
+  /** 训练 / AI 先验的内存/显存水位保护。语义同 `generate.ram_guard`，默认关。
+   * block swap 的 pinned 内存护栏**不受此开关影响**（锁定内存不可换页，
+   * 出路是调小 blocks_to_swap）。 */
+  ram_guard: boolean
 }
 
 export interface ProxyConfig {
@@ -630,6 +639,7 @@ export interface Secrets {
   models: ModelsConfig
   queue: QueueConfig
   generate: GenerateSecretsConfig
+  training: TrainingSecretsConfig
   /** 本 fork：Colab / Local 运行模式的持久化选择。 */
   runtime: RuntimeConfig
   proxy: ProxyConfig

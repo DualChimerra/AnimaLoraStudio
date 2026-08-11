@@ -1442,7 +1442,11 @@
     "purposeTraining": "training",
     "purposeInference": "inference",
     "selectDefaultTe": "Use as default text encoder",
-    "teSelected": "Text encoder set: {{name}}"
+    "teSelected": "Text encoder set: {{name}}",
+    "trainingRuntime": "Training",
+    "trainingRamGuard": "Memory / VRAM guard",
+    "trainingRamGuardHelp": "Before loading the base model for training or AI-prior regularization, budget system RAM and free VRAM against the actual weight file sizes and abort with an actionable error if either falls short.",
+    "trainingRamGuardDefaultHelp": "Off by default: the file-size estimate is conservative and turned out to reject often on machines that were in fact large enough. Turn it on if a training run has ever paged your whole machine to a halt. Block swap's pinned-memory guard is separate and always on — locked memory cannot be paged out, and its way out is a smaller blocks_to_swap."
   },
   "monitor": {
     "taskLabel": "Task",

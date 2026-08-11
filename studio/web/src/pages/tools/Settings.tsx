@@ -37,6 +37,7 @@ type Section =
   | 'models'
   | 'queue'
   | 'generate'
+  | 'training'
   | 'proxy'
 
 // Settings 现在只有「训练」一组配置（打标 / 测试 / 外观 / 系统 tab 已移除）。
@@ -45,6 +46,7 @@ const TRAINING_SECTIONS: { id: string; labelKey: string }[] = [
   { id: 'runtime-mode', labelKey: 'runtimeMode.current' },
   { id: 'download-source', labelKey: 'settings.modelSource' },
   { id: 'queue', labelKey: 'settings.queueSchedule' },
+  { id: 'training-runtime', labelKey: 'settings.trainingRuntime' },
   { id: 'pytorch', labelKey: 'settings.torch' },
   { id: 'flash-attn', labelKey: 'settings.flashAttn' },
   { id: 'xformers', labelKey: 'settings.xformers' },
@@ -188,9 +190,10 @@ const EMPTY: Secrets = {
     idle_timeout_minutes: 10,
     task_timeout_minutes: 0,
     vram_policy: 'auto',
-    ram_guard: true,
+    ram_guard: false,
     save_test_images: false,
   },
+  training: { ram_guard: false },
   runtime: { mode: '', asked: false },
   proxy: {
     enabled: false,
@@ -430,6 +433,23 @@ export default function SettingsPage() {
               {t('settings.lightTasksDuringTrainHint')}
             </span>
           </div>
+        </SettingsField>
+      </SettingsSection>
+
+      <SettingsSection id="training-runtime" title={t('settings.trainingRuntime')}>
+        <SettingsField
+          label={t('settings.trainingRamGuard')}
+          helpTooltip={
+            <>
+              <p>{t('settings.trainingRamGuardHelp')}</p>
+              <p>{t('settings.trainingRamGuardDefaultHelp')}</p>
+            </>
+          }
+        >
+          <Bool
+            value={draft.training.ram_guard}
+            onChange={(v) => update('training', 'ram_guard', v)}
+          />
         </SettingsField>
       </SettingsSection>
 
