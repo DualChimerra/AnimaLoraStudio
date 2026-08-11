@@ -1,6 +1,13 @@
 # AnimaLoraStudio
 
-> **Fork** of the original [WalkingMeatAxolotl/AnimaLoraStudio](https://github.com/WalkingMeatAxolotl/AnimaLoraStudio). Training core, model support (Anima + Krea 2, fp8) and backend are synced with upstream v0.20.2; the UI/UX, Colab deployment and feature set are this fork's own (no in-app updater / auto-tagging step).
+> **Fork** of the original [WalkingMeatAxolotl/AnimaLoraStudio](https://github.com/WalkingMeatAxolotl/AnimaLoraStudio). Training core, model support (Anima + Krea 2, fp8) and backend are synced with upstream v0.20.2; the UI/UX, runtime modes (Colab / Local) and feature set are this fork's own (no in-app updater / auto-tagging step).
+>
+> **Selectively backported from upstream v0.21–v0.23** (not a full version sync):
+> training-side block swap (Krea 2 on 16GB VRAM, #463 plus its gradient fix #466),
+> the memory-guard toggle and its off-by-default change (#480, #484),
+> NaViT pack-based step estimates (#482), and the LoKr/LoHa dropout warning spam fix (#468).
+> **Not backported**: generation-side block swap (depends on upstream #455) and the
+> v0.22.0 evaluation-page rework (#469–#471).
 
 [![中文](https://img.shields.io/badge/lang-%E4%B8%AD%E6%96%87-lightgrey)](README.md) [![English](https://img.shields.io/badge/lang-English-blue)](README.en.md) [![Version](https://img.shields.io/badge/version-0.20.2--fork-blue)](CHANGELOG.md)
 

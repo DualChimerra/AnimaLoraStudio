@@ -1,6 +1,14 @@
 # AnimaLoraStudio
 
-> **Форк** оригинального [WalkingMeatAxolotl/AnimaLoraStudio](https://github.com/WalkingMeatAxolotl/AnimaLoraStudio). Тренировочное ядро, поддержка моделей (Anima + Krea 2, fp8) и бэкенд синхронизированы с апстримом v0.20.2; UI/UX, деплой под Colab и набор функций — собственные (без встроенного апдейтера и шага авто-тегирования).
+> **Форк** оригинального [WalkingMeatAxolotl/AnimaLoraStudio](https://github.com/WalkingMeatAxolotl/AnimaLoraStudio). Тренировочное ядро, поддержка моделей (Anima + Krea 2, fp8) и бэкенд синхронизированы с апстримом v0.20.2; UI/UX, режимы запуска (Colab / Local) и набор функций — собственные (без встроенного апдейтера и шага авто-тегирования).
+>
+> **Точечно перенесено из апстрима v0.21–v0.23** (полной синхронизации версии не было):
+> block swap для тренировки (Krea 2 с 16 ГБ VRAM, #463 + исправление градиентов #466),
+> переключатель защиты по памяти и её выключение по умолчанию (#480, #484),
+> оценка шагов при NaViT-паковке из реальной симуляции (#482),
+> подавление спама предупреждений LoKr/LoHa dropout (#468).
+> **Не перенесено**: block swap на стороне генерации (зависит от апстримного #455) и
+> переработка страницы оценки из v0.22.0 (#469–#471).
 
 [![中文](https://img.shields.io/badge/lang-%E4%B8%AD%E6%96%87-blue)](README.md) [![English](https://img.shields.io/badge/lang-English-lightgrey)](README.en.md) [![Version](https://img.shields.io/badge/version-0.20.2--fork-blue)](CHANGELOG.md)
 
