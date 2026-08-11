@@ -54,6 +54,29 @@ MIN_PYTHON = (3, 10)
 # ---------------------------------------------------------------------------
 # 输出
 # ---------------------------------------------------------------------------
+#
+# **本文件打印出去的字符串必须是纯 ASCII**，与 studio.bat 同一条纪律。
+# Windows 控制台按系统 ANSI 代码页解码（俄语 cp866、中文 cp936、日语 cp932），
+# frozen exe 往里写一个 `→` 就是 UnicodeEncodeError 直接崩 —— 而崩的位置往往是
+# **报错路径本身**（die() 的提示行），于是用户看到的不是「Python 没装」而是一段
+# PyInstaller traceback。注释和 docstring 不受此限（它们不会被打印）。
+#
+# 下面这段是第二道防线：万一将来有人又写了非 ASCII，降级成 `?` 也不要让启动器
+# 死掉。刻意用 errors="replace" 而不是强制 UTF-8 —— 后者会把非 UTF-8 控制台变成
+# 一屏乱码，比几个问号更难读。
+
+
+def _make_output_crash_proof() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")  # type: ignore[union-attr]
+        except (AttributeError, OSError, ValueError):
+            # 被重定向到不支持 reconfigure 的对象（管道包装、pythonw 下的 None）：
+            # 没有第二道防线也不该因此崩，第一道（纯 ASCII）仍然成立。
+            pass
+
+
+_make_output_crash_proof()
 
 
 def say(msg: str) -> None:
@@ -72,7 +95,7 @@ def die(msg: str, *hints: str) -> NoReturn:
     """
     print(f"\n[studio] ERROR: {msg}", file=sys.stderr, flush=True)
     for hint in hints:
-        print(f"         → {hint}", file=sys.stderr, flush=True)
+        print(f"         -> {hint}", file=sys.stderr, flush=True)
     pause()
     raise SystemExit(1)
 
@@ -298,7 +321,7 @@ def install_torch(py: Path, repo: Path, forced_tag: Optional[str]) -> None:
 
     if not pip_install(py, ["torch", "torchvision", "--index-url", index], what="torch"):
         warn("CUDA torch install failed; falling back to the PyPI default")
-        warn("you can fix this later in Studio → Settings → PyTorch → Reinstall")
+        warn("you can fix this later in Studio > Settings > PyTorch > Reinstall")
 
 
 def requirements_marker(venv_dir: Path) -> Path:
@@ -416,7 +439,7 @@ def run_studio(py: Path, repo: Path, mode: Optional[str], passthrough: Sequence[
             pass
 
         if rc == INSTALLER_RELOAD_EXIT_CODE:
-            say("the launcher itself was updated — please start it again")
+            say("the launcher itself was updated - please start it again")
             return 0
         say("restart requested, starting again...")
 
@@ -429,7 +452,7 @@ def run_studio(py: Path, repo: Path, mode: Optional[str], passthrough: Sequence[
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="AnimaLoraStudio",
-        description=f"{APP_NAME} launcher — sets up the environment and starts the app.",
+        description=f"{APP_NAME} launcher - sets up the environment and starts the app.",
     )
     p.add_argument("--repo", metavar="PATH",
                    help="path to the AnimaLoraStudio folder (default: next to this launcher)")
@@ -461,7 +484,7 @@ def run_check(repo: Path) -> int:
             out = subprocess.run([str(py), "-V"], capture_output=True, text=True, timeout=30)
             say(f"venv        : {venv_dir} ({out.stdout.strip() or out.stderr.strip()})")
         except (OSError, subprocess.TimeoutExpired):
-            say(f"venv        : {venv_dir} (broken — cannot run {py.name})")
+            say(f"venv        : {venv_dir} (broken - cannot run {py.name})")
         state = requirements_state(py, repo, requirements_marker(venv_dir))
         say(f"dependencies: {state}")
     else:
@@ -514,7 +537,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     # 在任何 pip 调用之前 —— 见 apply_local_caches 的说明。
     cached = apply_local_caches(repo)
     if cached:
-        say(f"caches → {repo / '.cache'} (set ALS_SYSTEM_CACHES=1 to use system locations)")
+        say(f"caches -> {repo / '.cache'} (set ALS_SYSTEM_CACHES=1 to use system locations)")
 
     if args.check:
         return run_check(repo)
@@ -538,7 +561,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.mode == "colab":
         say("starting Studio in colab mode (bound to 0.0.0.0, no browser)")
     else:
-        say("starting Studio — your browser will open automatically")
+        say("starting Studio - your browser will open automatically")
     rc = run_studio(py, repo, args.mode, passthrough)
     if rc not in (0, 130):
         print(f"\n[studio] Studio exited with code {rc}.", file=sys.stderr, flush=True)

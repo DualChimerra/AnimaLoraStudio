@@ -150,6 +150,58 @@ def test_mode_defaults_to_none() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 输出必须是纯 ASCII
+# ---------------------------------------------------------------------------
+
+
+def test_printed_strings_are_pure_ascii() -> None:
+    """**回归**：启动器打印出去的字符串里一个非 ASCII 字符都不能有。
+
+    Windows 控制台按系统 ANSI 代码页解码（俄语 cp866 / 中文 cp936 / 日语 cp932），
+    frozen exe 往里写一个 `→` 就是 UnicodeEncodeError 当场崩。真事：`caches → ...`
+    这一行让 Windows CI 的冒烟步骤挂掉，而同一个字符也在 `die()` 的提示行里 ——
+    也就是说**报错路径自己会崩**，用户看到的不是「Python 没装」而是一段
+    PyInstaller traceback。studio.bat 顶部早有同一条纪律，这里补上机器校验。
+
+    只查会被打印的字面量（say/warn/die/print/input 的参数 + argparse 的
+    help/description）；注释和 docstring 不受限，那里中文说明更清楚。
+    """
+    import ast
+
+    source = (Path(__file__).resolve().parent.parent / "tools" / "launcher.py")
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+
+    printed: list[tuple[int, str]] = []
+
+    def collect(node: ast.AST) -> None:
+        """把一个表达式里的字符串字面量都收进来（含 f-string 的固定片段）。"""
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+                printed.append((sub.lineno, sub.value))
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = getattr(func, "id", None) or getattr(func, "attr", None)
+        if name in {"say", "warn", "die", "print", "input"}:
+            for arg in node.args:
+                collect(arg)
+        # argparse 的 help= / description= 同样会打到终端
+        for kw in node.keywords:
+            if kw.arg in {"help", "description"}:
+                collect(kw.value)
+
+    offenders = [
+        (line, text) for line, text in printed if not text.isascii()
+    ]
+    assert not offenders, (
+        "non-ASCII in launcher output (crashes frozen exe on non-UTF-8 consoles):\n"
+        + "\n".join(f"  line {line}: {text!r}" for line, text in offenders)
+    )
+
+
+# ---------------------------------------------------------------------------
 # --check
 # ---------------------------------------------------------------------------
 
