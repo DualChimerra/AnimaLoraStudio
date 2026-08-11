@@ -105,8 +105,8 @@ studio.bat
 ./studio.sh
 ```
 
-**本机一键启动（推荐 Windows 用户）**：从 [Releases](https://github.com/DualChimerra/AnimaLoraStudio/releases)
-下载 `AnimaLoraStudio.exe`，放进上面 clone 出来的文件夹（跟 `requirements.txt` 同级），双击即可。
+**本机一键启动（推荐 Windows 用户）**：`AnimaLoraStudio.exe` **已随仓库一起提交** ——
+上面 clone 完，它就在 `AnimaLoraStudio/` 文件夹里，双击即可，不用再去 Releases 找附件。
 它干的事跟 `studio.bat` 一样（建 venv → 按显卡装 torch → 装依赖 → 起服务 → 开浏览器），
 区别只是不用先会开终端、报错时窗口会停住让你看清。
 
@@ -114,6 +114,9 @@ studio.bat
 - 起不来时：`AnimaLoraStudio.exe --check` 打印一份自查报告（找到的文件夹、Python、venv、显卡）。
 - 想重建环境：`AnimaLoraStudio.exe --reinstall`（`studio_data/` 里的项目和权重不动）。
 - 自己编：`python tools/build_launcher.py`（需要 `pip install pyinstaller`，只能在目标平台上编）。
+- 仓库里那份怎么更新：Actions → **publish-launcher** → Run workflow。PyInstaller 不能交叉编译，
+  Windows 的 exe 只能在 windows runner 上出，所以走 CI 构建 + 回提；提交前会先跑一次 `--check` 冒烟。
+- Linux / macOS 不需要 exe，直接 `./studio.sh`。
 
 **Всё внутри одной папки** (важно, если проект живёт на отдельном SSD): кроме `venv/`, `models/`
 и `studio_data/` сюда же уводятся и кеши сторонних библиотек — pip, HuggingFace, torch, npm,

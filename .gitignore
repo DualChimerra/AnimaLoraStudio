@@ -91,10 +91,16 @@ docs/_local/
 # Local UI snapshots before redesign (not for commit)
 _ui_backup/
 
-# 一键启动器的产物（tools/build_launcher.py 编出来的 exe 放仓库根用）。
-# 源码是 tools/launcher.py；二进制走 release 附件，不进 git。
+# 一键启动器的产物（tools/build_launcher.py 编出来的）。
+#
+# `AnimaLoraStudio.exe`（Windows）**故意不在此列** —— 它随仓库一起提交，
+# 这样用户 `git clone` 下来就能直接双击，不用先去 Releases 找附件。
+# 由 .github/workflows/publish-launcher.yml 在 windows runner 上构建并回提。
+#
+# 非 Windows 的产物仍然忽略：Linux/macOS 用户直接 `./studio.sh` 就行，
+# 不需要引导程序，提交进去只是给每个人多下几 MB。
 /AnimaLoraStudio
-/AnimaLoraStudio.exe
+/dist/
 
 # 第三方库缓存（pip / HuggingFace / torch / npm / ...）—— 见
 # studio/infrastructure/local_cache.py：默认收进项目文件夹，免得几个 GB

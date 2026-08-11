@@ -109,9 +109,9 @@ studio.bat
 ./studio.sh
 ```
 
-**One-click local start (recommended on Windows)**: grab `AnimaLoraStudio.exe` from
-[Releases](https://github.com/DualChimerra/AnimaLoraStudio/releases), drop it into the folder you
-just cloned (next to `requirements.txt`) and double-click. It does exactly what `studio.bat` does —
+**One-click local start (recommended on Windows)**: `AnimaLoraStudio.exe` **ships in the
+repository** — after the clone above it is already sitting in the `AnimaLoraStudio/` folder, so
+just double-click it; no Releases page, no build step. It does exactly what `studio.bat` does —
 create the venv, install the torch build matching your GPU, install dependencies, start the server,
 open the browser — you just don't need to know your way around a terminal first, and the window
 stays open long enough to read an error.
@@ -124,6 +124,10 @@ stays open long enough to read an error.
   `studio_data/` are left alone).
 - To build it yourself: `python tools/build_launcher.py` (needs `pip install pyinstaller`; it can
   only build for the platform you run it on).
+- To refresh the copy in the repository: Actions → **publish-launcher** → Run workflow. PyInstaller
+  cannot cross-compile, so the Windows exe has to be built on a windows runner and committed back;
+  the workflow smoke-runs `--check` before committing.
+- Linux / macOS don't need the exe — just run `./studio.sh`.
 
 **Everything stays in one folder** (which matters if the project lives on a separate SSD): besides
 `venv/`, `models/` and `studio_data/`, third-party library caches — pip, HuggingFace, torch, npm,
