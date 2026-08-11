@@ -34,7 +34,7 @@ import subprocess
 import sys
 import venv
 from pathlib import Path
-from typing import NoReturn, Optional, Sequence
+from typing import Any, NoReturn, Optional, Sequence
 
 APP_NAME = "AnimaLora Studio"
 
@@ -137,6 +137,47 @@ def find_repo(explicit: Optional[str]) -> Path:
         f"put {APP_NAME} in the folder that contains requirements.txt and studio/",
         "or pass --repo <path-to-the-folder>",
     )
+
+
+# ---------------------------------------------------------------------------
+# 缓存目录
+# ---------------------------------------------------------------------------
+
+
+def load_local_cache(repo: Path) -> Optional[Any]:
+    """按路径 import `studio/infrastructure/local_cache.py`。
+
+    按路径 import 而不是把环境变量清单复制一份进来：清单只该有一处权威源，
+    抄成两份早晚会漂。这里能这么做是因为此刻仓库已经找到、而那个模块是纯
+    标准库的（venv 还不存在也 import 得动）。
+
+    失败返回 None —— 缓存位置是优化不是正确性，加载不了就让各库用自己的默认
+    位置照常启动。但要 warn：静默会让「以为收进来了、其实没有」无从察觉。
+    """
+    module_path = repo / "studio" / "infrastructure" / "local_cache.py"
+    try:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("_als_local_cache", module_path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot load {module_path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    except Exception as exc:  # noqa: BLE001
+        warn(f"could not redirect caches into the project folder ({exc});"
+             " they will use their default system locations")
+        return None
+
+
+def apply_local_caches(repo: Path) -> dict[str, str]:
+    """把第三方缓存指进 `<仓库>/.cache/`。
+
+    **必须在第一次 `pip install` 之前调用** —— pip 的轮子缓存是所有缓存里最大
+    的一份（CUDA torch 单个轮子 2-3GB），晚一步设就已经落到系统盘了。
+    """
+    module = load_local_cache(repo)
+    return dict(module.apply(repo)) if module is not None else {}
 
 
 # ---------------------------------------------------------------------------
@@ -432,6 +473,19 @@ def run_check(repo: Path) -> int:
         except (OSError, subprocess.TimeoutExpired):
             say(f"system python: {' '.join(argv)} (cannot run)")
 
+    # 「东西到底装哪去了」是这个报告最常被用来回答的问题，缓存位置要在里面。
+    module = load_local_cache(repo)
+    if module is not None:
+        current = module.describe(repo)
+        outside = {
+            var: value for var, value in current.items()
+            if not str(value).startswith(str(repo))
+        }
+        say(f"caches      : {len(current) - len(outside)}/{len(current)} "
+            f"inside {repo / module.CACHE_DIR_NAME}")
+        for var, value in outside.items():
+            say(f"              {var}={value or '(library default, outside this folder)'}")
+
     smi = shutil.which("nvidia-smi")
     if not smi:
         say("gpu         : nvidia-smi not found (CPU-only, or drivers not installed)")
@@ -457,6 +511,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     say(f"{APP_NAME} launcher")
     repo = find_repo(args.repo)
     say(f"folder: {repo}")
+    # 在任何 pip 调用之前 —— 见 apply_local_caches 的说明。
+    cached = apply_local_caches(repo)
+    if cached:
+        say(f"caches → {repo / '.cache'} (set ALS_SYSTEM_CACHES=1 to use system locations)")
 
     if args.check:
         return run_check(repo)

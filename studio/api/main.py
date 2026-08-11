@@ -11,6 +11,16 @@ def main() -> None:
     import argparse
     import uvicorn
 
+    # 第三方缓存收进 `<仓库>/.cache/`（本 fork）。cli.py 起 server 时已在自己
+    # 的 import 期设过、子进程继承；这里覆盖的是**直接** `python -m
+    # studio.server` 的入口 —— 训练子进程由本进程 spawn，缓存变量必须在这一层
+    # 就位，否则底模下载和 HF 缓存还是会落到系统盘。重复调用是幂等的
+    # （已有值不覆盖）。
+    from ..infrastructure import local_cache
+    from ..infrastructure.paths import REPO_ROOT
+
+    local_cache.apply(REPO_ROOT)
+
     parser = argparse.ArgumentParser(description="AnimaStudio daemon")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)

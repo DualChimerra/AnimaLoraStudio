@@ -67,6 +67,17 @@ trap _pause_if_tty_on_error EXIT
 export PYTHONUTF8=1
 export PYTHONIOENCODING=utf-8
 
+# Keep pip's wheel cache inside the project folder (several GB -- the CUDA torch
+# wheel alone is 2-3GB). Everything else is redirected by
+# studio/infrastructure/local_cache.py, which is the authority for the full list;
+# only pip has to be set here, because the first-run bootstrap below shells out
+# to pip before any of our Python code runs. ALS_SYSTEM_CACHES=1 opts out, and an
+# existing PIP_CACHE_DIR is never overridden -- same rules as that module.
+if [ -z "$PIP_CACHE_DIR" ] && [ -z "$ALS_SYSTEM_CACHES" ]; then
+    export PIP_CACHE_DIR="$SCRIPT_DIR/.cache/pip"
+    mkdir -p "$PIP_CACHE_DIR" 2>/dev/null || unset PIP_CACHE_DIR
+fi
+
 # Parse our flags; collect remaining args to forward to Python.
 _USE_MIRROR=0
 _REINSTALL=0

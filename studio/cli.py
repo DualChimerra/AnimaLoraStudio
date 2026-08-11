@@ -34,6 +34,7 @@ WEB_DIST = WEB_DIR / "dist"
 NODE_MODULES = WEB_DIR / "node_modules"
 
 
+
 # ---------------------------------------------------------------------------
 # 工具
 # ---------------------------------------------------------------------------
@@ -834,6 +835,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
+    # 第三方库缓存收进 `<仓库>/.cache/`（本 fork，见 infrastructure/local_cache.py）。
+    #
+    # 必须在任何 pip / npm / server 子进程之前 —— 下面 `args.func(args)` 里就会
+    # 起它们，环境变量得先就位。放在 main() 而不是 import 期：import 期会在
+    # 测试收集阶段就写环境变量并在仓库里建 .cache/，而它买到的只是「有人直接
+    # import cmd_build」这种非用户路径。用户显式设过的值不覆盖，
+    # `ALS_SYSTEM_CACHES=1` 整体关闭。
+    from .infrastructure import local_cache
+
+    local_cache.apply(REPO_ROOT)
+
     parser = build_parser()
     args_list = list(argv) if argv is not None else sys.argv[1:]
     # 没有子命令时默认 run（如 studio.sh --port 6006 → run --port 6006）。

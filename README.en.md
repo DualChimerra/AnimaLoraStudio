@@ -125,6 +125,18 @@ stays open long enough to read an error.
 - To build it yourself: `python tools/build_launcher.py` (needs `pip install pyinstaller`; it can
   only build for the platform you run it on).
 
+**Everything stays in one folder** (which matters if the project lives on a separate SSD): besides
+`venv/`, `models/` and `studio_data/`, third-party library caches — pip, HuggingFace, torch, npm,
+ModelScope, triton — are redirected here too. By default they land in your home directory on the
+system drive and add up to several GB (the CUDA torch wheel cache alone is 2-3GB), and deleting the
+repository does not take them with it. They now go to `<project folder>/.cache/`, which you can
+delete at any time — the worst case is re-downloading something.
+
+- Variables you have already set yourself (`HF_HOME` and friends) are never overridden.
+- To go back to system-wide caches (e.g. to share the pip cache between several checkouts):
+  `ALS_SYSTEM_CACHES=1`.
+- To confirm it took effect: `AnimaLoraStudio.exe --check`, see the `caches` line.
+
 The first time you open the web UI it **asks once which mode to run in** (Local or Colab) — that
 decides whether the backend binds `127.0.0.1` or `0.0.0.0` and whether a browser is opened. It
 won't ask again; change it later under Settings → Runtime mode.

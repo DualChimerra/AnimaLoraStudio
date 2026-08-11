@@ -95,3 +95,8 @@ _ui_backup/
 # 源码是 tools/launcher.py；二进制走 release 附件，不进 git。
 /AnimaLoraStudio
 /AnimaLoraStudio.exe
+
+# 第三方库缓存（pip / HuggingFace / torch / npm / ...）—— 见
+# studio/infrastructure/local_cache.py：默认收进项目文件夹，免得几个 GB
+# 悄悄堆在系统盘上。整个目录随时可删，删了只是下次重下。
+/.cache/
