@@ -25,6 +25,20 @@ REM don't crash on non-UTF-8 system locales (e.g. cp932 Japanese).
 set PYTHONUTF8=1
 set PYTHONIOENCODING=utf-8
 
+REM Keep pip's wheel cache inside the project folder (several GB -- the CUDA
+REM torch wheel alone is 2-3GB, and the default is %LOCALAPPDATA%\pip\Cache on
+REM the system drive). Everything else is redirected by
+REM studio\infrastructure\local_cache.py, which is the authority for the full
+REM list; only pip has to be set here, because the first-run bootstrap below
+REM shells out to pip before any of our Python code runs. ALS_SYSTEM_CACHES=1
+REM opts out, and an existing PIP_CACHE_DIR is never overridden.
+if not defined ALS_SYSTEM_CACHES (
+    if not defined PIP_CACHE_DIR (
+        set PIP_CACHE_DIR=%~dp0.cache\pip
+        if not exist "%~dp0.cache\pip" mkdir "%~dp0.cache\pip" 2>nul
+    )
+)
+
 REM Parse our flags; collect remaining args to forward to Python.
 set REINSTALL=0
 set TORCH_TAG=

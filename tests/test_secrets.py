@@ -886,3 +886,74 @@ def test_model_sources_round_trip_persistence(secrets_file: Path) -> None:
     assert cands[0].filename == "4x-UltraSharp.pth"
     assert cands[1].kind == "local"
     assert cands[1].path == "D:/up/x.pth"
+
+
+# ---------------------------------------------------------------------------
+# ram_guard（内存/显存水位保护）—— 上游 v0.23.0 加开关、v0.23.1 默认改关
+# ---------------------------------------------------------------------------
+
+
+def test_ram_guard_defaults_off(secrets_file: Path) -> None:
+    """训练侧与推理侧默认都关；老 secrets.json 没有对应字段也用默认值。
+
+    上游裁定：按文件大小的估算偏保守，在配置其实足够的机器上误拒率高，
+    而误拒时用户没有出路（多小时任务被一条报错挡在门外）。
+    """
+    s = secrets.load()
+    assert s.training.ram_guard is False
+    assert s.generate.ram_guard is False
+    secrets_file.write_text(
+        json.dumps({"gelbooru": {"user_id": "alice"}}), encoding="utf-8"
+    )
+    s = secrets.load()
+    assert s.training.ram_guard is False
+    assert s.generate.ram_guard is False
+
+
+def test_training_ram_guard_round_trip(secrets_file: Path) -> None:
+    """显式开启要能落盘并读回 —— 落盘时迁移哨兵一并写入，之后 load 不得
+    再把用户的显式值当成"旧默认被动落盘"丢掉。"""
+    secrets.update({"training": {"ram_guard": True}})
+    assert secrets.load().training.ram_guard is True
+    # 幂等：哨兵已落盘，重复 load 不回退
+    assert secrets.load().training.ram_guard is True
+    secrets.update({"training": {"ram_guard": False}})
+    assert secrets.load().training.ram_guard is False
+
+
+def test_ram_guard_legacy_true_discarded_once(secrets_file: Path) -> None:
+    """一次性迁移：旧盘的 ram_guard=true 在无哨兵时被丢弃 → 回到新默认（关）。
+
+    save() 全量落盘使「用户显式开启」与「旧默认 true 被动落盘」在盘上不可
+    分辨，所以只能整体丢弃一次（同 queue.allow_gpu_during_train 的先例）。
+    """
+    secrets_file.write_text(
+        json.dumps({
+            "generate": {"ram_guard": True},
+            "training": {"ram_guard": True},
+        }),
+        encoding="utf-8",
+    )
+    s = secrets.load()
+    assert s.generate.ram_guard is False
+    assert s.training.ram_guard is False
+    assert s.system.ram_guard_default_off is True
+
+
+def test_ram_guard_kept_when_sentinel_present(secrets_file: Path) -> None:
+    """哨兵已置位（= 迁移后用户显式开启）→ 盘上的 true 保留，不再丢弃。
+
+    判据必须是**键缺失**而非「值为假」：本版之后代码落的盘总带此键，
+    值即真源；看值会把新装用户首次显式开启的设置也抹掉。
+    """
+    secrets_file.write_text(
+        json.dumps({
+            "generate": {"ram_guard": True},
+            "training": {"ram_guard": True},
+            "system": {"ram_guard_default_off": True},
+        }),
+        encoding="utf-8",
+    )
+    s = secrets.load()
+    assert s.generate.ram_guard is True
+    assert s.training.ram_guard is True

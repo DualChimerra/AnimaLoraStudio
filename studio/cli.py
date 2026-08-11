@@ -34,6 +34,7 @@ WEB_DIST = WEB_DIR / "dist"
 NODE_MODULES = WEB_DIR / "node_modules"
 
 
+
 # ---------------------------------------------------------------------------
 # 工具
 # ---------------------------------------------------------------------------
@@ -740,6 +741,44 @@ def cmd_test(_args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# 运行模式（Colab / Local）
+# ---------------------------------------------------------------------------
+
+# 这里刻意不 import studio.infrastructure.runtime_mode：build_parser() 在
+# argparse 构造期就要这个元组，而 infrastructure 会连带拉起 pydantic /
+# paths（几百毫秒 + 会建目录）。取值集合是两个字面量，重复一次比换来一条
+# import 边划算；真正的解析逻辑仍然只有 runtime_mode 一份（下面函数内 import）。
+_RUNTIME_MODES: tuple[str, ...] = ("local", "colab")
+
+
+def _apply_runtime_mode_defaults(args: argparse.Namespace) -> None:
+    """把 `--host` / `--no-browser` 的默认值按运行模式补齐（就地改 args）。
+
+    - `--mode` 显式传入时先写进 `ALS_RUNTIME_MODE`，这样 server 子进程（
+      `python -m studio.server`，继承环境）和 UI 看到的是同一个模式。
+    - `local`：127.0.0.1 + 自动开浏览器 —— 浏览器和进程同机，绑 0.0.0.0 等于
+      把训练面板暴露给整个局域网，不该是默认。
+    - `colab`：0.0.0.0 + 不开浏览器 —— notebook 的端口代理要从容器外连进来，
+      而容器里根本没有浏览器可开（webbrowser.open 会静默失败或卡住）。
+
+    用户显式给的值永远优先：`--host` 非 None、`--no-browser` 已置位都不覆盖。
+    """
+    mode = getattr(args, "mode", None)
+    if mode:
+        os.environ["ALS_RUNTIME_MODE"] = mode
+
+    from .infrastructure import runtime_mode  # noqa: PLC0415 — 见上方注释
+
+    effective = runtime_mode.effective()
+    args.runtime_mode = effective
+
+    if getattr(args, "host", None) is None:
+        args.host = "0.0.0.0" if effective == "colab" else "127.0.0.1"
+    if effective == "colab":
+        args.no_browser = True
+
+
+# ---------------------------------------------------------------------------
 # 入口
 # ---------------------------------------------------------------------------
 
@@ -749,8 +788,15 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd")
 
     p_run = sub.add_parser("run", help="构建前端（如缺）+ 起后端")
-    p_run.add_argument("--host", default="127.0.0.1")
+    # host 默认值留 None，由 _apply_runtime_mode_defaults 按运行模式补：
+    # local → 127.0.0.1（只本机可达），colab → 0.0.0.0（notebook 代理要能连）。
+    # 显式 --host 永远优先。
+    p_run.add_argument("--host", default=None,
+                       help="绑定地址（默认按运行模式：local=127.0.0.1 / colab=0.0.0.0）")
     p_run.add_argument("--port", type=int, default=8765)
+    p_run.add_argument("--mode", choices=list(_RUNTIME_MODES), default=None,
+                       help="强制运行模式（local / colab）。等价于设 "
+                            "ALS_RUNTIME_MODE，会锁死 UI 里的模式选择。")
     p_run.add_argument("--no-build", action="store_true",
                        help="即使 dist 不存在也不自动 build")
     p_run.add_argument("--no-browser", action="store_true",
@@ -763,7 +809,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.set_defaults(func=cmd_run)
 
     p_dev = sub.add_parser("dev", help="前后端开发模式")
-    p_dev.add_argument("--host", default="127.0.0.1")
+    p_dev.add_argument("--host", default=None,
+                       help="绑定地址（默认按运行模式：local=127.0.0.1 / colab=0.0.0.0）")
+    p_dev.add_argument("--mode", choices=list(_RUNTIME_MODES), default=None,
+                       help="强制运行模式（local / colab）")
     p_dev.add_argument("--port", type=int, default=8765,
                        help="后端 uvicorn 端口（默认 8765）")
     p_dev.add_argument("--fe-port", type=int, default=5173,
@@ -786,6 +835,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
+    # 第三方库缓存收进 `<仓库>/.cache/`（本 fork，见 infrastructure/local_cache.py）。
+    #
+    # 必须在任何 pip / npm / server 子进程之前 —— 下面 `args.func(args)` 里就会
+    # 起它们，环境变量得先就位。放在 main() 而不是 import 期：import 期会在
+    # 测试收集阶段就写环境变量并在仓库里建 .cache/，而它买到的只是「有人直接
+    # import cmd_build」这种非用户路径。用户显式设过的值不覆盖，
+    # `ALS_SYSTEM_CACHES=1` 整体关闭。
+    from .infrastructure import local_cache
+
+    local_cache.apply(REPO_ROOT)
+
     parser = build_parser()
     args_list = list(argv) if argv is not None else sys.argv[1:]
     # 没有子命令时默认 run（如 studio.sh --port 6006 → run --port 6006）。
@@ -801,6 +861,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     # 收编）。env ANIMA_LOGGING_NO_BOOTSTRAP=1 时 noop（测试态）。
     from .infrastructure.logging import setup_logging
     setup_logging(f"cli:{args.cmd}", file=False, console=True)
+    # run / dev 才有 host / browser 概念；build / test 没有这些属性。
+    if args.cmd in ("run", "dev"):
+        _apply_runtime_mode_defaults(args)
+        _say(f"运行模式：{args.runtime_mode}"
+             + ("（Colab / 云端 notebook）" if args.runtime_mode == "colab"
+                else "（本机）"))
     return args.func(args)
 
 

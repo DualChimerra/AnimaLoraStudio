@@ -1442,7 +1442,11 @@
     "purposeTraining": "训练",
     "purposeInference": "推理",
     "selectDefaultTe": "设为默认文本编码器",
-    "teSelected": "文本编码器已切换：{{name}}"
+    "teSelected": "文本编码器已切换：{{name}}",
+    "trainingRuntime": "训练",
+    "trainingRamGuard": "内存 / 显存水位保护",
+    "trainingRamGuardHelp": "训练与 AI 先验（正则生成）加载底模前，按权重文件实际大小预算系统内存与 GPU 空闲显存，任一不足则中止并报可操作错误。",
+    "trainingRamGuardDefaultHelp": "默认关：按文件大小的估算偏保守，在配置其实足够的机器上误拒率高。如果曾经因为训练把整机拖到换页卡死，可以打开。block swap 的 pinned 内存护栏是独立的、始终生效 —— 锁定内存不可换页，出路是调小 blocks_to_swap。"
   },
   "monitor": {
     "taskLabel": "任务",
@@ -2427,6 +2431,14 @@
     "folderTipReso": "{{name}}：{{repeat}} repeat × {{imgs}} 图 × {{resos}} 分辨率 = {{total}}",
     "bucketDistTitle": "桶分布（实际）",
     "bucketDistHint": "按分辨率 × 长宽比分桶，同桶进同一 batch；桶不满只出短 batch、不丢图。",
+    "navitPackLine": "有效 pack/epoch",
+    "navitGaLine": "÷ ga ({{ga}})",
+    "navitEstimating": "打包预估计算中…",
+    "navitDistTitle": "原生尺寸分布（NaViT）",
+    "navitDistHint": "原生分辨率模式：每图按自身尺寸训练（floor 对齐 16px），无 ARB 桶量化；分批按 token 预算拼包。",
+    "navitDistDownscaled": "{{n}} 张超 token 预算，已等比降采样。",
+    "navitDistMore": "… 其余 {{kinds}} 种尺寸共 {{n}} 张",
+    "navitBucketHint": "NaViT 打包：桶只决定尺寸量化；分批按 token 预算跨桶拼包，与 batch_size 无关。",
     "maskedLossHint": "训练集有 {{n}} 张图带 mask（涂抹页 · 遮罩），但 masked_loss 未开启 —— 本次训练不会使用这些 mask。需要生效请在 loss 配置组开启 masked_loss。",
     "confirmReset": "重置为预设 {{name}} 的配置？当前 version 的所有自定义内容会丢失。",
     "resetOkText": "重置",
@@ -2967,5 +2979,40 @@
     "preset": "Preset",
     "messageSummary": "{{n}} 条消息 · 拖动调整顺序",
     "advanced": "高级参数"
+  },
+  "runtimeMode": {
+    "title": "以哪种模式运行 AnimaLora Studio？",
+    "subtitle": "只需选一次 —— 它决定后端绑定地址、要不要自动开浏览器、数据落在哪。之后可在设置里改。",
+    "recommended": "已探测",
+    "detectedAs": "自动探测结果：{{mode}}",
+    "noGpu": "未检测到 NVIDIA GPU",
+    "diskFree": "可用 {{free}} / 共 {{total}}",
+    "changeLater": "设置 → 运行模式",
+    "confirm": "继续",
+    "saving": "保存中…",
+    "current": "运行模式",
+    "lockedBy": "已被环境变量 {{env}} 钉死 —— 请到启动 server 的地方修改。",
+    "switchTo": "切换到{{mode}}",
+    "switched": "运行模式已设为{{mode}}。绑定地址需重启 server 后生效。",
+    "local": {
+      "name": "本机",
+      "summary": "Studio 跑在这台电脑上，用你自己的显卡。",
+      "bullets": [
+        "绑定 127.0.0.1 —— 只有本机能访问",
+        "启动后自动打开浏览器",
+        "数据留在仓库旁边的 studio_data/",
+        "推荐用 AnimaLoraStudio 启动器 / studio.bat 启动"
+      ]
+    },
+    "colab": {
+      "name": "Colab / 云端 notebook",
+      "summary": "Studio 跑在托管的 notebook 容器里（Colab、Kaggle、租用 GPU）。",
+      "bullets": [
+        "绑定 0.0.0.0，让 notebook 的端口代理能连进来",
+        "不在容器里尝试打开浏览器",
+        "磁盘是临时的 —— 运行时回收前把 studio_data 同步到 Drive",
+        "把 ALS_STUDIO_DATA 指到本机快速盘，不要直接指 Drive 挂载点"
+      ]
+    }
   }
 }

@@ -488,6 +488,26 @@ class QueueConfig(BaseModel):
     light_tasks_during_train: bool = True
 
 
+class TrainingSecretsConfig(BaseModel):
+    """训练侧全局行为开关（Settings → 训练）。
+
+    - `ram_guard`：训练 / AI 先验（正则生成）的内存/显存水位保护。语义同
+      `generate.ram_guard`：加载大模型前按权重文件实际大小预算系统内存与
+      GPU 空闲显存，任一不足时中止并报可操作错误。**默认关**（上游 v0.23.1
+      裁定：按文件大小的估算偏保守，在配置足够的机器上误拒率高，而误拒时
+      用户没有出路）；关闭时资源不足会继续加载，可能触发整机换页卡顿。
+      经环境变量 ``LORA_RAM_GUARD`` 注入训练子进程（supervisor `_popen`）。
+      block swap 的 pinned 内存护栏**不受此开关影响** —— 锁定内存不可换页、
+      占满会硬卡整机，且有独立出路（调小 blocks_to_swap）。
+
+    上游把这个模型叫 `TrainingConfig`，本 fork 改名 `TrainingSecretsConfig`：
+    `studio.domain.training.TrainingConfig`（643 行的训练参数 schema）是全仓
+    最常被 import 的名字之一，同名两个 pydantic 模型只会招来误 import。
+    secrets.json 里的键仍是 `training`，与上游同形。
+    """
+    ram_guard: bool = False
+
+
 class ModelsConfig(BaseModel):
     """全局模型配置（PP7）。
 
@@ -582,7 +602,8 @@ class GenerateConfig(BaseModel):
       低，每图多几秒搬运）；`'performance'` 全部常驻显存（峰值最高、零搬运）。
     - `ram_guard`：内存/显存水位保护。加载大模型前按权重文件实际大小
       预算系统内存与 GPU 空闲显存，任一不足时中止并报可操作错误
-      （默认开；显存检查可拦多进程叠加）；关闭后资源不足时继续加载，
+      （开启时显存检查可拦多进程叠加）。**默认关**（上游 v0.23.1 裁定：
+      按文件大小的估算偏保守，误拒率高）；关闭时资源不足会继续加载，
       可能触发整机换页卡顿。
     - `task_timeout_minutes`：出图任务超时兜底。任务开始后超 N 分钟未
       完成 → 强制终止 daemon 进程（卡死场景协议级取消无效，只能进程级
@@ -594,7 +615,7 @@ class GenerateConfig(BaseModel):
     idle_timeout_minutes: int = 10
     save_test_images: bool = False
     vram_policy: str = "auto"
-    ram_guard: bool = True
+    ram_guard: bool = False
     task_timeout_minutes: int = 0
 
 
@@ -616,6 +637,36 @@ class SystemConfig(BaseModel):
     update_channel: str = "stable"  # "stable" / "dev"
     show_dev_channel: bool = False  # deprecated, 仅作迁移源
     enable_automagic_v2: bool = False  # 实验性：文件级开关，UI 不暴露
+    # 「ram_guard 默认改关」一次性迁移哨兵（_migrate_legacy_schema 第 10 步）。
+    # 判据是**盘上键缺失**（只有本版之前写的旧盘没有此键）→ 丢弃盘上的
+    # generate/training ram_guard 旧值让新默认（关）生效；新代码落的盘总带
+    # 此键，显式开启的值不会被丢弃。默认 True：新装无旧值可迁，
+    # 「迁移已完成」天然成立。
+    ram_guard_default_off: bool = True
+
+
+class RuntimeConfig(BaseModel):
+    """运行模式（Colab / Local）—— 见 `infrastructure/runtime_mode.py`。
+
+    - `mode`：`""`（还没选过，前端进应用时弹选择框）/ `"local"` / `"colab"`。
+      非法值由 validator 归零成 `""`，宁可多问一次也不要静默按错模式跑。
+    - `asked`：用户是否已经过一次选择流程。`mode` 有值时它必然为 True；单独
+      留字段是为了未来"跳过一次、下次再问"的可能，现在只作只读标记。
+
+    环境变量 `ALS_RUNTIME_MODE` 覆盖本字段且不落盘（Colab notebook 注入）。
+    """
+    mode: str = ""
+    asked: bool = False
+
+    @model_validator(mode="after")
+    def _normalize_values(self) -> "RuntimeConfig":
+        text = str(self.mode or "").strip().lower()
+        # 这里刻意不 import runtime_mode：secrets 被 runtime_mode.stored() 反向
+        # import，函数内 import 能断环但模块级不行。取值集合就两个，直接内联。
+        self.mode = text if text in ("local", "colab") else ""
+        if self.mode:
+            self.asked = True
+        return self
 
 
 class ProxyConfig(BaseModel):
@@ -705,9 +756,12 @@ class Secrets(BaseModel):
     models: ModelsConfig = Field(default_factory=ModelsConfig)
     queue: QueueConfig = Field(default_factory=QueueConfig)
     generate: GenerateConfig = Field(default_factory=GenerateConfig)
+    training: TrainingSecretsConfig = Field(default_factory=TrainingSecretsConfig)
     # 本 fork：in-app updater 移除，但 SystemConfig 保留（enable_automagic_v2
     # feature flag + 旧 secrets.json 的 update_channel 字段兼容）。
     system: SystemConfig = Field(default_factory=SystemConfig)
+    # 本 fork：Colab / Local 运行模式的持久化选择（infrastructure/runtime_mode.py）。
+    runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     proxy: ProxyConfig = Field(default_factory=ProxyConfig)
     # 统一模型来源候选：domain → 用户添加的候选列表。domain 白名单校验在
     # API 层（families 注册表在 services 层）。内置 preset 不在此存储——
@@ -1036,6 +1090,20 @@ def _migrate_legacy_schema(raw: dict[str, Any]) -> dict[str, Any]:
         # 新字段已显式设过 → 不覆盖（幂等）
         if "update_channel" not in sys_raw and sys_raw.get("show_dev_channel") is True:
             sys_raw["update_channel"] = "dev"
+
+    # 10. ram_guard 默认改关（上游 v0.23.1）：save() 全量落盘使「用户显式开启」
+    #     与「旧默认 true 被动落盘」不可分辨（同第 8 步先例），故对旧盘一次性
+    #     丢弃 ram_guard 值，让所有用户回到新默认（关）。判据是哨兵**键缺失**
+    #     —— 不能看值：本版之后代码落的盘总带此键，值即真源；用「值为假」判
+    #     会把新装用户首次显式开启的值也丢掉。哨兵在下次 save() 才落盘，
+    #     落盘前重复丢弃是幂等的（丢的仍是旧盘值）。
+    sys_raw_rg = raw.setdefault("system", {})
+    if isinstance(sys_raw_rg, dict) and "ram_guard_default_off" not in sys_raw_rg:
+        for section in ("generate", "training"):
+            sec_raw = raw.get(section)
+            if isinstance(sec_raw, dict):
+                sec_raw.pop("ram_guard", None)
+        sys_raw_rg["ram_guard_default_off"] = True
 
     # 8. R-1 资源档位（0.17）：queue.allow_gpu_during_train 废弃。语义变化
     #    （老开关连 eval_samples 等底模级任务一起放行，是 OOM 隐患；新开关

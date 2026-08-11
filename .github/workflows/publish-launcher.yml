@@ -1,0 +1,76 @@
+name: publish-launcher
+
+# 构建 Windows 版 `AnimaLoraStudio.exe` 并**提交回仓库**。
+#
+# 为什么 exe 进 git（一般来说二进制不该进）：本 fork 的目标用户是「clone 完
+# 想双击就用」的本机用户。让他们先去 Releases 翻附件、或先装 PyInstaller 自己
+# 编，等于把要省的那一步又加了回来。exe 只有 7MB 且极少变（只在
+# tools/launcher.py 改动时需要重出），代价可以接受。
+#
+# 为什么必须走 CI 而不是本地编：PyInstaller 产出的是**宿主平台**的可执行文件，
+# 不能交叉编译 —— Windows 的 exe 只能在 Windows 上出。维护者用 Linux/macOS 时
+# 这个 workflow 是唯一的出路。
+#
+# 手动触发（Actions → publish-launcher → Run workflow）。刻意**不**挂到 push：
+# PyInstaller 的输出不是逐字节可复现的，每次 push 都重出会让仓库无谓地长胖，
+# 而且会和用户的 commit 抢同一分支。
+#
+# 常规的「exe 还编得出来吗」守门在 build-launcher.yml（每次改启动器源码时跑，
+# 不提交任何东西）。
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch to build from and commit the exe back to"
+        required: true
+        default: master
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+
+      - uses: actions/setup-python@v5
+        with:
+          # 用支持的最低版本构建，产物的运行时要求才落在我们声明的下限上。
+          python-version: "3.10"
+
+      - name: Install PyInstaller
+        run: python -m pip install --upgrade pip pyinstaller
+
+      - name: Build
+        run: python tools/build_launcher.py
+
+      # 冒烟：产物必须真的能跑起来并认出自己在仓库里。--check 不装任何东西。
+      # 提交一个编得出来但一运行就报缺模块的 exe，比不提交更糟 —— 用户拿到的
+      # 是「双击没反应」，而仓库看起来一切正常。
+      - name: Smoke test
+        run: |
+          Copy-Item dist\AnimaLoraStudio.exe .\AnimaLoraStudio.exe -Force
+          .\AnimaLoraStudio.exe --check
+
+      - name: Commit
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f AnimaLoraStudio.exe
+          # PyInstaller 的输出每次都有字节差异（时间戳等），所以这里不能靠
+          # 「有 diff 就提交」判断有没有意义 —— 用 --quiet 只是为了跳过
+          # 「一个文件都没变」这种（理论上不会出现的）空提交。
+          if git diff --cached --quiet; then
+            echo "nothing to commit"
+            exit 0
+          fi
+          git commit -m "chore(launcher): rebuild AnimaLoraStudio.exe
+
+          Built from tools/launcher.py by .github/workflows/publish-launcher.yml
+          on a windows runner (PyInstaller cannot cross-compile). Smoke-tested
+          with --check before committing."
+          git push origin HEAD:${{ inputs.branch }}

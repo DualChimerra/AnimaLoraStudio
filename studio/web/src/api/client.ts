@@ -537,12 +537,21 @@ export interface GenerateSecretsConfig {
    * 是否让位；save_vram=强制顺序化（峰值最低，每图多几秒搬运）；
    * performance=全部常驻显存（峰值最高、零搬运）。 */
   vram_policy: 'auto' | 'save_vram' | 'performance'
-  /** 系统内存水位保护：加载大模型前可用物理内存不足 6GB 时中止并报错
-   * （默认开）；关闭后继续加载，可能触发整机换页卡顿。 */
+  /** 内存/显存水位保护：加载大模型前按权重文件大小预算内存与空闲显存，
+   * 不足时中止并报错。**默认关**（估算偏保守，配置足够的机器误拒率高）；
+   * 关闭时资源不足会继续加载，可能触发整机换页卡顿。 */
   ram_guard: boolean
   /** 开后每次出图自动落盘到 studio_data/test/<date>/{single,xy}/image_N.png。
    * 默认关；compare 模式始终不落盘。 */
   save_test_images: boolean
+}
+
+/** 训练侧全局行为开关（Settings → 训练）。 */
+export interface TrainingSecretsConfig {
+  /** 训练 / AI 先验的内存/显存水位保护。语义同 `generate.ram_guard`，默认关。
+   * block swap 的 pinned 内存护栏**不受此开关影响**（锁定内存不可换页，
+   * 出路是调小 blocks_to_swap）。 */
+  ram_guard: boolean
 }
 
 export interface ProxyConfig {
@@ -550,6 +559,44 @@ export interface ProxyConfig {
     http_proxy: string;
     https_proxy: string;
     no_proxy: string;
+}
+
+/** 运行模式（本 fork）。`''` = 用户还没选过 → 首屏弹选择框。 */
+export type RuntimeMode = 'local' | 'colab'
+
+export interface RuntimeConfig {
+  /** `''` / `'local'` / `'colab'`。空串表示未选择。 */
+  mode: RuntimeMode | ''
+  /** 是否已走过一次选择流程（mode 非空时必为 true）。 */
+  asked: boolean
+}
+
+/** GET/PUT /api/runtime 的载荷。 */
+export interface RuntimeInfo {
+  /** 生效的用户选择（env override 优先）；`''` = 还没选过。 */
+  mode: RuntimeMode | ''
+  /** secrets 里落盘的选择（不含 env override）。 */
+  stored: RuntimeMode | ''
+  /** 后端探测结果，只用于预选，不代替用户决定。 */
+  detected: RuntimeMode
+  /** 「现在就要一个值」时的兜底：mode || detected。 */
+  effective: RuntimeMode
+  /** ALS_RUNTIME_MODE 的值（未设为 `''`）。 */
+  env_override: RuntimeMode | ''
+  /** true = 环境变量钉死了模式，UI 不弹框也不允许改。 */
+  locked: boolean
+  /** 探测判据，设置区展开可看（用户自查为什么被判成某模式）。 */
+  signals: Record<string, boolean>
+  modes: RuntimeMode[]
+  environment: {
+    platform: string
+    python: string
+    studio_data: string
+    studio_data_env: string
+    disk_total: number | null
+    disk_free: number | null
+    gpu: string
+  }
 }
 
 /** Tag 翻译词典 — meta 字段。kind=default：来自首启自动下载或用户点 "恢复默认"；
@@ -592,6 +639,9 @@ export interface Secrets {
   models: ModelsConfig
   queue: QueueConfig
   generate: GenerateSecretsConfig
+  training: TrainingSecretsConfig
+  /** 本 fork：Colab / Local 运行模式的持久化选择。 */
+  runtime: RuntimeConfig
   proxy: ProxyConfig
 }
 
@@ -1316,6 +1366,21 @@ export interface BucketDistribution {
     reso: number
     buckets: Array<{ w: number; h: number; count: number }>
   }>
+  /** NaViT 打包预估（config.navit_packing 时才有）。packs_per_epoch = 优化器
+   *  steps/epoch 的分子（后端用真 NavitPackBatchSampler 模拟，epoch-0 精确）。
+   *  sizes 仅 native 模式非空 = 原生尺寸直方图（此模式下 ARB 桶不存在）。 */
+  navit?: {
+    packs_per_epoch: number
+    samples: number
+    avg_images_per_pack: number
+    token_min: number
+    token_max: number
+    token_budget: number
+    strategy: string
+    native: boolean
+    downscaled: number
+    sizes: Array<{ w: number; h: number; count: number }>
+  } | null
 }
 
 export interface RegBuildRequest {
@@ -2056,6 +2121,16 @@ export const api = {
 
   // Secrets ------------------------------------------------------------
   getSecrets: () => req<Secrets>('/api/secrets'),
+
+  // Runtime mode (Colab / Local) ---------------------------------------
+  /** 首屏拉一次：mode 为空串 → 弹模式选择框。 */
+  getRuntime: () => req<RuntimeInfo>('/api/runtime'),
+  /** 持久化用户选择。env 钉死时后端返回 409（runtime.mode_locked）。 */
+  setRuntimeMode: (mode: RuntimeMode) =>
+    req<RuntimeInfo>('/api/runtime', {
+      method: 'PUT',
+      body: JSON.stringify({ mode }),
+    }),
 
   // Tag dictionary -----------------------------------------------------
   /** 当前词典 meta + 是否已加载。Settings UI 启动时 ping，决定显示"未初始化"还是详情。 */

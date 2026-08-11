@@ -53,10 +53,22 @@ def test_parser_has_all_subcommands() -> None:
 
 
 def test_run_args_default_host_port() -> None:
+    """`--host` 的默认值由运行模式补，parser 阶段是 None。
+
+    本 fork：local → 127.0.0.1、colab → 0.0.0.0，见 `_apply_runtime_mode_defaults`
+    （main() 在 dispatch 前调用；解析规则本身钉在 tests/test_runtime_mode.py）。
+    port 没有模式差异，仍是 parser 默认。
+    """
     p = cli.build_parser()
     args = p.parse_args(["run"])
-    assert args.host == "127.0.0.1"
+    assert args.host is None
     assert args.port == 8765
+
+    # 用 --mode 钉死模式再解析：不钉的话结果取决于跑测试这台机器的
+    # secrets.json / 环境变量，本地开着 colab 模式就会莫名其妙红。
+    resolved = p.parse_args(["run", "--mode", "local"])
+    cli._apply_runtime_mode_defaults(resolved)
+    assert resolved.host == "127.0.0.1"
 
 
 def test_run_custom_host_port() -> None:

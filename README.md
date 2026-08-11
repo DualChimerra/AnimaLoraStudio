@@ -1,6 +1,14 @@
 # AnimaLoraStudio
 
-> **Форк** оригинального [WalkingMeatAxolotl/AnimaLoraStudio](https://github.com/WalkingMeatAxolotl/AnimaLoraStudio). Тренировочное ядро, поддержка моделей (Anima + Krea 2, fp8) и бэкенд синхронизированы с апстримом v0.20.2; UI/UX, деплой под Colab и набор функций — собственные (без встроенного апдейтера и шага авто-тегирования).
+> **Форк** оригинального [WalkingMeatAxolotl/AnimaLoraStudio](https://github.com/WalkingMeatAxolotl/AnimaLoraStudio). Тренировочное ядро, поддержка моделей (Anima + Krea 2, fp8) и бэкенд синхронизированы с апстримом v0.20.2; UI/UX, режимы запуска (Colab / Local) и набор функций — собственные (без встроенного апдейтера и шага авто-тегирования).
+>
+> **Точечно перенесено из апстрима v0.21–v0.23** (полной синхронизации версии не было):
+> block swap для тренировки (Krea 2 с 16 ГБ VRAM, #463 + исправление градиентов #466),
+> переключатель защиты по памяти и её выключение по умолчанию (#480, #484),
+> оценка шагов при NaViT-паковке из реальной симуляции (#482),
+> подавление спама предупреждений LoKr/LoHa dropout (#468).
+> **Не перенесено**: block swap на стороне генерации (зависит от апстримного #455) и
+> переработка страницы оценки из v0.22.0 (#469–#471).
 
 [![中文](https://img.shields.io/badge/lang-%E4%B8%AD%E6%96%87-blue)](README.md) [![English](https://img.shields.io/badge/lang-English-lightgrey)](README.en.md) [![Version](https://img.shields.io/badge/version-0.20.2--fork-blue)](CHANGELOG.md)
 
@@ -87,17 +95,45 @@
 ### 1. 拉代码 + 启动 Studio
 
 ```bash
-git clone https://github.com/WalkingMeatAxolotl/AnimaLoraStudio
+git clone https://github.com/DualChimerra/AnimaLoraStudio
 cd AnimaLoraStudio
 
-# Windows
+# Windows：双击 AnimaLoraStudio.exe（推荐），或在终端里
 studio.bat
 
 # Linux / macOS
 ./studio.sh
 ```
 
-首次运行会自动：建 `venv/` → 按 GPU 驱动检测装对应 CUDA torch（cu118 至 cu130）→ 装 `requirements.txt` → 按 GPU 检测装 onnxruntime → 构建前端 → 起后端 → 自动开浏览器到 <http://127.0.0.1:8765/studio/>。
+**本机一键启动（推荐 Windows 用户）**：`AnimaLoraStudio.exe` **已随仓库一起提交** ——
+上面 clone 完，它就在 `AnimaLoraStudio/` 文件夹里，双击即可，不用再去 Releases 找附件。
+它干的事跟 `studio.bat` 一样（建 venv → 按显卡装 torch → 装依赖 → 起服务 → 开浏览器），
+区别只是不用先会开终端、报错时窗口会停住让你看清。
+
+- exe 本身只有几 MB —— 它是引导程序，**不含** torch / 模型权重，那些仍按你的显卡在本机装。
+- 起不来时：`AnimaLoraStudio.exe --check` 打印一份自查报告（找到的文件夹、Python、venv、显卡）。
+- 想重建环境：`AnimaLoraStudio.exe --reinstall`（`studio_data/` 里的项目和权重不动）。
+- 自己编：`python tools/build_launcher.py`（需要 `pip install pyinstaller`，只能在目标平台上编）。
+- 仓库里那份怎么更新：Actions → **publish-launcher** → Run workflow。PyInstaller 不能交叉编译，
+  Windows 的 exe 只能在 windows runner 上出，所以走 CI 构建 + 回提；提交前会先跑一次 `--check` 冒烟。
+- Linux / macOS 不需要 exe，直接 `./studio.sh`。
+
+**Всё внутри одной папки** (важно, если проект живёт на отдельном SSD): кроме `venv/`, `models/`
+и `studio_data/` сюда же уводятся и кеши сторонних библиотек — pip, HuggingFace, torch, npm,
+ModelScope, triton. По умолчанию они лежат в домашней папке на системном диске и суммарно
+занимают несколько ГБ (один только колёсный кеш CUDA torch — 2–3 ГБ), причём удаление репозитория
+их не забирает. Теперь всё это идёт в `<папка проекта>/.cache/` — папку можно удалять когда угодно,
+максимум что-то скачается заново.
+
+- Уже заданные вами переменные (`HF_HOME` и т.п.) не перезаписываются.
+- Хотите вернуть общесистемные кеши (например, чтобы pip-кеш был общим для нескольких копий):
+  `ALS_SYSTEM_CACHES=1`.
+- Проверить, что всё действительно внутри: `AnimaLoraStudio.exe --check` — строка `caches`.
+
+首次进 Web 界面时会**问一次运行模式**（本机 / Colab）—— 它决定后端绑 `127.0.0.1` 还是 `0.0.0.0`、
+要不要自动开浏览器。选过就不再问，之后可在 设置 → 运行模式 里改。
+
+首次运行会自动：建 `venv/` → 按 GPU 驱动检测装对应 CUDA torch（cu118 至 cu130）→ 装 `requirements.txt` → 按 GPU 检测装 onnxruntime → 构建前端 → 起后端 → 自动开浏览器到 <http://127.0.0.1:8765/>。
 
 > 如果驱动检测失败导致装了 CPU 版 torch，可在 Settings → 系统 → PyTorch 一键重装 CUDA 版；也可通过 `studio.bat --torch cu128`（或 `studio.sh --torch cu128`）显式指定。
 
@@ -140,7 +176,7 @@ WD14 打标模型不在这里——首次进 ③ 打标时自动从 HF 拉到 `m
 
 ### 3. 跟着 Stepper 走
 
-打开 <http://127.0.0.1:8765/studio/>：
+打开 <http://127.0.0.1:8765/>：
 
 1. 项目页「+ 新建项目」
 2. **① 下载**：Booru 抓图（先在设置填 Gelbooru / Danbooru 凭据）或本地上传 zip

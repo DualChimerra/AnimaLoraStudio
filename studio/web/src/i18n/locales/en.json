@@ -1442,7 +1442,11 @@
     "purposeTraining": "training",
     "purposeInference": "inference",
     "selectDefaultTe": "Use as default text encoder",
-    "teSelected": "Text encoder set: {{name}}"
+    "teSelected": "Text encoder set: {{name}}",
+    "trainingRuntime": "Training",
+    "trainingRamGuard": "Memory / VRAM guard",
+    "trainingRamGuardHelp": "Before loading the base model for training or AI-prior regularization, budget system RAM and free VRAM against the actual weight file sizes and abort with an actionable error if either falls short.",
+    "trainingRamGuardDefaultHelp": "Off by default: the file-size estimate is conservative and turned out to reject often on machines that were in fact large enough. Turn it on if a training run has ever paged your whole machine to a halt. Block swap's pinned-memory guard is separate and always on — locked memory cannot be paged out, and its way out is a smaller blocks_to_swap."
   },
   "monitor": {
     "taskLabel": "Task",
@@ -2427,6 +2431,14 @@
     "folderTipReso": "{{name}}: {{repeat}} repeat × {{imgs}} imgs × {{resos}} resolutions = {{total}}",
     "bucketDistTitle": "Bucket distribution (actual)",
     "bucketDistHint": "Buckets group by resolution × aspect ratio; same bucket = same batch. Under-filled buckets emit a short batch — no images are dropped.",
+    "navitPackLine": "Effective packs/epoch",
+    "navitGaLine": "÷ ga ({{ga}})",
+    "navitEstimating": "Estimating packing…",
+    "navitDistTitle": "Native size distribution (NaViT)",
+    "navitDistHint": "Native-resolution mode: each image trains at its own size (floor-aligned to 16px), no ARB bucket quantization; batching packs by token budget.",
+    "navitDistDownscaled": "{{n}} imgs exceeded the token budget and were downscaled.",
+    "navitDistMore": "… {{kinds}} more sizes, {{n}} imgs total",
+    "navitBucketHint": "NaViT packing: buckets only quantize sizes; batching packs across buckets by token budget — batch_size is not involved.",
     "maskedLossHint": "{{n}} training image(s) have masks (Inpaint · Mask) but masked_loss is off — this run will not use them. Enable masked_loss in the loss group to apply.",
     "confirmReset": "Reset config to preset {{name}}? All customizations on the current version will be lost.",
     "resetOkText": "Reset",
@@ -2967,5 +2979,40 @@
     "preset": "Preset",
     "messageSummary": "{{n}} messages · drag to reorder",
     "advanced": "Advanced parameters"
+  },
+  "runtimeMode": {
+    "title": "How do you want to run AnimaLora Studio?",
+    "subtitle": "Pick once — this sets sane defaults for where the server binds, whether a browser opens, and where your data lives. You can change it later in Settings.",
+    "recommended": "Detected",
+    "detectedAs": "Auto-detected: {{mode}}",
+    "noGpu": "No NVIDIA GPU detected",
+    "diskFree": "{{free}} free of {{total}}",
+    "changeLater": "Settings → Runtime mode",
+    "confirm": "Continue",
+    "saving": "Saving…",
+    "current": "Runtime mode",
+    "lockedBy": "Pinned by the {{env}} environment variable — change it where the server is launched.",
+    "switchTo": "Switch to {{mode}}",
+    "switched": "Runtime mode set to {{mode}}. Restart the server for the bind address to take effect.",
+    "local": {
+      "name": "Local machine",
+      "summary": "Studio runs on this computer, on your own GPU.",
+      "bullets": [
+        "Binds to 127.0.0.1 — reachable only from this machine",
+        "Opens your browser automatically on start",
+        "Data stays in studio_data/ next to the repo",
+        "Best launched via the AnimaLoraStudio launcher / studio.bat"
+      ]
+    },
+    "colab": {
+      "name": "Colab / cloud notebook",
+      "summary": "Studio runs in a hosted notebook container (Colab, Kaggle, a rented GPU).",
+      "bullets": [
+        "Binds to 0.0.0.0 so the notebook port proxy can reach it",
+        "Never tries to open a browser inside the container",
+        "Disk is ephemeral — sync studio_data to Drive before the runtime dies",
+        "Set ALS_STUDIO_DATA to a fast local disk, not the Drive mount"
+      ]
+    }
   }
 }

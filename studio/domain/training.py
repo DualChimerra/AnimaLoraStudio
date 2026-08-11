@@ -181,6 +181,21 @@ class TrainingConfig(BaseModel):
         description="VAE latent 缓存编码批次大小；0=跟随训练 batch size，显存不足时设为 1 逐张编码",
         json_schema_extra=_meta("system", show_when="cache_latents==true", advanced=True),
     )
+    # 归 system 组而非 training：它只改权重放哪、不改任何训练数值，
+    # 换出多少层对产出的 LoRA 逐位无影响（纯资源旋钮，同 vae_tiling / cache_latents）
+    blocks_to_swap: int = Field(
+        0, ge=0,
+        description="Block 交换：换出到内存的 DiT 层数（0=关闭）。被换出的层权重常驻"
+                    "内存，算到该层才搬进显存，用时间换显存，不影响训练结果。"
+                    "每层约省 0.4GB（fp8 底模）/ 0.8GB（bf16 底模）显存；"
+                    "1024 分辨率下换出全部 28 层，fp8 实测约慢 4%。"
+                    "需要等量的可用内存，且这部分内存会被锁定、其他程序无法使用",
+        json_schema_extra=_meta(
+            "system",
+            show_when=cap_gate("block_swap"),
+            advanced=True,
+        ),
+    )
 
     # --------------------------------------------------- NaViT / Patch-n-Pack
     # 块对角打包训练（Phase 2 数据层）。以下字段全部默认关闭 / 行为中立：
@@ -231,7 +246,16 @@ class TrainingConfig(BaseModel):
         False,
         description="按原生分辨率定尺寸（floor 对齐 16px、零 padding），绕过 ARB 桶对单图尺寸的量化；"
                     "超大图按 navit_native_over_budget 处理。需 navit_packing + cache_latents",
-        json_schema_extra=_meta("system", show_when="navit_packing==true", advanced=True),
+        json_schema_extra=_meta(
+            "system", show_when="navit_packing==true", advanced=True,
+            # 不声明的话：开 native 后关 navit_packing，本字段被 show_when 藏起来
+            # 但值还是 true → 保存撞手写校验「native 需要 packing」报错，用户在 UI
+            # 上无法自救。声明成 disable 规则后前端 takeover 关 gate 时自动钉回
+            # false，tolerant 读盘修复同样自愈；显式违反仍 fail-fast（拦截面不变）。
+            disable_when="navit_packing!=true",
+            disable_value=False,
+            disable_hint="原生定尺寸只在 NaViT 块对角打包路径生效，需先开 navit_packing",
+        ),
     )
     navit_native_over_budget: Literal["downscale", "fail"] = Field(
         "downscale",
@@ -352,7 +376,17 @@ class TrainingConfig(BaseModel):
     batch_size: int = Field(
         1, ge=1,
         description="批次大小",
-        json_schema_extra=_meta("training"),
+        json_schema_extra=_meta(
+            "training",
+            # navit 下 DataLoader 走 NavitPackBatchSampler（一步 = 一个 token 包），
+            # batch_size 完全不参与分批——不钉住的话用户以为在控步数/显存，实际无效
+            # （曾致「预估 2520 实际 5040」误差）。钉 1 的连带语义：vae_cache_batch_size=0
+            # 的「跟随 batch_size」变为逐张编码，需要更大缓存批次时显式设置该字段。
+            disable_when="navit_packing==true",
+            disable_value=1,
+            disable_hint="NaViT 打包按 token 预算分包（navit_token_budget），batch_size 不参与分批；"
+                         "VAE 缓存编码批次改用 vae_cache_batch_size 显式控制",
+        ),
     )
     grad_checkpoint: bool = Field(
         True,
@@ -1129,17 +1163,13 @@ class TrainingConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_navit_prerequisites(self) -> "TrainingConfig":
-        """NaViT 打包的两条非「钉值/禁值」前置校验(§6.4 保留手写)。
+        """NaViT 打包的非「钉值/禁值」前置校验(§6.4 保留手写)。
 
         互斥项(leap / infonoise / sra / tlora / cache_latents / attention_backend)
-        已由 disable_when / option_disable_when 声明经 _enforce_disable_rules 强制,
+        与 native→packing 前置(navit_native_resolution 的 disable_when)已由
+        disable_when / option_disable_when 声明经 _enforce_disable_rules 强制,
         领域理由见各字段 disable_hint 与 docs/navit-packing.md 第 3 节。
         """
-        if self.navit_native_resolution and not self.navit_packing:
-            raise ValueError(
-                "navit_native_resolution=true 需要 navit_packing=true"
-                "（原生定尺寸只在 NaViT 块对角打包路径生效）。"
-            )
         if self.navit_packing and self.navit_token_budget <= 0:
             raise ValueError(
                 "navit_packing 需要显式设置 navit_token_budget（>0，按显存定，"

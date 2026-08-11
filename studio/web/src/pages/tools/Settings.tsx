@@ -18,6 +18,7 @@ import { useDialog } from '../../components/Dialog'
 import { InfoButton } from '../../components/InfoButton'
 import PageHeader from '../../components/PageHeader'
 import { useToast } from '../../components/Toast'
+import { useRuntimeModeOptional } from '../../lib/RuntimeMode'
 import { useSettingsData } from '../../lib/SettingsData'
 import { useSettingsDrawer } from '../../lib/SettingsDrawer'
 
@@ -36,13 +37,16 @@ type Section =
   | 'models'
   | 'queue'
   | 'generate'
+  | 'training'
   | 'proxy'
 
 // Settings 现在只有「训练」一组配置（打标 / 测试 / 外观 / 系统 tab 已移除）。
 // 右侧 sticky 导航的 section index。
 const TRAINING_SECTIONS: { id: string; labelKey: string }[] = [
+  { id: 'runtime-mode', labelKey: 'runtimeMode.current' },
   { id: 'download-source', labelKey: 'settings.modelSource' },
   { id: 'queue', labelKey: 'settings.queueSchedule' },
+  { id: 'training-runtime', labelKey: 'settings.trainingRuntime' },
   { id: 'pytorch', labelKey: 'settings.torch' },
   { id: 'flash-attn', labelKey: 'settings.flashAttn' },
   { id: 'xformers', labelKey: 'settings.xformers' },
@@ -186,9 +190,11 @@ const EMPTY: Secrets = {
     idle_timeout_minutes: 10,
     task_timeout_minutes: 0,
     vram_policy: 'auto',
-    ram_guard: true,
+    ram_guard: false,
     save_test_images: false,
   },
+  training: { ram_guard: false },
+  runtime: { mode: '', asked: false },
   proxy: {
     enabled: false,
     http_proxy: '',
@@ -359,6 +365,8 @@ export default function SettingsPage() {
         </div>
       )}
 
+      <RuntimeModeSection />
+
       <SettingsSection id="download-source" title={t('settings.modelSource')}>
         <SettingsField
           label={t('settings.downloadSource')}
@@ -428,6 +436,23 @@ export default function SettingsPage() {
         </SettingsField>
       </SettingsSection>
 
+      <SettingsSection id="training-runtime" title={t('settings.trainingRuntime')}>
+        <SettingsField
+          label={t('settings.trainingRamGuard')}
+          helpTooltip={
+            <>
+              <p>{t('settings.trainingRamGuardHelp')}</p>
+              <p>{t('settings.trainingRamGuardDefaultHelp')}</p>
+            </>
+          }
+        >
+          <Bool
+            value={draft.training.ram_guard}
+            onChange={(v) => update('training', 'ram_guard', v)}
+          />
+        </SettingsField>
+      </SettingsSection>
+
       <PyTorchSection />
 
       <FlashAttentionSection />
@@ -449,6 +474,66 @@ export default function SettingsPage() {
     </div>
     </div>
     </div>
+  )
+}
+
+// ── Runtime mode (Colab / Local) ───────────────────────────────────────────
+
+/** 运行模式切换（本 fork）。首屏 `RuntimeModeGate` 问过一次后，这里是唯一的改法。
+ *
+ *  刻意**不**走 draft/save 那套：模式不是训练配置的一部分，它有自己的端点
+ *  (`PUT /api/runtime`)，而且改完要提示"重启后绑定地址才生效" —— 混进批量
+ *  Save 里这条提示就没地方挂了。 */
+function RuntimeModeSection() {
+  const { t } = useTranslation()
+  const runtime = useRuntimeModeOptional()
+  const { toast } = useToast()
+  const [busy, setBusy] = useState(false)
+
+  const info = runtime?.info
+  const mode = runtime?.mode ?? 'local'
+  if (!runtime || !info) return null
+
+  const apply = async (next: 'local' | 'colab') => {
+    if (next === mode || busy) return
+    setBusy(true)
+    try {
+      await runtime.setMode(next)
+      toast(t('runtimeMode.switched', { mode: t(`runtimeMode.${next}.name`) }), 'success')
+    } catch (e) {
+      toast(String(e), 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <SettingsSection id="runtime-mode" title={t('runtimeMode.current')}>
+      <div className="flex flex-wrap items-center gap-2">
+        {info.modes.map((m) => (
+          <button
+            key={m}
+            type="button"
+            disabled={busy || info.locked}
+            onClick={() => void apply(m)}
+            className={mode === m ? 'btn btn-primary btn-sm' : 'btn btn-secondary btn-sm'}
+          >
+            {t(`runtimeMode.${m}.name`)}
+          </button>
+        ))}
+      </div>
+      <p className="m-0 text-xs text-fg-tertiary">
+        {t(`runtimeMode.${mode}.summary`)}
+      </p>
+      {info.locked && (
+        <p className="m-0 text-xs text-warn">
+          {t('runtimeMode.lockedBy', { env: 'ALS_RUNTIME_MODE' })}
+        </p>
+      )}
+      <div className="text-xs text-fg-tertiary font-mono break-all">
+        studio_data: {info.environment.studio_data}
+      </div>
+    </SettingsSection>
   )
 }
 

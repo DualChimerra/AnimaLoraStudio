@@ -10,3 +10,10 @@
 
 # PowerShell tolerates LF on modern Windows; keep normalization.
 *.ps1 text eol=crlf
+
+# The committed launcher (AnimaLoraStudio.exe, built by
+# .github/workflows/publish-launcher.yml). Mark it binary explicitly so no
+# future core.autocrlf / text-detection setting can ever rewrite bytes inside
+# it -- a single mangled byte turns the exe into "this app can't run on your PC"
+# with nothing to indicate why.
+*.exe binary

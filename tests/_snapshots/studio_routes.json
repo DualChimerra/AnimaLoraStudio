@@ -1,7 +1,7 @@
 {
   "version": 1,
   "generated_from": "studio.server.app",
-  "count": 194,
+  "count": 196,
   "routes": [
     {
       "path": "/",
@@ -1319,6 +1319,22 @@
         "POST"
       ],
       "name": "start_scheduled_now",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/runtime",
+      "methods": [
+        "GET"
+      ],
+      "name": "get_runtime",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/runtime",
+      "methods": [
+        "PUT"
+      ],
+      "name": "put_runtime",
       "type": "APIRoute"
     },
     {
