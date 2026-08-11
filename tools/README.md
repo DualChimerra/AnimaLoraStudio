@@ -25,6 +25,30 @@ python tools/select_torch_index.py     # 检测到 → 输出 URL；否则静默
 
 驱动 → cu wheel 映射跟 `studio/services/torch_setup.py:_DRIVER_TO_BEST_CU` 双向同步。
 
+### `launcher.py`（本 fork 新增）
+本机一键启动器的源码 —— 编成 `AnimaLoraStudio.exe` 后双击即用。做的事跟 `studio.bat` 一样
+（找仓库 → 建/复用 venv → 按 GPU 装 torch → 装 requirements → 起 `python -m studio run`），
+区别是不需要用户先会开终端，且错误路径一律停住窗口让人读完。**只用标准库**：它要在 venv
+还不存在的时候跑。
+
+```
+python tools/launcher.py                 # 等同双击 exe
+python tools/launcher.py --check         # 自查报告（文件夹 / Python / venv / 显卡），不装任何东西
+python tools/launcher.py --reinstall     # 删 venv 重建（studio_data/ 不动）
+python tools/launcher.py --port 8800     # 未识别参数原样透传给 `python -m studio run`
+```
+
+### `build_launcher.py`（本 fork 新增）
+用 PyInstaller 把上面那个编成单文件可执行程序（~7 MB，不含 torch / 前端）。
+
+```
+pip install pyinstaller
+python tools/build_launcher.py           # → dist/AnimaLoraStudio(.exe)
+```
+
+PyInstaller 不能交叉编译，Windows 的 exe 只能在 Windows 上出 ——
+CI 走 `.github/workflows/build-launcher.yml`（两平台构建 + `--check` 冒烟 + 打 tag 时传 release）。
+
 ---
 
 ## 模型 / 环境 setup

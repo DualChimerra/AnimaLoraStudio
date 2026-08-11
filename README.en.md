@@ -92,17 +92,37 @@ These are **not** installed by Studio and must be ready beforehand:
 ### 1. Clone and start Studio
 
 ```bash
-git clone https://github.com/WalkingMeatAxolotl/AnimaLoraStudio
+git clone https://github.com/DualChimerra/AnimaLoraStudio
 cd AnimaLoraStudio
 
-# Windows
+# Windows: double-click AnimaLoraStudio.exe (recommended), or from a terminal
 studio.bat
 
 # Linux / macOS
 ./studio.sh
 ```
 
-On first run, the launcher automatically: creates `venv/` → installs the matching CUDA torch (cu118 through cu130) based on detected GPU driver → installs `requirements.txt` → installs onnxruntime based on GPU detection → builds the frontend → starts the backend → opens the browser to <http://127.0.0.1:8765/studio/>.
+**One-click local start (recommended on Windows)**: grab `AnimaLoraStudio.exe` from
+[Releases](https://github.com/DualChimerra/AnimaLoraStudio/releases), drop it into the folder you
+just cloned (next to `requirements.txt`) and double-click. It does exactly what `studio.bat` does —
+create the venv, install the torch build matching your GPU, install dependencies, start the server,
+open the browser — you just don't need to know your way around a terminal first, and the window
+stays open long enough to read an error.
+
+- The exe is only a few MB: it is a bootstrapper and does **not** bundle torch or model weights,
+  which are still installed on your machine according to your GPU.
+- If it won't start: `AnimaLoraStudio.exe --check` prints a diagnostic report (folder it found,
+  Python, venv, GPU).
+- To rebuild the environment: `AnimaLoraStudio.exe --reinstall` (your projects and weights in
+  `studio_data/` are left alone).
+- To build it yourself: `python tools/build_launcher.py` (needs `pip install pyinstaller`; it can
+  only build for the platform you run it on).
+
+The first time you open the web UI it **asks once which mode to run in** (Local or Colab) — that
+decides whether the backend binds `127.0.0.1` or `0.0.0.0` and whether a browser is opened. It
+won't ask again; change it later under Settings → Runtime mode.
+
+On first run, the launcher automatically: creates `venv/` → installs the matching CUDA torch (cu118 through cu130) based on detected GPU driver → installs `requirements.txt` → installs onnxruntime based on GPU detection → builds the frontend → starts the backend → opens the browser to <http://127.0.0.1:8765/>.
 
 > If GPU detection falls back to CPU torch, you can reinstall the CUDA build from Settings → System → PyTorch with one click, or specify it explicitly via `studio.bat --torch cu128` (or `studio.sh --torch cu128`).
 
@@ -145,7 +165,7 @@ WD14 tagger models are not in this list — they are auto-downloaded from HF to 
 
 ### 3. Follow the stepper
 
-Open <http://127.0.0.1:8765/studio/>:
+Open <http://127.0.0.1:8765/>:
 
 1. Click "+ New project" on the projects page
 2. **① Download**: Booru scraping (fill in Gelbooru / Danbooru credentials in Settings first) or local zip upload

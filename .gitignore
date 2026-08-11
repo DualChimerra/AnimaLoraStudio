@@ -90,3 +90,8 @@ docs/_local/
 
 # Local UI snapshots before redesign (not for commit)
 _ui_backup/
+
+# 一键启动器的产物（tools/build_launcher.py 编出来的 exe 放仓库根用）。
+# 源码是 tools/launcher.py；二进制走 release 附件，不进 git。
+/AnimaLoraStudio
+/AnimaLoraStudio.exe
