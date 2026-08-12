@@ -129,6 +129,20 @@ stays open long enough to read an error.
   the workflow smoke-runs `--check` before committing.
 - Linux / macOS don't need the exe — just run `./studio.sh`.
 
+**Python on the same SSD** (it has its own installer and defaults to C:):
+
+1. python.org installer → **Customize installation** → Next → change **Customize install location**
+   to `D:\Python313` (or anywhere on your drive).
+2. Leave **Add python.exe to PATH** ticked on the first screen — then everything finds it by itself.
+3. If you would rather not touch PATH, point at it explicitly:
+   `AnimaLoraStudio.exe --python D:\Python313\python.exe` (or the `ALS_PYTHON` variable).
+4. Fully portable: drop a Python into a `python\` folder inside the project — the launcher picks it
+   up on its own, and the project plus its interpreter become one directory you can copy or delete
+   as a unit. The official *embeddable* zip will **not** work: it ships without `venv` and `pip`.
+
+All that is left on C: is the py launcher itself (`C:\Windows\py.exe`, a couple hundred KB) and
+some registry entries.
+
 **Everything stays in one folder** (which matters if the project lives on a separate SSD): besides
 `venv/`, `models/` and `studio_data/`, third-party library caches — pip, HuggingFace, torch, npm,
 ModelScope, triton — are redirected here too. By default they land in your home directory on the

@@ -60,6 +60,25 @@ _CACHE_ENV_DIRS: dict[str, str] = {
     "XDG_CACHE_HOME": "xdg",
 }
 
+#: 临时目录变量。**与上表规则相反：即使已有值也覆盖。**
+#:
+#: 为什么单独一档：Windows 上 `TEMP`/`TMP` 永远由系统预置，Linux 上 `TMPDIR`
+#: 常由 shell 预置。套用上表「已有值 = 用户的显式选择，不动」的规则，它们就
+#: 永远轮不到 —— 而「已经有值」在这里恰恰不代表任何用户意图，只代表操作系统
+#: 填了个默认。
+#:
+#: 为什么值得管：pip 把轮子**解压**到临时目录再安装。CUDA torch 是 2-3GB 的
+#: 包，安装那一刻系统盘上就会多出同等体积的临时文件。只重定向 PIP_CACHE_DIR
+#: 挡不住这一份，而对「专用盘装机、系统盘一点别占」的用法来说，它正是最扎眼
+#: 的那几个 GB。
+#:
+#: 三个名字都设：POSIX 读 TMPDIR，Windows 读 TEMP/TMP，Python 的 tempfile
+#: 三个都认。真要保留系统临时目录的用户走 `ALS_SYSTEM_CACHES=1`。
+_TEMP_ENV_VARS: tuple[str, ...] = ("TMPDIR", "TEMP", "TMP")
+
+#: 临时目录在 cache 根下的子目录名。
+_TEMP_SUBDIR = "tmp"
+
 
 def opted_out() -> bool:
     return str(os.environ.get(OPT_OUT_ENV, "")).strip().lower() in {
@@ -104,17 +123,32 @@ def apply(repo_root: Path, *, env: dict[str, str] | None = None) -> dict[str, st
         target[var] = value
         applied[var] = value
 
-    # pip 是唯一需要预建的：部分版本在缓存目录不存在时直接放弃缓存而不报错，
-    # 于是「重装一次 venv 就重下 2.5GB torch」这件事会静默发生。
+    # pip 需要预建：部分版本在缓存目录不存在时直接放弃缓存而不报错，于是
+    # 「重装一次 venv 就重下 2.5GB torch」这件事会静默发生。
     if "PIP_CACHE_DIR" in applied:
-        try:
-            os.makedirs(applied["PIP_CACHE_DIR"], exist_ok=True)
-        except OSError:
+        if not _ensure_dir(applied["PIP_CACHE_DIR"]):
             # 只读挂载 / 权限不足：让 pip 走它自己的默认位置，不阻断启动。
             del target["PIP_CACHE_DIR"]
             del applied["PIP_CACHE_DIR"]
 
+    # 临时目录：无条件覆盖（见 _TEMP_ENV_VARS 的说明），且**必须**先建好 ——
+    # tempfile 指向不存在的目录时是直接抛错，不是回退到系统默认。建不出来就
+    # 整档放弃，保持系统临时目录不变。
+    temp_dir = os.path.join(root, _TEMP_SUBDIR)
+    if _ensure_dir(temp_dir):
+        for var in _TEMP_ENV_VARS:
+            target[var] = temp_dir
+            applied[var] = temp_dir
+
     return applied
+
+
+def _ensure_dir(path: str) -> bool:
+    try:
+        os.makedirs(path, exist_ok=True)
+        return True
+    except OSError:
+        return False
 
 
 def describe(repo_root: Path) -> dict[str, str]:
@@ -123,4 +157,5 @@ def describe(repo_root: Path) -> dict[str, str]:
     值取 `os.environ` 的实际值 —— 用户自己设过的、本模块设的、以及关掉之后
     库的默认位置（显示为空串），一眼能分清。
     """
-    return {var: str(os.environ.get(var, "")) for var in _CACHE_ENV_DIRS}
+    names = (*_CACHE_ENV_DIRS, *_TEMP_ENV_VARS)
+    return {var: str(os.environ.get(var, "")) for var in names}

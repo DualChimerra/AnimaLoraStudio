@@ -223,16 +223,68 @@ def find_existing_venv(repo: Path) -> Optional[Path]:
     return None
 
 
-def bootstrap_python() -> list[str]:
+#: 项目文件夹内自带解释器的位置。把整套东西放在一块专用盘上的用户可以直接
+#: 把一份 Python 解压/安装到这里，什么都不用配、也不用碰 PATH。
+BUNDLED_PYTHON_DIRNAME = "python"
+
+#: 显式指定解释器的环境变量（等价于 `--python`）。
+PYTHON_ENV = "ALS_PYTHON"
+
+
+def bundled_python(repo: Path) -> Optional[Path]:
+    """`<仓库>/python/` 里自带的解释器（没有则 None）。
+
+    这是「Python 也别装到系统盘」那类需求最省事的答案：往项目文件夹里放一份，
+    整个项目连解释器在内都是一个可以整体拷走/删掉的目录。
+
+    刻意**不**接受 Windows 官方的 *embeddable* zip：那份阉割掉了 venv 和 pip，
+    而本启动器的第一步就是建 venv，用它只会在更靠后的地方以更难懂的方式失败。
+    """
+    candidates = (
+        repo / BUNDLED_PYTHON_DIRNAME / "python.exe",   # Windows
+        repo / BUNDLED_PYTHON_DIRNAME / "bin" / "python3",  # POSIX 布局
+        repo / BUNDLED_PYTHON_DIRNAME / "bin" / "python",
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def bootstrap_python(repo: Optional[Path] = None,
+                     explicit: Optional[str] = None) -> list[str]:
     """挑一个用来**创建** venv 的解释器。
 
     frozen 的 exe 里 `sys.executable` 是 exe 自己 —— 它没有 venv 模块也没法
-    `-m venv`，所以必须去系统上找真 Python。Windows 上优先 `py -3`：很多机器
-    为了兼容老项目在 PATH 上留着一个旧 `python`，而 py launcher 会挑最新的
-    3.x。非 frozen 运行时直接用当前解释器。
+    `-m venv`，所以必须去别处找真 Python。非 frozen 运行时直接用当前解释器。
+
+    查找顺序（先显式、后自带、最后系统）：
+
+    1. `--python` / `ALS_PYTHON` —— 装在非默认位置又没加 PATH 时的出路。
+       这条**很常见**：为了不占系统盘，用户把 Python 装到 D:\\ 并跳过
+       「Add python.exe to PATH」，于是下面几条全都找不到它。
+    2. `<仓库>/python/` —— 项目自带的一份（见 bundled_python）。
+    3. Windows 的 `py -3` —— 很多机器为了兼容老项目在 PATH 上留着一个旧
+       `python`，而 py launcher 会挑装好的最高 3.x。
+    4. PATH 上的 `python3` / `python`。
     """
     if not getattr(sys, "frozen", False):
         return [sys.executable]
+
+    chosen = explicit or os.environ.get(PYTHON_ENV, "").strip()
+    if chosen:
+        path = Path(chosen).expanduser()
+        if not path.is_file():
+            die(
+                f"{path} is not a Python executable",
+                f"pass the full path to python.exe, e.g. --python D:\\Python313\\python.exe",
+            )
+        return [str(path)]
+
+    if repo is not None:
+        bundled = bundled_python(repo)
+        if bundled is not None:
+            return [str(bundled)]
 
     if os.name == "nt" and shutil.which("py"):
         return ["py", "-3"]
@@ -241,9 +293,12 @@ def bootstrap_python() -> list[str]:
         if found:
             return [found]
     die(
-        "Python 3.10+ is not installed (or not on PATH)",
+        "Python 3.10+ was not found",
         "install it from https://www.python.org/downloads/",
-        'tick "Add python.exe to PATH" in the installer',
+        'the simplest fix: tick "Add python.exe to PATH" in the installer',
+        "already installed somewhere else? point at it directly:",
+        "    AnimaLoraStudio.exe --python D:\\Python313\\python.exe",
+        f"or put a Python into the {BUNDLED_PYTHON_DIRNAME}\\ folder next to this launcher",
     )
 
 
@@ -260,12 +315,13 @@ def check_version(python_argv: Sequence[str], *, label: str) -> None:
         warn(f"{label} is older than Python {want}; some dependencies may fail to install")
 
 
-def create_venv(repo: Path) -> Path:
-    """建 venv。frozen 时用系统 Python 起子进程，否则用内置 venv 模块。"""
+def create_venv(repo: Path, python: Optional[str] = None) -> Path:
+    """建 venv。frozen 时用外部 Python 起子进程，否则用内置 venv 模块。"""
     venv_dir = repo / "venv"
     say(f"no virtual environment found; creating {venv_dir} (first run takes a few minutes)")
     if getattr(sys, "frozen", False):
-        argv = bootstrap_python()
+        argv = bootstrap_python(repo, python)
+        say(f"using {' '.join(argv)}")
         check_version(argv, label="python")
         rc = subprocess.call([*argv, "-m", "venv", str(venv_dir)])
         if rc != 0:
@@ -464,10 +520,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="force a PyTorch CUDA build (cu128/cu126/cu124/cu118/cpu)")
     p.add_argument("--check", action="store_true",
                    help="report what the launcher found (folder, Python, venv, GPU) and exit")
+    p.add_argument("--python", metavar="PATH", dest="python",
+                   help="Python to build the venv with, e.g. D:\\Python313\\python.exe "
+                        "(use when Python is installed off the system drive and not on PATH)")
     return p
 
 
-def run_check(repo: Path) -> int:
+def run_check(repo: Path, python: Optional[str] = None) -> int:
     """「为什么起不来」的自查报告。
 
     远程帮人排查时，"把 exe 拖进终端加 --check 再把输出发我"比来回问十句有效
@@ -489,7 +548,7 @@ def run_check(repo: Path) -> int:
         say(f"dependencies: {state}")
     else:
         say("venv        : not created yet (first run will build it)")
-        argv = bootstrap_python()
+        argv = bootstrap_python(repo, python)
         try:
             out = subprocess.run([*argv, "-V"], capture_output=True, text=True, timeout=30)
             say(f"system python: {' '.join(argv)} ({out.stdout.strip() or out.stderr.strip()})")
@@ -540,7 +599,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         say(f"caches -> {repo / '.cache'} (set ALS_SYSTEM_CACHES=1 to use system locations)")
 
     if args.check:
-        return run_check(repo)
+        return run_check(repo, args.python)
 
     if args.reinstall:
         reinstall_venv(repo)
@@ -548,7 +607,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     venv_dir = find_existing_venv(repo)
     fresh = venv_dir is None
     if venv_dir is None:
-        venv_dir = create_venv(repo)
+        venv_dir = create_venv(repo, args.python)
     py = venv_python(venv_dir)
     if not py.exists():
         die(f"the virtual environment at {venv_dir} looks broken (no {py.name})",

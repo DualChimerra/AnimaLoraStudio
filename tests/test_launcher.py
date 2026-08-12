@@ -213,3 +213,82 @@ def test_check_reports_missing_venv(tmp_path: Path, capsys: pytest.CaptureFixtur
     assert str(repo) in out
     assert "not created yet" in out
     assert "gpu" in out
+
+
+# ---------------------------------------------------------------------------
+# 找解释器（--python / 项目自带 / PATH）
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def frozen(monkeypatch: pytest.MonkeyPatch) -> None:
+    """装成 frozen exe —— 非 frozen 时 bootstrap_python 直接返回当前解释器，
+    下面这些查找分支根本走不到。"""
+    monkeypatch.setattr(launcher.sys, "frozen", True, raising=False)
+    monkeypatch.delenv(launcher.PYTHON_ENV, raising=False)
+
+
+def test_explicit_python_wins(tmp_path: Path, frozen: None) -> None:  # noqa: ARG001
+    """`--python` 是「装在别处又没加 PATH」的出路，必须压过一切自动查找。
+
+    这条路径很常见：为了不占系统盘把 Python 装到 D:\\ 并跳过安装器的
+    「Add python.exe to PATH」，于是 py / python3 / python 一个都找不到。
+    """
+    exe = tmp_path / "python.exe"
+    exe.write_text("", encoding="utf-8")
+    assert launcher.bootstrap_python(tmp_path, str(exe)) == [str(exe)]
+
+
+def test_explicit_python_env_var(
+    tmp_path: Path, frozen: None, monkeypatch: pytest.MonkeyPatch  # noqa: ARG001
+) -> None:
+    exe = tmp_path / "python.exe"
+    exe.write_text("", encoding="utf-8")
+    monkeypatch.setenv(launcher.PYTHON_ENV, str(exe))
+    assert launcher.bootstrap_python(tmp_path) == [str(exe)]
+
+
+def test_explicit_python_that_does_not_exist_is_reported(
+    tmp_path: Path, frozen: None, capsys: pytest.CaptureFixture[str]  # noqa: ARG001
+) -> None:
+    """指错路径要当场说清楚，而不是继续往下找然后用了别的解释器 —— 后者会让
+    用户以为自己的选择生效了。"""
+    with pytest.raises(SystemExit):
+        launcher.bootstrap_python(tmp_path, str(tmp_path / "nope.exe"))
+    assert "is not a Python executable" in capsys.readouterr().err
+
+
+def test_bundled_python_is_found(tmp_path: Path, frozen: None) -> None:  # noqa: ARG001
+    """`<仓库>/python/` 里放一份就能用 —— 「连解释器也别装到系统盘」最省事的
+    答案，整个项目连 Python 在内是一个可整体拷走的目录。"""
+    exe = tmp_path / launcher.BUNDLED_PYTHON_DIRNAME / "python.exe"
+    exe.parent.mkdir(parents=True)
+    exe.write_text("", encoding="utf-8")
+    assert launcher.bundled_python(tmp_path) == exe
+    assert launcher.bootstrap_python(tmp_path) == [str(exe)]
+
+
+def test_bundled_python_posix_layout(tmp_path: Path, frozen: None) -> None:  # noqa: ARG001
+    exe = tmp_path / launcher.BUNDLED_PYTHON_DIRNAME / "bin" / "python3"
+    exe.parent.mkdir(parents=True)
+    exe.write_text("", encoding="utf-8")
+    assert launcher.bundled_python(tmp_path) == exe
+
+
+def test_no_bundled_python(tmp_path: Path) -> None:
+    assert launcher.bundled_python(tmp_path) is None
+
+
+def test_missing_python_error_lists_every_way_out(
+    tmp_path: Path, frozen: None, monkeypatch: pytest.MonkeyPatch,  # noqa: ARG001
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """找不到解释器时报错要给全部出路 —— 这是双击 exe 最常见的失败，报错文本
+    就是用户能看到的全部 UI。"""
+    monkeypatch.setattr(launcher.shutil, "which", lambda _name: None)
+    with pytest.raises(SystemExit):
+        launcher.bootstrap_python(tmp_path)
+    err = capsys.readouterr().err
+    assert "python.org" in err
+    assert "--python" in err
+    assert launcher.BUNDLED_PYTHON_DIRNAME in err

@@ -25,7 +25,7 @@ def clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     monkeypatch.setattr(os, "environ", dict(os.environ))
     os.environ.pop(local_cache.OPT_OUT_ENV, None)
-    for var in local_cache._CACHE_ENV_DIRS:
+    for var in (*local_cache._CACHE_ENV_DIRS, *local_cache._TEMP_ENV_VARS):
         os.environ.pop(var, None)
 
 
@@ -33,7 +33,7 @@ def test_apply_points_every_cache_into_the_repo(
     tmp_path: Path, clean_env: None  # noqa: ARG001
 ) -> None:
     applied = local_cache.apply(tmp_path)
-    assert set(applied) == set(local_cache._CACHE_ENV_DIRS)
+    assert set(applied) == {*local_cache._CACHE_ENV_DIRS, *local_cache._TEMP_ENV_VARS}
     for var, value in applied.items():
         assert os.environ[var] == value
         assert Path(value).is_relative_to(tmp_path / local_cache.CACHE_DIR_NAME)
@@ -81,11 +81,21 @@ def test_opt_out_accepted_spellings(
 
 
 def test_apply_is_idempotent(tmp_path: Path, clean_env: None) -> None:  # noqa: ARG001
-    """第二次调用什么也不写 —— 入口不止一个（cli.py import 期、api/main.py、
-    launcher），重复调用必须无害。"""
+    """重复调用不改变任何值 —— 入口不止一个（cli.main / api.main / launcher），
+    谁先谁后都必须得到同一个结果。
+
+    注意「第二次返回什么」两档不同：缓存类变量第二次已有值 → 跳过，不在返回里；
+    临时目录是无条件覆盖档 → 第二次仍会返回，但写的是**同一个值**。所以这里比
+    的是最终环境，不是返回集合。"""
     first = local_cache.apply(tmp_path)
     assert first
-    assert local_cache.apply(tmp_path) == {}
+    snapshot = dict(os.environ)
+    second = local_cache.apply(tmp_path)
+    assert dict(os.environ) == snapshot
+    # 第二次只可能重写临时目录，且值不变
+    assert set(second) <= set(local_cache._TEMP_ENV_VARS)
+    for var, value in second.items():
+        assert first[var] == value
 
 
 def test_apply_can_target_a_separate_env_dict(
@@ -126,8 +136,73 @@ def test_apply_survives_a_patched_os_name(
 def test_describe_reports_current_values(
     tmp_path: Path, clean_env: None  # noqa: ARG001
 ) -> None:
-    assert set(local_cache.describe(tmp_path)) == set(local_cache._CACHE_ENV_DIRS)
+    assert set(local_cache.describe(tmp_path)) == {
+        *local_cache._CACHE_ENV_DIRS, *local_cache._TEMP_ENV_VARS,
+    }
     # 还没 apply → 全空串（= 库自己的默认位置）
     assert all(v == "" for v in local_cache.describe(tmp_path).values())
     local_cache.apply(tmp_path)
     assert all(v for v in local_cache.describe(tmp_path).values())
+
+
+# ---------------------------------------------------------------------------
+# 临时目录（与其余变量规则相反：覆盖已有值）
+# ---------------------------------------------------------------------------
+
+
+def test_temp_vars_are_overridden_even_when_already_set(
+    tmp_path: Path, clean_env: None  # noqa: ARG001
+) -> None:
+    """**回归**：Windows 上 TEMP/TMP 永远由系统预置。
+
+    若套用「已有值就不动」的通用规则，临时目录就永远轮不到重定向 —— 而
+    「已经有值」在这里不代表用户意图，只代表操作系统填了个默认。pip 解压
+    2-3GB 的 CUDA torch 轮子正是往这里写，对「系统盘一点别占」的用法来说
+    漏掉它等于白做。
+    """
+    os.environ["TEMP"] = r"C:\Users\me\AppData\Local\Temp"
+    os.environ["TMP"] = r"C:\Users\me\AppData\Local\Temp"
+    applied = local_cache.apply(tmp_path)
+    expected = str(tmp_path / local_cache.CACHE_DIR_NAME / "tmp")
+    for var in local_cache._TEMP_ENV_VARS:
+        assert applied[var] == expected
+        assert os.environ[var] == expected
+
+
+def test_temp_dir_is_created_eagerly(
+    tmp_path: Path, clean_env: None  # noqa: ARG001
+) -> None:
+    """tempfile 指向不存在的目录时直接抛错，不会回退到系统默认 —— 所以这一个
+    必须先建出来，不能像其余缓存那样等库自己建。"""
+    local_cache.apply(tmp_path)
+    assert (tmp_path / local_cache.CACHE_DIR_NAME / "tmp").is_dir()
+
+
+def test_temp_left_alone_when_it_cannot_be_created(
+    tmp_path: Path, clean_env: None, monkeypatch: pytest.MonkeyPatch  # noqa: ARG001
+) -> None:
+    """建不出来（只读挂载 / 权限不足）就整档放弃，保持系统临时目录不变 ——
+    指向一个不存在的 TEMP 会让后面每一个 tempfile 调用都炸。"""
+    os.environ["TEMP"] = "/system/temp"
+    real_makedirs = os.makedirs
+
+    def fail_on_tmp(path, *a, **kw):  # noqa: ANN001, ANN202
+        if str(path).endswith("tmp"):
+            raise OSError("read-only")
+        return real_makedirs(path, *a, **kw)
+
+    monkeypatch.setattr(os, "makedirs", fail_on_tmp)
+    applied = local_cache.apply(tmp_path)
+    assert "TEMP" not in applied
+    assert os.environ["TEMP"] == "/system/temp"
+    # 其余缓存不受牵连
+    assert "HF_HOME" in applied
+
+
+def test_opt_out_also_covers_temp(
+    tmp_path: Path, clean_env: None, monkeypatch: pytest.MonkeyPatch  # noqa: ARG001
+) -> None:
+    monkeypatch.setenv(local_cache.OPT_OUT_ENV, "1")
+    os.environ["TEMP"] = "/system/temp"
+    assert local_cache.apply(tmp_path) == {}
+    assert os.environ["TEMP"] == "/system/temp"
