@@ -25,10 +25,13 @@
 
 | 场景 | 可训练参数 | AdamW fp32 state | AdamW8bit state | 省 |
 |---|---|---|---|---|
-| Krea 2 全 264 层，rank 32 | ≈ 114M | ≈ 0.91 GB | ≈ 0.23 GB | **≈ 0.68 GB** |
+| Krea 2 LoRA rank 32（全 264 层）| 117.3M | ≈ 0.87 GB | ≈ 0.22 GB | **≈ 0.65 GB** |
+| Krea 2 LoKr factor 8 / rank 32 | 14.7M | ≈ 0.11 GB | ≈ 0.03 GB | ≈ 0.08 GB |
 | Anima，rank 32 | 视 preset 而定 | 8 字节/参数 | 2 字节/参数 | 参数量 × 6 字节 |
 
-在 12GB 卡上跑 Krea 2 这 0.7GB 是实打实的余量；在 24GB 卡上通常不必要。
+在 12GB 卡上跑 Krea 2 **LoRA** 时这 0.65GB 是实打实的余量；**LoKr 参数量本来就
+只有 LoRA 的 1/8，优化器状态不构成压力，换 adamw8bit 意义不大**。24GB 卡通常
+两种都不必要。
 
 **依赖**：`bitsandbytes` 是可选依赖，默认不装（Windows 轮子并非总能装上）。选了 adamw8bit 但没装，训练启动期直接报错并给出安装命令，不会跑到一半才炸。装：`pip install bitsandbytes`。
 
