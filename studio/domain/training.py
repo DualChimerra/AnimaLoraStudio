@@ -196,6 +196,17 @@ class TrainingConfig(BaseModel):
             advanced=True,
         ),
     )
+    block_swap_preflight: bool = Field(
+        True,
+        description="Block 交换预检：训练开始前按底模文件大小、空闲显存和可用内存算一遍，"
+                    "当前 blocks_to_swap 跑不起来就直接报错并给出建议值，"
+                    "而不是等数据集和缓存都跑完才 OOM。估算偏差导致误拒时可关掉",
+        json_schema_extra=_meta(
+            "system",
+            show_when=cap_gate("block_swap"),
+            advanced=True,
+        ),
+    )
 
     # --------------------------------------------------- NaViT / Patch-n-Pack
     # 块对角打包训练（Phase 2 数据层）。以下字段全部默认关闭 / 行为中立：
@@ -439,9 +450,9 @@ class TrainingConfig(BaseModel):
         description="cosine_with_warmup 预热步数",
         json_schema_extra=_meta("training", show_when="lr_scheduler==cosine_with_warmup", advanced=True),
     )
-    optimizer_type: Literal["adamw", "automagic", "came", "lion", "prodigy", "prodigy_plus_schedulefree", "soap", "soap_sf"] = Field(
+    optimizer_type: Literal["adamw", "adamw8bit", "automagic", "came", "lion", "prodigy", "prodigy_plus_schedulefree", "soap", "soap_sf"] = Field(
         "adamw",
-        description="优化器。adamw 标准基线；automagic 自适应每参数 lr（推荐 lr=1e-6）；came 置信度引导 + 分解二阶矩（state 显存低于 AdamW，lr 同 AdamW 量级）；lion 显存约 AdamW 一半（推荐 lr=AdamW lr / 3）；prodigy / prodigy_plus_schedulefree 自适应估 lr（lr 填 1.0）；soap Adam-in-Shampoo-eigenbasis 二阶预条件（拟合更快，lr 同 AdamW 量级）；soap_sf SOAP + Schedule-Free（lr_scheduler 固定 none）",
+        description="优化器。adamw 标准基线；adamw8bit 同 AdamW 但状态量化到 int8（state 显存约 AdamW 的 1/4，超参照搬不用换算，需装 bitsandbytes）；automagic 自适应每参数 lr（推荐 lr=1e-6）；came 置信度引导 + 分解二阶矩（state 显存低于 AdamW，lr 同 AdamW 量级）；lion 显存约 AdamW 一半（推荐 lr=AdamW lr / 3）；prodigy / prodigy_plus_schedulefree 自适应估 lr（lr 填 1.0）；soap Adam-in-Shampoo-eigenbasis 二阶预条件（拟合更快，lr 同 AdamW 量级）；soap_sf SOAP + Schedule-Free（lr_scheduler 固定 none）",
         json_schema_extra=_meta("training"),
     )
     prodigy_d_coef: float = Field(

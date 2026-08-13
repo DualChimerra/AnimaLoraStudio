@@ -128,6 +128,7 @@ export const SCHEMA_ENUM_LABEL_KEYS: Record<string, Record<string, string>> = {
   },
   optimizer_type: {
     adamw: 'schema.enums.optimizerType.adamw',
+    adamw8bit: 'schema.enums.optimizerType.adamw8bit',
     automagic: 'schema.enums.optimizerType.automagic',
     came: 'schema.enums.optimizerType.came',
     lion: 'schema.enums.optimizerType.lion',

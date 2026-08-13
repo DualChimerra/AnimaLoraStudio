@@ -147,6 +147,33 @@ x16、或走 chipset 通道而非 CPU 直连），带宽会腰斩，同样必须
 持续 DMA 占用系统内存带宽，与 dataloader / 打标进程抢。PCH 与 GPU 板边温度会
 上升，但在规格内。探针采样温度与功耗以确认无异常。
 
+### 3.2b 启动前预检（`training/block_swap_preflight.py`）
+
+①/② 那两道护栏都是**加载时**触发的：`check_load_budget` 在权重上卡那一刻预算，
+`check_pinned_budget` 在换出层要落 pinned 那一刻把关。它们能防事故，但答不了用户
+真正的问题——**这个 `blocks_to_swap` 到底该填多少**。
+
+而 `blocks_to_swap` 默认 0，Krea 2 的 DiT 就算 fp8 也有 13GB：12GB 卡上「选中模型
+直接开跑」必然 OOM，且 OOM 发生在数据集扫描、latent 缓存、文本编码全跑完之后，
+报错只有一句 `CUDA out of memory`。
+
+预检把两侧算术合并、提前到 `models.run`（bootstrap 之后的第 2 个 phase，任何权重
+加载之前），并且**给推荐值**：
+
+- 显存侧沿用 `check_load_budget` 的算术（`文件大小 × (1-换出比例) + _VRAM_BASE_BYTES`），
+  两道护栏才不会出现「预检说行、加载时拒」；
+- 内存侧沿用 `pinned_safe_limit()` —— 与 `check_pinned_budget` 共用同一函数，
+  两处各写一份迟早漂移；
+- 推荐值取**留得下训练余量**（`_RECOMMEND_HEADROOM_BYTES`，比 `_VRAM_BASE_BYTES`
+  宽，覆盖 LoRA + 优化器状态 + 激活 + fp8 dequant 临时权重）的最小换出层数。
+  没有这样的档位时退到「至少装得下权重」的最小值，并在文案里明确标注为紧
+  —— 推荐一个照做后仍会 OOM 的数字而不作说明，比不推荐更伤。
+
+防误拒是硬要求：开关 `block_swap_preflight`（UI 在 `blocks_to_swap` 旁）可关；
+族没有 `block_swap` 能力位、未实现 `swapped_param_ratio` / `swappable_blocks`、
+权重文件读不到大小、显存查询失败、预检自身抛异常 —— 一律静默放行。内存查询失败
+时只判显存侧，绝不凭空拿「锁定内存超限」拒绝。
+
 ### 3.3 与 WDDM 显存崖的关系（正收益）
 
 PR #281 记录的 190s 卡死是近满载时 WDDM 换页崖。block swap 降低常驻峰值，**天然
