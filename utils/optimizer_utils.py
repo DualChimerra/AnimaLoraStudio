@@ -250,6 +250,22 @@ def create_optimizer(
         )
 
 
+def iter_optimizer_params(params) -> Iterator[nn.Parameter]:
+    """展平「参数列表」或「param group 列表」为逐个参数。
+
+    trainer 走的是 param group 形态（`injector.get_param_groups()` 返回
+    `[{"params": [...], "weight_decay": ...}, ...]`，LoKr 还会把 w1 单独分组），
+    而裸参数列表也是合法输入。torch.optim 两种都收，所以**构造优化器时不要
+    展平**；只有统计参数量这类旁路逻辑需要展平——直接 `p.numel()` 会在 group
+    形态下撞 `'dict' object has no attribute 'numel'`。
+    """
+    for item in params:
+        if isinstance(item, dict):
+            yield from item.get("params", ())
+        else:
+            yield item
+
+
 def create_8bit_adamw(
     params: Iterator[nn.Parameter],
     lr: float,
@@ -300,8 +316,8 @@ def create_8bit_adamw(
     
     # 将参数转换为列表（bitsandbytes 需要可索引的参数）
     param_list = list(params)
-    
-    # 创建优化器
+
+    # 创建优化器（param group 形态原样传入，torch.optim 协议本来就接受）
     optimizer = bnb.optim.AdamW8bit(
         param_list,
         lr=lr,
@@ -313,7 +329,7 @@ def create_8bit_adamw(
     )
     
     # 计算内存节省
-    total_params = sum(p.numel() for p in param_list)
+    total_params = sum(p.numel() for p in iter_optimizer_params(param_list))
     # 8-bit 优化器状态：约 2 bytes per parameter (vs 8 bytes for 32-bit)
     # 节省约 75% 的优化器状态内存
     estimated_savings_gb = (total_params * 6) / (1024 ** 3)  # 节省 6 bytes per param

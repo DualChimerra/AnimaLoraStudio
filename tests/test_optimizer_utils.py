@@ -720,3 +720,70 @@ def test_automagic_v2_validate_rejects_grad_accum() -> None:
 
     args.grad_accum = 1
     automagic_builder.validate(args)  # 不应抛
+
+
+# ---------------------------------------------------------------------------
+# AdamW8bit —— trainer 传的是 param group，不是扁平参数列表
+# ---------------------------------------------------------------------------
+
+
+def _fake_bnb(captured: dict):
+    """最小 bitsandbytes 替身：记录收到的 params，返回哑优化器。"""
+    from types import SimpleNamespace
+
+    def _adamw8bit(params, **kwargs):
+        captured["params"] = params
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(param_groups=[])
+
+    return SimpleNamespace(optim=SimpleNamespace(AdamW8bit=_adamw8bit))
+
+
+def test_create_8bit_adamw_accepts_param_groups(monkeypatch) -> None:
+    """回归：trainer 走 injector.get_param_groups() → [{"params": [...]}, ...]。
+
+    统计参数量时直接 p.numel() 会撞 'dict' object has no attribute 'numel'，
+    在真机上表现为训练在 optimizer phase 崩溃（adamw8bit 接进 registry 之前
+    这条路径没人走过，所以一直没暴露）。
+    """
+    from utils import optimizer_utils as ou
+
+    captured: dict = {}
+    monkeypatch.setattr(ou, "BITSANDBYTES_AVAILABLE", True)
+    monkeypatch.setattr(ou, "bnb", _fake_bnb(captured), raising=False)
+
+    a = nn.Parameter(torch.zeros(4, 8))
+    b = nn.Parameter(torch.zeros(2, 2))
+    groups = [
+        {"params": [a], "weight_decay": 0.01},
+        {"params": [b], "weight_decay": 0.0},
+    ]
+
+    ou.create_8bit_adamw(params=groups, lr=1e-4)
+
+    # group 形态必须原样传给 bnb —— 展平会丢掉 per-group weight_decay
+    assert captured["params"] == groups
+
+
+def test_create_8bit_adamw_still_accepts_flat_params(monkeypatch) -> None:
+    from utils import optimizer_utils as ou
+
+    captured: dict = {}
+    monkeypatch.setattr(ou, "BITSANDBYTES_AVAILABLE", True)
+    monkeypatch.setattr(ou, "bnb", _fake_bnb(captured), raising=False)
+
+    params = [nn.Parameter(torch.zeros(4, 8))]
+    ou.create_8bit_adamw(params=params, lr=1e-4)
+
+    assert captured["params"] == params
+
+
+def test_iter_optimizer_params_flattens_both_shapes() -> None:
+    from utils.optimizer_utils import iter_optimizer_params
+
+    a = nn.Parameter(torch.zeros(4, 8))
+    b = nn.Parameter(torch.zeros(2, 2))
+
+    assert list(iter_optimizer_params([a, b])) == [a, b]
+    assert list(iter_optimizer_params([{"params": [a]}, {"params": [b]}])) == [a, b]
+    assert list(iter_optimizer_params([{"weight_decay": 0.0}])) == []
