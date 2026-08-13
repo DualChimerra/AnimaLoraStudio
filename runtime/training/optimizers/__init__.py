@@ -16,6 +16,7 @@ from typing import Callable, Optional
 
 from training.optimizers import (
     adamw,
+    adamw8bit,
     automagic,
     came,
     lion,
@@ -31,6 +32,7 @@ __all__ = ["BUILDERS", "VALIDATORS", "build_optimizer", "validate_optimizer",
 
 BUILDERS: dict[str, Callable] = {
     "adamw": adamw.build,
+    "adamw8bit": adamw8bit.build,
     "automagic": automagic.build,
     "came": came.build,
     "lion": lion.build,
@@ -42,6 +44,7 @@ BUILDERS: dict[str, Callable] = {
 
 # 启动期校验函数（None / 未注册 = 跳过）
 VALIDATORS: dict[str, Callable[[object], None]] = {
+    "adamw8bit": adamw8bit.validate,
     "automagic": automagic.validate,
     "prodigy_plus_schedulefree": prodigy_plus_schedulefree.validate,
     "soap_sf": soap_sf.validate,

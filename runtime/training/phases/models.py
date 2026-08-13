@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from training import block_swap_preflight
 from training.context import TrainingContext
 from training.families import resolve_family
 from training.families.anima import ANIMA_SPEC as _ANIMA_SPEC
@@ -261,6 +262,10 @@ def run(ctx: TrainingContext) -> None:
         ctx.family = resolve_family(ctx.args)
     _resolve_paths(ctx)
     _validate_fp8_base(ctx)
+    # block swap 预检：在数据集扫描 / latent 缓存 / 文本编码之前就回答
+    # 「这个 blocks_to_swap 能不能跑」，不能就带推荐值退出。models.run 是
+    # bootstrap 之后的第 2 个 phase，这里是能拿到全部路径的最早时机。
+    block_swap_preflight.run(ctx)
 
     if _defer_dit_for_text_cache(ctx):
         logger.info(

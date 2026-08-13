@@ -8,7 +8,11 @@ protobuf>=3.20.0
 accelerate>=0.24.0
 peft>=0.8.0
 wandb>=0.16.0
-# bitsandbytes>=0.41.0   # Optional: 8-bit AdamW (may not work on Windows)
+# bitsandbytes>=0.41.0   # Optional: optimizer_type=adamw8bit 时必需（state 量化到 int8，
+                        #           显存 ≈ AdamW fp32 的 1/4）。默认不装：Windows 轮子并非
+                        #           总能装上，而 adamw8bit 是可选优化器而非默认。未装时选它
+                        #           会在训练启动期报可操作错误（optimizers/adamw8bit.py
+                        #           validate），不会跑到一半才炸。装：pip install bitsandbytes
 lycoris-lora>=1.9.0
 prodigyopt>=1.0          # Prodigy 优化器（anima_train.py optimizer=prodigy 时必需）
 # ProdigyPlusScheduleFree (LoganBooker) — Flux/Qwen-Image LoRA 社区主流，解决 Prodigy 的

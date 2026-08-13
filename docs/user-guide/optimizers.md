@@ -7,6 +7,7 @@
 | 优化器 | 推荐起点 lr | weight_decay | scheduler | state 显存 vs AdamW fp32 | 适用场景 |
 |---|---|---|---|---|---|
 | **adamw** | 1e-4 | 0.01 | cosine / cosine_with_warmup | 100%（基线） | 默认基线，几乎不踩坑 |
+| **adamw8bit** | 同 adamw（1e-4）| 同 adamw（0.01）| 同 adamw | **≈ 25%**（两个动量都量化到 int8）| 显存吃紧；超参照搬 AdamW 不用换算 |
 | **lion** | ≈ AdamW lr / 3（1e-4 → 3e-5）| AdamW wd × 3-10（0.01 → 0.03-0.1）| cosine / cosine_with_warmup | **≈ 50%**（只 exp_avg）| 显存吃紧但又想固定 lr |
 | **automagic** | **1e-6**（必须；UI 切换时自动改）| 0（一般不开）| **none**（内部 per-param 自适应）| ≈ 50%（factored 2nd moment + int8 lr_mask）| 不想调 lr 又不想 Prodigy |
 | **prodigy** | 1.0（固定，UI 锁定）| 0.01 | constant 或 cosine | 比 AdamW 略大（多一个 d 状态）| 通用自适应，最稳的"不调 lr" |
@@ -14,7 +15,26 @@
 | **soap** | AdamW 量级（1e-4 ~ 3e-4）| 0.01 | cosine / cosine_with_warmup | **> AdamW**（exp_avg + exp_avg_sq + 每矩阵轴 Shampoo GG/Q）| 矩阵型 adapter（LoRA/LoKr）想更快拟合 |
 | **soap_sf** | AdamW 量级（1e-4 ~ 3e-4）| 0.01 | **none**（Schedule-Free averaging）| ≈ soap（z 替掉 exp_avg）| 要 SOAP 提速 + 不想调 LR 调度；**短训练 ≤ ~100 步改用 soap** |
 
-> 显存说明：AdamW8bit（bitsandbytes）才是真省显存基准（≈ AdamW fp32 的 25%）。Lion / Automagic 比 fp32 AdamW 省一半，但**不比 AdamW8bit 省**。
+> 显存说明：AdamW8bit（bitsandbytes）是真省显存基准（≈ AdamW fp32 的 25%）。Lion / Automagic 比 fp32 AdamW 省一半，但**不比 AdamW8bit 省**。
+
+## AdamW8bit — 唯一不用重新调参的省显存选项
+
+更新数学与 AdamW 完全一致，省的是**状态存储**：`exp_avg` / `exp_avg_sq` 分块量化到 int8（每参数 8 字节 → 2 字节）。所以 `lr` / `betas` / `weight_decay` **照搬 AdamW，不需要任何换算** —— 这是它相对 Lion（lr 要除以 3）和 Automagic（lr 必须 1e-6）的实际优势。
+
+省多少（LoRA 训练的量级）：
+
+| 场景 | 可训练参数 | AdamW fp32 state | AdamW8bit state | 省 |
+|---|---|---|---|---|
+| Krea 2 全 264 层，rank 32 | ≈ 114M | ≈ 0.91 GB | ≈ 0.23 GB | **≈ 0.68 GB** |
+| Anima，rank 32 | 视 preset 而定 | 8 字节/参数 | 2 字节/参数 | 参数量 × 6 字节 |
+
+在 12GB 卡上跑 Krea 2 这 0.7GB 是实打实的余量；在 24GB 卡上通常不必要。
+
+**依赖**：`bitsandbytes` 是可选依赖，默认不装（Windows 轮子并非总能装上）。选了 adamw8bit 但没装，训练启动期直接报错并给出安装命令，不会跑到一半才炸。装：`pip install bitsandbytes`。
+
+**小张量不量化**：`min_8bit_size=4096` 以下的张量保持 fp32（量化收益小、精度损失相对大）。LoRA 的 A/B 矩阵远超此阈值，实际全部走 8-bit。
+
+**断点续训**：状态按标准 `state_dict()` / `load_state_dict()` 存取，int8 缓冲与量化映射一起进 ckpt。**但中途换优化器不行** —— adamw8bit 存的 ckpt 不能用 adamw 恢复（反之亦然），state 结构不同。换优化器要从头训或只 `resume_lora`（不带 `resume_state`）。
 
 ## Lion — 从 AdamW 切换
 

@@ -17,6 +17,7 @@ repository.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 import torch
@@ -272,10 +273,16 @@ def _swapped_block_prefixes(config: Krea2Config, blocks_to_swap: int) -> tuple[s
     return tuple(f"blocks.{i}." for i in range(first, config.layers))
 
 
+@lru_cache(maxsize=None)
 def _swapped_param_counts(
     blocks_to_swap: int, config: Krea2Config,
 ) -> tuple[int, int]:
-    """(换出层参数量, 全模型参数量)。meta 模型数参数，不读盘、不占显存。"""
+    """(换出层参数量, 全模型参数量)。meta 模型数参数，不读盘、不占显存。
+
+    带缓存：block swap 预检要为 0..28 每个候选值各问一次比例，不缓存就会建
+    29 次 meta 模型。``Krea2Config`` 是 frozen dataclass（可哈希），返回值是
+    两个 int，缓存本身零内存风险。
+    """
     prefixes = _swapped_block_prefixes(config, blocks_to_swap)
     with torch.device("meta"):
         probe = SingleStreamDiT(config)

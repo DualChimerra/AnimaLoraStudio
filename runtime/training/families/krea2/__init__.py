@@ -151,6 +151,16 @@ class Krea2Family:
             path, device, dtype, purpose=purpose, blocks_to_swap=blocks_to_swap,
         )
 
+    def swappable_blocks(self) -> int:
+        """可换出的层数上限（= DiT 主干层数）。
+
+        block swap 预检搜索推荐值时需要这个上界。与 ``swapped_param_ratio``
+        一样是 duck-typed 可选方法：族没实现就跳过预检（退化成旧行为）。
+        """
+        from modeling.krea2 import KREA2_CONFIG
+
+        return int(KREA2_CONFIG.layers)
+
     def swapped_param_ratio(self, blocks_to_swap: int) -> float:
         """换出层占全模型参数的比例（显存预算折扣用；见 loader 同名函数）。
 

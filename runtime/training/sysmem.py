@@ -173,6 +173,25 @@ def check_load_budget(
 _PINNED_SAFE_FRACTION = 0.8
 
 
+def pinned_safe_limit(avail_bytes: int) -> int:
+    """可用内存里允许被 pin 的上限字节数。
+
+    比例 + 绝对下限取更严者。纯比例在小内存机器上会失效：可用 10GB 时 80%
+    允许 pin 8GB，只剩 2GB 给训练进程自身的非 pinned 部分（Python/torch 基底、
+    dataset、latent，``_RAM_BASE_BYTES`` 已标定 ≈4GB）→ 直接换页。而小内存
+    机器恰恰是 block swap 要服务的人群，不能在这里破功。
+
+    抽成独立函数是为了让 ``check_pinned_budget``（拒绝）与 block swap 预检
+    （推荐 blocks_to_swap）用**同一条水位线** —— 两处各写一份迟早会漂移成
+    「预检说能跑、护栏当场拒绝」。
+    """
+    avail = max(int(avail_bytes), 0)
+    return min(
+        int(avail * _PINNED_SAFE_FRACTION),
+        max(avail - _RAM_BASE_BYTES, 0),
+    )
+
+
 def check_pinned_budget(need_bytes: int, *, blocks: int) -> None:
     """block swap 的 pinned 内存预算护栏（docs/design/block-swap.md §3.2 ①）。
 
@@ -188,14 +207,7 @@ def check_pinned_budget(need_bytes: int, *, blocks: int) -> None:
     avail = available_ram_bytes()
     if avail is None:
         return
-    # 比例 + 绝对下限取更严者。纯比例在小内存机器上会失效：可用 10GB 时 80%
-    # 允许 pin 8GB，只剩 2GB 给训练进程自身的非 pinned 部分（Python/torch 基底、
-    # dataset、latent，_RAM_BASE_BYTES 已标定 ≈4GB）→ 直接换页。而小内存机器
-    # 恰恰是 block swap 要服务的人群，不能在这里破功。
-    safe = min(
-        int(avail * _PINNED_SAFE_FRACTION),
-        max(avail - _RAM_BASE_BYTES, 0),
-    )
+    safe = pinned_safe_limit(avail)
     if need_bytes > safe:
         raise RuntimeError(
             f"内存不足以换出 {blocks} 层：需锁定 {need_bytes / 1024**3:.1f}GB，"

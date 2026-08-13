@@ -44,15 +44,61 @@ def test_adapter_builders_dict_has_lokr_loha_lora() -> None:
     assert set(BUILDERS) == {"lokr", "loha", "lora", "ortho", "tlora"}
 
 
-def test_optimizer_builders_dict_has_8_variants() -> None:
+def test_optimizer_builders_dict_has_9_variants() -> None:
     from training.optimizers import BUILDERS, VALIDATORS
     assert set(BUILDERS) == {
-        "adamw", "automagic", "came", "lion", "prodigy",
+        "adamw", "adamw8bit", "automagic", "came", "lion", "prodigy",
         "prodigy_plus_schedulefree", "soap", "soap_sf",
     }
     # Automagic / PPSF / soap_sf 有专属 validator（schedule-free 要求 lr_scheduler=none）；
+    # adamw8bit 的 validator 查可选依赖 bitsandbytes；
     # adamw / came / lion / prodigy / soap 没有
-    assert set(VALIDATORS) == {"automagic", "prodigy_plus_schedulefree", "soap_sf"}
+    assert set(VALIDATORS) == {
+        "adamw8bit", "automagic", "prodigy_plus_schedulefree", "soap_sf",
+    }
+
+
+def test_adamw8bit_build_dispatches_without_rewriting_hyperparams(monkeypatch) -> None:
+    """adamw8bit 与 AdamW 超参同口径：lr / weight_decay 原样透传，不做换算。"""
+    from training.optimizers import adamw8bit
+
+    captured = {}
+
+    def fake_create_optimizer(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "utils.optimizer_utils",
+        types.SimpleNamespace(create_optimizer=fake_create_optimizer),
+    )
+
+    adamw8bit.build(argparse.Namespace(), params=[], lr=1e-4, weight_decay=0.01)
+
+    assert captured["optimizer_type"] == "adamw8bit"
+    assert captured["learning_rate"] == 1e-4
+    assert captured["weight_decay"] == 0.01
+
+
+def test_adamw8bit_validate_rejects_missing_bitsandbytes(monkeypatch) -> None:
+    """可选依赖缺失时启动期报可操作错误，而不是 build 时抛英文 ImportError。"""
+    from training.optimizers import adamw8bit
+
+    monkeypatch.setitem(
+        sys.modules,
+        "utils.optimizer_utils",
+        types.SimpleNamespace(BITSANDBYTES_AVAILABLE=False),
+    )
+    with pytest.raises(SystemExit, match="bitsandbytes"):
+        adamw8bit.validate(argparse.Namespace())
+
+    monkeypatch.setitem(
+        sys.modules,
+        "utils.optimizer_utils",
+        types.SimpleNamespace(BITSANDBYTES_AVAILABLE=True),
+    )
+    adamw8bit.validate(argparse.Namespace())  # 装了就静默放行
 
 
 def test_scheduler_builders_dict_excludes_none() -> None:

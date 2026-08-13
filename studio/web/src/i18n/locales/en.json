@@ -310,6 +310,7 @@
       },
       "optimizerType": {
         "adamw": "AdamW",
+        "adamw8bit": "AdamW 8-bit",
         "automagic": "Automagic",
         "came": "CAME",
         "lion": "Lion",
