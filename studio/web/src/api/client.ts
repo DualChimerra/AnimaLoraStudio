@@ -498,9 +498,13 @@ export interface ModelsConfig {
   selected_anima: string
   /** 按模型族保存的默认主模型：variant key 或已注册的本地路径。 */
   selected: Record<string, string>
-  /** 按模型族选中的文本编码器 variant（krea2："bf16"|"fp8"，缺失=bf16）。
-   * 决定训练新建 version 的 text_encoder_path 默认 + 测试出图 TE 默认。 */
+  /** 按模型族选中的文本编码器：官方 variant（krea2："bf16"|"fp8"，缺失=bf16）
+   * 或用户注册的本地编码器目录绝对路径。决定训练新建 version 的
+   * text_encoder_path 默认 + 测试出图 TE 默认。 */
   selected_te?: Record<string, string>
+  /** 选中的 VAE：空串 = 官方 qwen_image_vae 落点，否则本地 .safetensors
+   * 绝对路径（VAE 族无关，两族共用一个选择）。 */
+  selected_vae?: string
   /** 用户注册的本地 custom 主模型（.safetensors 绝对路径）。微调训练 /
    * 在微调权重上测试出图用；仅登记路径，不下载不复制。 */
   custom_anima_paths: string[]
@@ -712,7 +716,7 @@ export interface ModelDirCatalog {
   description: string
   repo: string
   target_dir: string
-  /** krea2_text_encoder 专属：选中的 TE variant（'bf16' | 'fp8'）。 */
+  /** krea2_text_encoder 专属：选中的 TE（'bf16' | 'fp8' | 本地目录绝对路径）。 */
   selected?: string
   files: Array<{ name: string; exists: boolean; size: number; mtime: number }>
 }

@@ -1447,7 +1447,23 @@
     "trainingRuntime": "训练",
     "trainingRamGuard": "内存 / 显存水位保护",
     "trainingRamGuardHelp": "训练与 AI 先验（正则生成）加载底模前，按权重文件实际大小预算系统内存与 GPU 空闲显存，任一不足则中止并报可操作错误。",
-    "trainingRamGuardDefaultHelp": "默认关：按文件大小的估算偏保守，在配置其实足够的机器上误拒率高。如果曾经因为训练把整机拖到换页卡死，可以打开。block swap 的 pinned 内存护栏是独立的、始终生效 —— 锁定内存不可换页，出路是调小 blocks_to_swap。"
+    "trainingRamGuardDefaultHelp": "默认关：按文件大小的估算偏保守，在配置其实足够的机器上误拒率高。如果曾经因为训练把整机拖到换页卡死，可以打开。block swap 的 pinned 内存护栏是独立的、始终生效 —— 锁定内存不可换页，出路是调小 blocks_to_swap。",
+    "localModelAdded": "已登记本地模型：{{path}}",
+    "localModelRemoved": "已从列表移除：{{name}}（磁盘文件不动）",
+    "localModelRemove": "注销",
+    "localModelRemoveHint": "只从列表移除，磁盘文件保留",
+    "selectLocalModel": "使用这份本地权重",
+    "localModelFamilyHint": "工作模式：这份权重按哪个模型族训练（训练配置默认值随之切换）",
+    "localModelFamilyChanged": "{{name}} 已改为 {{family}} 模式",
+    "addLocalModelFile": "+ 选择文件…",
+    "addLocalModelDir": "+ 选择目录…",
+    "localModelPathHintLocal": "浏览的是本机磁盘（Studio 跑在本地）",
+    "localModelPathHintColab": "浏览的是云端机器磁盘，不是你本机",
+    "officialWeights": "官方权重",
+    "vaeSelected": "VAE 已选：{{name}}",
+    "selectDefaultVae": "设为默认 VAE",
+    "vaeHelp": "VAE 由 Anima 与 Krea 2 共用。可用官方 qwen_image_vae，也可登记自己的 .safetensors —— 训练、采样与测试出图都跟随这一选择。",
+    "animaTeHelp": "Anima 的文本编码器（Qwen3-0.6B）。可以指向你自己的 transformers 目录，目录里需要有 config.json 和 tokenizer / 权重文件。"
   },
   "monitor": {
     "taskLabel": "任务",
@@ -1636,7 +1652,8 @@
     "allCellsLoadFailed": "所有 cell 图都加载失败（可能原图已释放）",
     "canvas2dUnavailable": "canvas 2d 不可用",
     "canvasToBlobNull": "canvas.toBlob 返回 null",
-    "modelFamily": "模型族"
+    "modelFamily": "模型族",
+    "textEncoderCustom": "自定义（设置页选定）"
   },
   "overview": {
     "pipelineProgress": "流水线进度",

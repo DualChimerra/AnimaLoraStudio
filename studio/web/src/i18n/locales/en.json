@@ -1447,7 +1447,23 @@
     "trainingRuntime": "Training",
     "trainingRamGuard": "Memory / VRAM guard",
     "trainingRamGuardHelp": "Before loading the base model for training or AI-prior regularization, budget system RAM and free VRAM against the actual weight file sizes and abort with an actionable error if either falls short.",
-    "trainingRamGuardDefaultHelp": "Off by default: the file-size estimate is conservative and turned out to reject often on machines that were in fact large enough. Turn it on if a training run has ever paged your whole machine to a halt. Block swap's pinned-memory guard is separate and always on — locked memory cannot be paged out, and its way out is a smaller blocks_to_swap."
+    "trainingRamGuardDefaultHelp": "Off by default: the file-size estimate is conservative and turned out to reject often on machines that were in fact large enough. Turn it on if a training run has ever paged your whole machine to a halt. Block swap's pinned-memory guard is separate and always on — locked memory cannot be paged out, and its way out is a smaller blocks_to_swap.",
+    "localModelAdded": "Local model registered: {{path}}",
+    "localModelRemoved": "Removed from the list: {{name}} (the file itself is untouched)",
+    "localModelRemove": "Unregister",
+    "localModelRemoveHint": "Removes it from this list only; the file stays on disk",
+    "selectLocalModel": "Use this local weight",
+    "localModelFamilyHint": "Working mode: which model family this checkpoint trains as (config defaults follow it)",
+    "localModelFamilyChanged": "{{name}} now works in {{family}} mode",
+    "addLocalModelFile": "+ Pick a file…",
+    "addLocalModelDir": "+ Pick a folder…",
+    "localModelPathHintLocal": "Browses this machine (Studio runs locally)",
+    "localModelPathHintColab": "Browses the cloud machine's disk, not your computer",
+    "officialWeights": "official weights",
+    "vaeSelected": "VAE set: {{name}}",
+    "selectDefaultVae": "Use as default VAE",
+    "vaeHelp": "The VAE is shared by Anima and Krea 2. Pick the official qwen_image_vae or register your own .safetensors — training, sampling and test generation all follow this choice.",
+    "animaTeHelp": "Anima's text encoder (Qwen3-0.6B). You can point it at your own transformers folder — it must contain config.json plus the tokenizer/weight files."
   },
   "monitor": {
     "taskLabel": "Task",
@@ -1636,7 +1652,8 @@
     "allCellsLoadFailed": "All cell images failed to load (the originals may have been released)",
     "canvas2dUnavailable": "canvas 2d is unavailable",
     "canvasToBlobNull": "canvas.toBlob returned null",
-    "modelFamily": "Model family"
+    "modelFamily": "Model family",
+    "textEncoderCustom": "Custom (from Settings)"
   },
   "overview": {
     "pipelineProgress": "Pipeline progress",

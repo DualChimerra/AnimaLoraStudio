@@ -16,6 +16,10 @@ import {
 } from '../../api/client'
 import { useDialog } from '../../components/Dialog'
 import { InfoButton } from '../../components/InfoButton'
+import {
+  AddLocalModelButton,
+  LocalModelRows,
+} from '../../components/LocalModelSources'
 import PageHeader from '../../components/PageHeader'
 import { useToast } from '../../components/Toast'
 import { useRuntimeModeOptional } from '../../lib/RuntimeMode'
@@ -820,6 +824,20 @@ function buildPatch(draft: Secrets, server: Secrets): SecretsPatch {
 
 // ── Models Section ─────────────────────────────────────────────────────────
 
+// 本地主模型的「工作模式」= 它挂在哪个模型族下：族决定训练配置的默认值
+// （采样器 / timestep / caption 能力位，见 domain/common.py 的能力矩阵）与
+// 配套的 VAE / 文本编码器解析。domain 名与 catalog.model_sources 的键一致。
+const FAMILY_DOMAIN_OPTIONS = [
+  { value: 'anima', label: 'Anima' },
+  { value: 'krea2', label: 'Krea 2' },
+]
+
+/** 绝对路径 → 末段文件 / 目录名（toast 里显示"选中了哪个权重"）。 */
+function basename(p: string): string {
+  const i = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'))
+  return i >= 0 ? p.slice(i + 1) : p
+}
+
 function fmtBytes(n: number): string {
   if (n < 1024) return `${n} B`
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
@@ -842,6 +860,10 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
   const [selectedAnima, setSelectedAnima] = useState<string>('1.0')
   const [selectedKrea2, setSelectedKrea2] = useState<string>('raw')
   const [selectedKrea2Te, setSelectedKrea2Te] = useState<string>('bf16')
+  // VAE 是族无关共享资产 → 单个选中值（''=官方落点）；Anima 的文本编码器只有
+  // 一份官方目录，所以它的选中值同样是 ''（官方）或本地目录绝对路径。
+  const [selectedVae, setSelectedVae] = useState<string>('')
+  const [selectedAnimaTe, setSelectedAnimaTe] = useState<string>('')
   const [autoSyncPaths, setAutoSyncPaths] = useState<boolean>(true)
   const [savingAutoSync, setSavingAutoSync] = useState(false)
   const [secretsLoaded, setSecretsLoaded] = useState(false)
@@ -854,6 +876,8 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
       setSelectedAnima(sec.models?.selected?.anima ?? sec.models?.selected_anima ?? '1.0')
       setSelectedKrea2(sec.models?.selected?.krea2 ?? 'raw')
       setSelectedKrea2Te(sec.models?.selected_te?.krea2 ?? 'bf16')
+      setSelectedVae(sec.models?.selected_vae ?? '')
+      setSelectedAnimaTe(sec.models?.selected_te?.anima ?? '')
       setAutoSyncPaths(sec.models?.auto_sync_paths ?? true)
       setSecretsLoaded(true)
     }).catch(() => { setSecretsLoaded(true) })
@@ -903,6 +927,68 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
       toast(String(e), 'error')
       void reloadCatalog()
     }
+  }
+
+  // VAE / 文本编码器的选中写回：与 pickAnima / pickKrea2Te 同形（乐观更新 +
+  // 失败回滚 = 重新拉 catalog + secrets）。
+  const pickVae = async (value: string) => {
+    if (value === selectedVae) return
+    const prev = selectedVae
+    setSelectedVae(value)
+    try {
+      await api.updateSecrets({ models: { selected_vae: value } })
+      toast(t('settings.vaeSelected', {
+        name: value ? basename(value) : t('settings.officialWeights'),
+      }), 'success')
+      await reloadCatalog()
+    } catch (e) {
+      setSelectedVae(prev)
+      toast(String(e), 'error')
+      void reloadCatalog()
+    }
+  }
+
+  const pickAnimaTe = async (value: string) => {
+    if (value === selectedAnimaTe) return
+    const prev = selectedAnimaTe
+    setSelectedAnimaTe(value)
+    try {
+      await api.updateSecrets({ models: { selected_te: { anima: value } } })
+      toast(t('settings.teSelected', {
+        name: value ? basename(value) : t('settings.officialWeights'),
+      }), 'success')
+      await reloadCatalog()
+    } catch (e) {
+      setSelectedAnimaTe(prev)
+      toast(String(e), 'error')
+      void reloadCatalog()
+    }
+  }
+
+  // 本地候选注册 / 注销 / 改模式后：catalog 与 secrets 都可能变（服务端会把
+  // 失效的选中值回退默认），两边一起重拉才不会显示成脏状态。
+  const reloadSources = async () => {
+    await reloadCatalog()
+    try {
+      const sec = await api.getSecrets()
+      setSelectedAnima(sec.models?.selected?.anima ?? sec.models?.selected_anima ?? '1.0')
+      setSelectedKrea2(sec.models?.selected?.krea2 ?? 'raw')
+      setSelectedKrea2Te(sec.models?.selected_te?.krea2 ?? 'bf16')
+      setSelectedVae(sec.models?.selected_vae ?? '')
+      setSelectedAnimaTe(sec.models?.selected_te?.anima ?? '')
+    } catch {
+      // 读 secrets 失败不该让刚成功的注册看起来像失败：catalog 已刷新，
+      // 下次进页面会再对齐一次。
+    }
+  }
+
+  const sourceRows = (domain: string) => catalog?.model_sources?.[domain] ?? []
+
+  // 本地主模型改「工作模式」后，在新族里把它重新选中（LocalModelRows 只知道
+  // domain，写回选中值的入口按族分派）。
+  const selectMainInDomain = async (domain: string, value: string) => {
+    if (domain === 'krea2') await pickKrea2(value)
+    else await pickAnima(value)
   }
 
   const saveRoot = async () => {
@@ -1014,16 +1100,57 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
                 )
               })}
             </ul>
+            {/* 自己的权重：注册本地 .safetensors，与官方 variant 同一组单选 */}
+            <LocalModelRows
+              domain="anima"
+              rows={sourceRows('anima')}
+              radioName="anima_variant"
+              onSelect={(value) => void pickAnima(value)}
+              onChanged={reloadSources}
+              familyOptions={FAMILY_DOMAIN_OPTIONS}
+              selectInDomain={selectMainInDomain}
+            />
+            <AddLocalModelButton
+              domain="anima"
+              shape="file"
+              initialPath={catalog.models_root}
+              onChanged={reloadSources}
+            />
           </ModelGroupCard>
 
-          {/* VAE */}
-          <ModelGroupCard title={catalog.anima_vae.name}>
-            <div className="flex items-center gap-2 text-xs">
-              <span className="text-fg-tertiary">{translatedCatalogText(MODEL_DESCRIPTION_KEYS, 'anima_vae', catalog.anima_vae.description, t)} · <code>{catalog.anima_vae.repo}</code></span>
-              <span style={{ flex: 1 }} />
-              <ModelStatusBadge exists={catalog.anima_vae.exists} size={catalog.anima_vae.size} status={catalog.downloads.anima_vae?.status} />
-              <DownloadButton exists={catalog.anima_vae.exists} status={catalog.downloads.anima_vae?.status} busy={busy.has('anima_vae')} onClick={() => void start('anima_vae')} />
-            </div>
+          {/* VAE（两族共用一份，可换成自己的本地权重） */}
+          <ModelGroupCard
+            title={catalog.anima_vae.name}
+            helpTooltip={<p>{t('settings.vaeHelp')}</p>}
+          >
+            <ul className="list-none m-0 p-0 flex flex-col gap-1">
+              <li className={`flex items-center gap-2 text-xs px-1.5 py-1 rounded-sm ${
+                selectedVae === '' ? 'bg-accent-soft border border-accent' : 'bg-transparent border border-transparent'
+              }`}>
+                <input type="radio" name="vae_source" checked={selectedVae === ''}
+                  onChange={() => void pickVae('')}
+                  className="shrink-0"
+                  style={{ accentColor: 'var(--accent)' }}
+                  title={t('settings.selectDefaultVae')}
+                />
+                <span className="text-fg-tertiary flex-1">{translatedCatalogText(MODEL_DESCRIPTION_KEYS, 'anima_vae', catalog.anima_vae.description, t)} · <code>{catalog.anima_vae.repo}</code></span>
+                <ModelStatusBadge exists={catalog.anima_vae.exists} size={catalog.anima_vae.size} status={catalog.downloads.anima_vae?.status} />
+                <DownloadButton exists={catalog.anima_vae.exists} status={catalog.downloads.anima_vae?.status} busy={busy.has('anima_vae')} onClick={() => void start('anima_vae')} />
+              </li>
+            </ul>
+            <LocalModelRows
+              domain="vae"
+              rows={sourceRows('vae')}
+              radioName="vae_source"
+              onSelect={(value) => void pickVae(value)}
+              onChanged={reloadSources}
+            />
+            <AddLocalModelButton
+              domain="vae"
+              shape="file"
+              initialPath={catalog.models_root}
+              onChanged={reloadSources}
+            />
           </ModelGroupCard>
 
           {/* Krea 2 主模型（0.20 第二模型族；VAE 与 Anima 共享 qwen_image_vae） */}
@@ -1061,6 +1188,21 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
                   )
                 })}
               </ul>
+              <LocalModelRows
+                domain="krea2"
+                rows={sourceRows('krea2')}
+                radioName="krea2_variant"
+                onSelect={(value) => void pickKrea2(value)}
+                onChanged={reloadSources}
+                familyOptions={FAMILY_DOMAIN_OPTIONS}
+                selectInDomain={selectMainInDomain}
+              />
+              <AddLocalModelButton
+                domain="krea2"
+                shape="file"
+                initialPath={catalog.models_root}
+                onChanged={reloadSources}
+              />
             </ModelGroupCard>
           )}
 
@@ -1094,11 +1236,65 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
                   )
                 })}
               </ul>
+              {/* 自定义文本编码器：本地 transformers 目录（含 config.json） */}
+              <LocalModelRows
+                domain="krea2_te"
+                rows={sourceRows('krea2_te')}
+                radioName="krea2_te"
+                onSelect={(value) => void pickKrea2Te(value)}
+                onChanged={reloadSources}
+              />
+              <AddLocalModelButton
+                domain="krea2_te"
+                shape="dir"
+                initialPath={catalog.krea2_text_encoder?.target_dir ?? catalog.models_root}
+                onChanged={reloadSources}
+              />
             </ModelGroupCard>
           )}
 
-          {/* Qwen3 + T5（CLTagger 已挪到「打标」tab） */}
-          {(['qwen3', 't5_tokenizer'] as const).map((id) => {
+          {/* Anima 文本编码器：官方 Qwen3 目录 + 用户注册的本地编码器（单选） */}
+          <ModelGroupCard title={catalog.qwen3.name} helpTooltip={<p>{t('settings.animaTeHelp')}</p>}>
+            <ul className="list-none m-0 p-0 flex flex-col gap-1">
+              {(() => {
+                const m = catalog.qwen3
+                const dl = catalog.downloads.qwen3
+                const allExist = m.files.every((f) => f.exists)
+                const totalSize = m.files.reduce((sum, f) => sum + f.size, 0)
+                return (
+                  <li className={`flex items-center gap-2 text-xs px-1.5 py-1 rounded-sm ${
+                    selectedAnimaTe === '' ? 'bg-accent-soft border border-accent' : 'bg-transparent border border-transparent'
+                  }`}>
+                    <input type="radio" name="anima_te" checked={selectedAnimaTe === ''}
+                      onChange={() => void pickAnimaTe('')}
+                      className="shrink-0"
+                      style={{ accentColor: 'var(--accent)' }}
+                      title={t('settings.selectDefaultTe')}
+                    />
+                    <span className="text-fg-tertiary flex-1">{translatedCatalogText(MODEL_DESCRIPTION_KEYS, 'qwen3', m.description, t)} · <code>{m.repo}</code></span>
+                    <ModelStatusBadge exists={allExist} size={totalSize} status={dl?.status} fileCount={m.files.length} existsCount={m.files.filter((f) => f.exists).length} />
+                    <DownloadButton exists={allExist} status={dl?.status} busy={busy.has('qwen3')} onClick={() => void start('qwen3')} />
+                  </li>
+                )
+              })()}
+            </ul>
+            <LocalModelRows
+              domain="anima_te"
+              rows={sourceRows('anima_te')}
+              radioName="anima_te"
+              onSelect={(value) => void pickAnimaTe(value)}
+              onChanged={reloadSources}
+            />
+            <AddLocalModelButton
+              domain="anima_te"
+              shape="dir"
+              initialPath={catalog.qwen3.target_dir}
+              onChanged={reloadSources}
+            />
+          </ModelGroupCard>
+
+          {/* T5 tokenizer（Anima 专用，无自定义入口——只是 tokenizer 文件） */}
+          {(['t5_tokenizer'] as const).map((id) => {
             const m = catalog[id]
             const dl = catalog.downloads[id]
             const allExist = m.files.every((f) => f.exists)

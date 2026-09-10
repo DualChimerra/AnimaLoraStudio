@@ -9,7 +9,12 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .... import secrets
-from ..paths import models_root, qwen_image_vae_target
+from ..paths import (
+    custom_text_encoder_dir,
+    models_root,
+    qwen_image_vae_target,
+    resolve_vae_path,
+)
 
 ANIMA_REPO = "circlestone-labs/Anima"
 # 顺序：最新在前。`find_anima_main` 的 fallback 查找按本 dict 序遍历，
@@ -58,6 +63,16 @@ def qwen_dir(root: Path) -> Path:
 
 def t5_tokenizer_dir(root: Path) -> Path:
     return root / "t5_tokenizer"
+
+
+def selected_text_encoder_dir(root: Path) -> Path:
+    """Anima 实际使用的文本编码器目录：设置页选中的本地目录优先。
+
+    Anima 无官方 TE variant（只有 Qwen3-0.6B 一份），所以 `selected_te["anima"]`
+    要么为空 = 官方目录，要么是用户注册的本地编码器目录绝对路径。
+    """
+    custom = custom_text_encoder_dir("anima")
+    return custom if custom is not None else qwen_dir(root)
 
 
 def find_anima_main(root: Optional[Path] = None) -> Optional[Path]:
@@ -138,8 +153,10 @@ def default_paths_for_new_version(base_model: Optional[str] = None) -> dict[str,
     root = models_root()
     return {
         "transformer_path": anima_transformer_path_for(base_model),
-        "vae_path": str(qwen_image_vae_target(root)),
-        "text_encoder_path": str(qwen_dir(root)),
+        # VAE / 文本编码器同样跟随设置页的选中值（本地自定义权重优先，
+        # 失效回退官方落点）——与 transformer 同一口径。
+        "vae_path": resolve_vae_path(root),
+        "text_encoder_path": str(selected_text_encoder_dir(root)),
         "t5_tokenizer_path": str(t5_tokenizer_dir(root)),
     }
 
@@ -155,6 +172,24 @@ def _file_status(p: Path) -> dict[str, Any]:
         return {"exists": True, "size": st.st_size, "mtime": st.st_mtime}
     except OSError:
         return {"exists": False, "size": 0, "mtime": 0.0}
+
+
+def text_encoder_presets(root: Path) -> list[dict[str, Any]]:
+    """本族官方文本编码器候选（catalog `anima_te` domain 的 preset 行）。
+
+    Anima 只有 Qwen3-0.6B 一份官方编码器，所以 value 用空串表示「官方目录」
+    （`selected_te["anima"]` 为空 = 官方）；用户注册的本地目录以绝对路径入列。
+    """
+    d = qwen_dir(root)
+    return [{
+        "value": "",
+        "label": QWEN_REPO,
+        "description": str(d),
+        "download_id": "qwen3",
+        "status_key": "qwen3",
+        "path": str(d),
+        "files": [{"name": f, **_file_status(d / f)} for f in QWEN_FILES],
+    }]
 
 
 def catalog_sections(root: Path, models_cfg: Any) -> dict[str, Any]:
@@ -235,6 +270,7 @@ class _AnimaAssets:
     transformer_path_for = staticmethod(anima_transformer_path_for)
     selected_variant = staticmethod(selected_anima_variant)
     catalog_sections = staticmethod(catalog_sections)
+    text_encoder_presets = staticmethod(text_encoder_presets)
     # Anima 无蒸馏推理 variant
     is_distilled_path = staticmethod(lambda path: False)
 

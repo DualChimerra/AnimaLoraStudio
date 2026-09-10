@@ -274,6 +274,7 @@ AnimaLoraStudio/
 - [tagging-guide.md](docs/user-guide/tagging-guide.md) — Anima 标签格式与最佳实践
 - [training-tips.md](docs/user-guide/training-tips.md) — 训练参数 / 显存配置矩阵 / 常见问题
 - [regularization.md](docs/user-guide/regularization.md) — 正则集生成原理
+- [custom-models.md](docs/user-guide/custom-models.md) — 用自己的底模 / VAE / 文本编码器权重
 - [caption-format.md](docs/user-guide/caption-format.md) — JSON 标签格式 + 分类 shuffle
 
 **开发者向**

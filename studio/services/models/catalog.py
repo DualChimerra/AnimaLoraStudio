@@ -19,12 +19,14 @@ from .paths import (
     TAEFLUX_REPO,
     UPSCALER_EXTS,
     UPSCALER_VARIANTS,
+    TEXT_ENCODER_MARKER,
     WD14_FILES,
     ccip_model_dir,
     cltagger_required_files,
     cltagger_target_root,
     eval_model_target_dir,
     models_root,
+    qwen_image_vae_target,
     selected_upscaler,
     taeflux_dir,
     upscaler_dir,
@@ -499,6 +501,83 @@ def build_catalog(root: Optional[Path] = None) -> dict[str, Any]:
                     candidate=c.model_dump(),
                 ))
         model_source_rows[family_id] = fam_rows
+
+    # VAE（族无关共享资产）：官方落点 preset（value="" = 跟随官方）+ 用户
+    # 注册的本地 .safetensors。选中值 = models_cfg.selected_vae。
+    vae_selected = str(models_cfg.selected_vae or "")
+    vae_official = qwen_image_vae_target(r)
+    official_st = _file_status(vae_official)
+    vae_rows: list[dict[str, Any]] = [_source_row(
+        kind="preset", value="", label=vae_official.name,
+        download_id="anima_vae", download_variant=None,
+        status_key="anima_vae",
+        exists=official_st["exists"], size=official_st["size"],
+        # 空 = 官方；老配置里显式存着官方绝对路径的也算选中官方
+        is_current=vae_selected in ("", str(vae_official)),
+        description=str(vae_official),
+    )]
+    for c in source_cfg.get(secrets.VAE_DOMAIN, []):
+        if c.kind != "local":
+            continue
+        p_vae = Path(c.path)
+        st = _file_status(p_vae)
+        vae_rows.append(_source_row(
+            kind="local", value=c.path, label=p_vae.name, download_id=None,
+            exists=st["exists"], size=st["size"],
+            is_current=c.path == vae_selected,
+            description=c.path,
+            candidate=c.model_dump(),
+        ))
+    model_source_rows[secrets.VAE_DOMAIN] = vae_rows
+
+    # 按族文本编码器（"clip"）：族官方 variant preset + 用户注册的本地
+    # transformers 目录。选中值 = models_cfg.selected_te[family]。
+    for family_id, _assets in FAMILY_ASSETS.items():
+        te_domain = secrets.te_domain(family_id)
+        te_selected = str((models_cfg.selected_te or {}).get(family_id) or "")
+        te_rows: list[dict[str, Any]] = []
+        presets = _assets.text_encoder_presets(r)
+        preset_values = {str(preset["value"]) for preset in presets}
+        for preset in presets:
+            files = list(preset["files"])
+            te_rows.append(_source_row(
+                kind="preset", value=str(preset["value"]),
+                label=str(preset["label"]),
+                download_id=str(preset["download_id"]),
+                download_variant=None,
+                status_key=str(preset["status_key"]),
+                exists=all(f["exists"] for f in files),
+                size=sum(f["size"] for f in files),
+                files=files,
+                # 选中值不在官方 variant 里（本地目录 / 非法）→ 只有默认
+                # variant（列表首项，各族的兜底）在没选过时高亮
+                is_current=(
+                    te_selected == str(preset["value"])
+                    or (
+                        te_selected not in preset_values
+                        and not secrets.is_abs_path(te_selected)
+                        and preset is presets[0]
+                    )
+                ),
+                description=str(preset["description"]),
+            ))
+        for c in source_cfg.get(te_domain, []):
+            if c.kind != "local":
+                continue
+            p_te = Path(c.path)
+            marker = p_te / TEXT_ENCODER_MARKER
+            size = (
+                sum(f.stat().st_size for f in p_te.rglob("*") if f.is_file())
+                if p_te.is_dir() else 0
+            )
+            te_rows.append(_source_row(
+                kind="local", value=c.path, label=p_te.name, download_id=None,
+                exists=marker.is_file(), size=size,
+                is_current=c.path == te_selected,
+                description=c.path,
+                candidate=c.model_dump(),
+            ))
+        model_source_rows[te_domain] = te_rows
 
     return {
         "models_root": str(r),

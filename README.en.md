@@ -288,6 +288,7 @@ Documentation entry: [docs/README.md](docs/README.md). Three sections:
 - [tagging-guide.md](docs/user-guide/tagging-guide.md) — Anima tag format and best practices
 - [training-tips.md](docs/user-guide/training-tips.md) — Training parameters / VRAM configuration matrix / FAQs
 - [regularization.md](docs/user-guide/regularization.md) — How regularization set generation works
+- [custom-models.md](docs/user-guide/custom-models.md) — Using your own base model / VAE / text encoder weights
 - [caption-format.md](docs/user-guide/caption-format.md) — JSON tag format + category shuffle
 
 **Developer-facing**

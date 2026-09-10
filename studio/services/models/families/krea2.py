@@ -10,8 +10,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .... import secrets
-from ..paths import models_root, safe_dir_name
-from ..paths import qwen_image_vae_target
+from ..paths import custom_text_encoder_dir, models_root, safe_dir_name
+from ..paths import qwen_image_vae_target, resolve_vae_path
 
 KREA2_VARIANTS: dict[str, dict[str, Any]] = {
     "raw": {
@@ -117,7 +117,7 @@ QWEN3_VL_TE_VARIANTS = ("bf16", "fp8")
 
 
 def selected_te_variant() -> str:
-    """当前选中的 krea2 TE variant；缺失/非法回退 bf16。"""
+    """当前选中的 krea2 官方 TE variant；缺失/非法（含本地目录）回退 bf16。"""
     try:
         variant = secrets.load().models.selected_te.get("krea2")
     except Exception:
@@ -127,6 +127,19 @@ def selected_te_variant() -> str:
 
 def qwen3_vl_dir_for(root: Path, variant: str) -> Path:
     return qwen3_vl_fp8_dir(root) if variant == "fp8" else qwen3_vl_dir(root)
+
+
+def selected_text_encoder_dir(root: Path) -> Path:
+    """训练 / 出图实际使用的 TE 目录：本地注册目录优先，否则官方 variant。
+
+    `selected_te["krea2"]` 同时承载官方 variant key（bf16/fp8）与用户注册的
+    本地编码器目录绝对路径；本地目录失效时回退官方（bf16 兜底），绝不返回
+    不存在的死路径。
+    """
+    custom = custom_text_encoder_dir("krea2")
+    if custom is not None:
+        return custom
+    return qwen3_vl_dir_for(root, selected_te_variant())
 
 
 def selected_krea2_variant() -> str:
@@ -202,10 +215,11 @@ def default_paths_for_new_version(base_model: Optional[str] = None) -> dict[str,
     )
     return {
         "transformer_path": transformer,
-        "vae_path": str(qwen_image_vae_target(root)),
-        # TE 按选中 variant（bf16 目录 / 官方 fp8 单文件目录）；训练与
-        # 测试出图共用该默认。fp8 训练=文本缓存指纹自动区分（-tefp8）。
-        "text_encoder_path": str(qwen3_vl_dir_for(root, selected_te_variant())),
+        # VAE 跟随全局选中（本地自定义优先，失效回退官方落点）。
+        "vae_path": resolve_vae_path(root),
+        # TE 按选中值（本地注册目录 / bf16 目录 / 官方 fp8 单文件目录）；
+        # 训练与测试出图共用该默认。fp8 训练=文本缓存指纹自动区分（-tefp8）。
+        "text_encoder_path": str(selected_text_encoder_dir(root)),
         "t5_tokenizer_path": "",
     }
 
@@ -234,6 +248,42 @@ def _file_status(path: Path) -> dict[str, Any]:
         return {"exists": False, "size": 0, "mtime": 0.0}
 
 
+def text_encoder_presets(root: Path) -> list[dict[str, Any]]:
+    """本族官方 TE 候选（catalog `krea2_te` domain 的 preset 行）。
+
+    value 与 `selected_te["krea2"]` 同语义：官方 variant key（bf16/fp8）。
+    用户注册的本地编码器目录以绝对路径入列（catalog 侧统一拼装）。
+    """
+    bf16_dir = qwen3_vl_dir(root)
+    fp8_dir = qwen3_vl_fp8_dir(root)
+    return [
+        {
+            "value": "bf16",
+            "label": QWEN3_VL_REPO,
+            "description": str(bf16_dir),
+            "download_id": "krea2_text_encoder",
+            "status_key": "krea2_text_encoder",
+            "path": str(bf16_dir),
+            "files": [
+                {"name": f, **_file_status(bf16_dir / f)}
+                for f in QWEN3_VL_FILES
+            ],
+        },
+        {
+            "value": "fp8",
+            "label": f"{QWEN3_VL_REPO} fp8",
+            "description": str(fp8_dir),
+            "download_id": "krea2_text_encoder_fp8",
+            "status_key": "krea2_text_encoder_fp8",
+            "path": str(fp8_dir),
+            "files": [
+                {"name": f, **_file_status(fp8_dir / f)}
+                for f in [QWEN3_VL_FP8_FILE, *QWEN3_VL_FP8_SMALL_FILES]
+            ],
+        },
+    ]
+
+
 def catalog_sections(root: Path, models_cfg: Any) -> dict[str, Any]:
     variants = []
     for name, info in KREA2_VARIANTS.items():
@@ -259,8 +309,13 @@ def catalog_sections(root: Path, models_cfg: Any) -> dict[str, Any]:
 
     text_dir = qwen3_vl_dir(root)
     fp8_dir = qwen3_vl_fp8_dir(root)
-    te_selected = (getattr(models_cfg, "selected_te", None) or {}).get("krea2")
-    if te_selected not in QWEN3_VL_TE_VARIANTS:
+    # 选中 TE：官方 variant key 原样；本地注册目录原样回显绝对路径（前端
+    # 据此显示「自定义」并停用官方 radio）；其余非法值归一 bf16。
+    te_selected = str(
+        (getattr(models_cfg, "selected_te", None) or {}).get("krea2") or "")
+    if te_selected not in QWEN3_VL_TE_VARIANTS and not secrets.is_abs_path(
+        te_selected
+    ):
         te_selected = "bf16"
     return {
         "krea2_main": {
@@ -316,6 +371,7 @@ class _Krea2Assets:
     transformer_path_for = staticmethod(krea2_transformer_path_for)
     selected_variant = staticmethod(selected_krea2_variant)
     catalog_sections = staticmethod(catalog_sections)
+    text_encoder_presets = staticmethod(text_encoder_presets)
     is_distilled_path = staticmethod(is_distilled_path)
 
 
