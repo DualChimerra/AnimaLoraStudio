@@ -80,8 +80,17 @@ export function useBaseModelOptions(family: BaseModelFamily = 'anima'): {
 
 /** krea2 TE 选项状态：fp8 目录是否就绪（权重 + config 已下载，决定测试页
  *  下拉里 fp8 的可选性）+ 下载中心选中的默认 variant（下拉初值）。 */
-export function useKrea2TeOptions(): { fp8Ready: boolean; selected: 'bf16' | 'fp8' } {
-  const [state, setState] = useState<{ fp8Ready: boolean; selected: 'bf16' | 'fp8' }>({
+/** 设置页选中的 krea2 TE。`'custom'` = 选的是本地注册的编码器目录 ——
+ *  出图请求此时不传 text_encoder，让服务端按 selected_te 解析（请求里只能
+ *  带官方 variant key，见 api/schemas/generate.py 的 Literal）。 */
+export type Krea2TeSelection = 'bf16' | 'fp8' | 'custom'
+
+export function useKrea2TeOptions(): {
+  fp8Ready: boolean; selected: Krea2TeSelection
+} {
+  const [state, setState] = useState<{
+    fp8Ready: boolean; selected: Krea2TeSelection
+  }>({
     fp8Ready: false, selected: 'bf16',
   })
   useEffect(() => {
@@ -96,7 +105,10 @@ export function useKrea2TeOptions(): { fp8Ready: boolean; selected: 'bf16' | 'fp
         && existing.has('tokenizer.json')
       )
       const sel = c.krea2_text_encoder?.selected
-      setState({ fp8Ready, selected: sel === 'fp8' ? 'fp8' : 'bf16' })
+      const selected: Krea2TeSelection = (
+        sel === 'fp8' ? 'fp8' : sel === 'bf16' || !sel ? 'bf16' : 'custom'
+      )
+      setState({ fp8Ready, selected })
     }).catch(() => {})
     return () => { alive = false }
   }, [])

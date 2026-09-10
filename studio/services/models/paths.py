@@ -233,6 +233,54 @@ def qwen_image_vae_target(root: Path) -> Path:
     return root / "vae" / "qwen_image_vae.safetensors"
 
 
+#: 本地文本编码器目录的就绪判据。transformers 目录（Qwen3 / Qwen3-VL，含
+#: 官方 fp8 单文件版）都带 config.json；缺它的目录一律当"不是编码器"。
+TEXT_ENCODER_MARKER = "config.json"
+
+
+def custom_vae_path() -> Optional[Path]:
+    """用户在设置里选中的本地 VAE（`secrets.models.selected_vae`）。
+
+    未选 / 文件失效（被删、移走、指向目录）→ None，调用方回退官方落点。
+    与主模型 custom 路径同口径：绝不返回不存在的死路径。
+    """
+    try:
+        selected = secrets.load().models.selected_vae
+    except Exception:
+        return None
+    text = str(selected or "").strip()
+    if not text:
+        return None
+    p = Path(text).expanduser()
+    return p if p.is_file() else None
+
+
+def resolve_vae_path(root: Optional[Path] = None) -> str:
+    """训练 / 出图实际要用的 VAE 绝对路径（本地选中优先，回退官方落点）。"""
+    custom = custom_vae_path()
+    if custom is not None:
+        return str(custom)
+    return str(qwen_image_vae_target(root or models_root()))
+
+
+def custom_text_encoder_dir(family: str) -> Optional[Path]:
+    """某族选中的**本地**文本编码器目录（`secrets.models.selected_te[family]`）。
+
+    该字段同时承载官方 variant key（krea2 的 "bf16" / "fp8"）与本地绝对路径，
+    所以这里只认「绝对路径 + 目录存在 + 有 config.json」这一种形态；其余
+    （官方 key / 失效路径）返回 None，由各族按自己的官方目录解析。
+    """
+    try:
+        selected = secrets.load().models.selected_te.get(str(family))
+    except Exception:
+        return None
+    text = str(selected or "").strip()
+    if not text or not secrets.is_abs_path(text):
+        return None
+    p = Path(text).expanduser()
+    return p if (p / TEXT_ENCODER_MARKER).is_file() else None
+
+
 def taeflux_dir(root: Optional[Path] = None) -> Path:
     """TAEFlux 本地目录。daemon 用 AutoencoderTiny.from_pretrained 加载。"""
     r = root or models_root()

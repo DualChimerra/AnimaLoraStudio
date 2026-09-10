@@ -521,6 +521,9 @@ class ModelsConfig(BaseModel):
     - `custom`：按模型族保存用户通过 PathPicker 注册的本地主模型权重。
       `custom_anima_paths` 保留为旧客户端兼容读写面。仅注册路径，不下载、
       不复制；条目失效时解析自动回退到官方 variant。
+    - `selected_vae`：当前默认 VAE。空串 = 官方 `qwen_image_vae` 落点；否则是
+      用户注册的本地 `.safetensors` 绝对路径。VAE 是族无关共享资产（见
+      `models/paths.qwen_image_vae_target`），所以这里是单值而非 per-family。
     - `selected_upscaler`：预处理默认放大器。可为预设 label（如 "4x-AnimeSharp"）
       或自定义/上传的文件名（如 "my-anime-model.pth"）。空串/None → 用
       DEFAULT_UPSCALER 兜底。
@@ -535,10 +538,15 @@ class ModelsConfig(BaseModel):
     # 老键 selected_anima 由 before-validator 迁移（settings PUT 的 merged dict
     # 会同时带两键——入站 selected_anima 优先，覆盖 merge 进来的旧 selected）。
     selected: dict[str, str] = Field(default_factory=lambda: {"anima": "1.0"})
-    # per-family 选中文本编码器 variant（krea2："bf16"|"fp8"，缺失=bf16）。
-    # 决定训练新建 version 的 text_encoder_path 默认 + 测试出图 TE 默认；
-    # 已存在 version 的 config 不动（训练重现性，与 selected 同口径）。
+    # per-family 选中文本编码器：官方 variant key（krea2："bf16"|"fp8"，
+    # 缺失=bf16）**或**用户注册的本地文本编码器目录绝对路径（自定义 CLIP /
+    # Qwen 编码器）。决定训练新建 version 的 text_encoder_path 默认 + 测试
+    # 出图 TE 默认；已存在 version 的 config 不动（训练重现性，与 selected
+    # 同口径）。本地路径失效（被删 / 移走）时解析自动回退官方目录。
     selected_te: dict[str, str] = Field(default_factory=dict)
+    # 选中 VAE：空串 = 官方 qwen_image_vae 落点，否则本地 .safetensors 绝对
+    # 路径（domain "vae" 的候选之一）。失效时同样回退官方落点。
+    selected_vae: str = ""
     # per-family 本地主模型路径。老键 custom_anima_paths 由 validator 迁移，
     # computed_field 保留旧客户端读面。
     custom: dict[str, list[str]] = Field(default_factory=dict)
@@ -719,6 +727,30 @@ MODEL_SOURCE_REPO_DOMAINS: tuple[str, ...] = (
     "wd14", "cltagger", "eval_clip", "eval_dino", "eval_ccip",
 )
 
+#: 族无关 VAE 权重的候选 domain（选中值落 models.selected_vae）。
+VAE_DOMAIN = "vae"
+#: 按族文本编码器候选 domain 的后缀：`anima_te` / `krea2_te`（选中值落
+#: models.selected_te[family]，与官方 variant key 共用同一字段）。
+TE_DOMAIN_SUFFIX = "_te"
+
+
+def te_domain(family: str) -> str:
+    """族 id → 文本编码器候选 domain（`krea2` → `krea2_te`）。"""
+    return f"{family}{TE_DOMAIN_SUFFIX}"
+
+
+def te_domain_family(domain: str) -> str:
+    """`krea2_te` → `krea2`；非 TE domain 返回空串。"""
+    if domain.endswith(TE_DOMAIN_SUFFIX) and len(domain) > len(TE_DOMAIN_SUFFIX):
+        return domain[: -len(TE_DOMAIN_SUFFIX)]
+    return ""
+
+
+def is_weight_asset_domain(domain: str) -> bool:
+    """VAE / 文本编码器 domain？——它们的本地候选不进 models.custom 兼容面
+    （那个字段只放「族本地主模型」，见 ModelsConfig.custom）。"""
+    return domain == VAE_DOMAIN or bool(te_domain_family(domain))
+
 
 def is_abs_path(value: str) -> bool:
     """跨平台绝对路径判断（win 盘符 / UNC / posix 根）；repo id 形如
@@ -892,7 +924,11 @@ class Secrets(BaseModel):
         ]
         custom: dict[str, list[str]] = {}
         for domain, cands in self.model_sources.items():
-            if domain in MODEL_SOURCE_REPO_DOMAINS or domain == "upscaler":
+            if (
+                domain in MODEL_SOURCE_REPO_DOMAINS
+                or domain == "upscaler"
+                or is_weight_asset_domain(domain)
+            ):
                 continue
             paths = [c.path for c in cands if c.kind == "local" and c.path]
             if paths or domain in self.models.custom:

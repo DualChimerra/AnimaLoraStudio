@@ -254,6 +254,11 @@ export default function GeneratePage() {
     setPrefs((p) => ({ ...p, textEncoder: v }))
   const teOptions = useKrea2TeOptions()
   const effectiveTe = textEncoder ?? teOptions.selected
+  // 设置页选了本地编码器目录时不带 TE 覆盖（请求只接受官方 variant key），
+  // 让服务端按 selected_te 解析出那份自定义目录。
+  const teOverride = (
+    modelFamily === 'krea2' && effectiveTe !== 'custom' ? effectiveTe : undefined
+  )
   // 当前族的底模选项（含 purpose 元数据）——选中蒸馏推理 variant（Krea2
   // Turbo）时应用 8 步 / 无 CFG 的默认参数（可再改，A1 不加限制）
   const { options: baseModelOptions } = useBaseModelOptions(modelFamily)
@@ -679,7 +684,7 @@ export default function GeneratePage() {
         count: 1,  // 0.17 P-I：每个 task 出 1 张；batch 拆成多 task（下面循环）
         seed,
         base_model: baseModel,
-        text_encoder: modelFamily === 'krea2' ? effectiveTe : undefined,
+        text_encoder: teOverride,
         loras: snapshotLoras,
         xy_draft: mode === 'xy'
           ? {
@@ -700,7 +705,7 @@ export default function GeneratePage() {
           prompts: mergedPrompts,
           model_family: modelFamily,
           base_model: baseModel ?? undefined,
-          text_encoder: modelFamily === 'krea2' ? effectiveTe : undefined,
+          text_encoder: teOverride,
           negative_prompt: negPrompt,
           width, height, steps,
           count: 1,
@@ -1028,9 +1033,19 @@ export default function GeneratePage() {
                     <select
                       className="input text-xs w-full"
                       value={effectiveTe}
-                      onChange={(e) => setTextEncoder(e.target.value as 'bf16' | 'fp8')}
+                      onChange={(e) => setTextEncoder(
+                        // "自定义" = 不覆盖，跟随设置页 selected_te
+                        e.target.value === 'custom'
+                          ? null
+                          : e.target.value as 'bf16' | 'fp8',
+                      )}
                       aria-label={t('generate.textEncoder')}
                     >
+                      {effectiveTe === 'custom' && (
+                        // 设置页选的是本地编码器目录；切成 bf16/fp8 即临时
+                        // 覆盖回官方权重（与底模下拉的覆盖语义一致）
+                        <option value="custom">{t('generate.textEncoderCustom')}</option>
+                      )}
                       <option value="bf16">{t('generate.textEncoderBf16')}</option>
                       <option value="fp8" disabled={!teOptions.fp8Ready}>
                         {teOptions.fp8Ready

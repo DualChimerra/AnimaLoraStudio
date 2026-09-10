@@ -22,6 +22,7 @@
 | [training-tips.md](user-guide/training-tips.md) | 训练参数、显存配置矩阵、过拟合/欠拟合排查、ComfyUI 用法 |
 | [regularization.md](user-guide/regularization.md) | 正则集生成原理（tag 分布贪心搜索 + AR 聚类） |
 | [caption-format.md](user-guide/caption-format.md) | JSON caption 格式 + 分类 shuffle |
+| [custom-models.md](user-guide/custom-models.md) | 用自己的底模 / VAE / 文本编码器权重，以及本地底模的工作模式 |
 
 ## Architecture
 

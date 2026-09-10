@@ -126,8 +126,10 @@ def _source_domains() -> set[str]:
 
     return (
         set(secrets.MODEL_SOURCE_REPO_DOMAINS)
-        | {"upscaler"}
+        | {"upscaler", secrets.VAE_DOMAIN}
         | set(FAMILY_ASSETS.keys())
+        # 按族文本编码器（anima_te / krea2_te）：本地 transformers 目录
+        | {secrets.te_domain(f) for f in FAMILY_ASSETS}
     )
 
 
@@ -168,9 +170,22 @@ def _require_dir_with(p: Path, required: tuple[str, ...]) -> None:
 def _validate_candidate(domain: str, cand: "secrets.SourceCandidate") -> None:
     """简单校验（D3）：格式 / 存在性 / 域结构；运行时报错兜底。"""
     from ...services.models.families import FAMILY_ASSETS
-    from ...services.models.paths import UPSCALER_EXTS, WD14_FILES
+    from ...services.models.paths import (
+        TEXT_ENCODER_MARKER,
+        UPSCALER_EXTS,
+        WD14_FILES,
+    )
 
     if cand.kind == "download":
+        # VAE / 文本编码器暂只支持「选本地文件」：官方权重走各自的下载卡，
+        # 第三方 repo 下载需要新的 downloader 落点规则，未实现前明确报错，
+        # 不静默把候选存成永远下不动的行。
+        if domain == secrets.VAE_DOMAIN or secrets.te_domain_family(domain):
+            raise ValidationError(
+                "This model type only supports picking a local file or folder",
+                code="model_source.download_unsupported",
+                details={"domain": domain}, http_status=400,
+            )
         if not _REPO_ID_RE.match(cand.repo):
             raise ValidationError(
                 "Repository ID must look like owner/name",
@@ -211,6 +226,12 @@ def _validate_candidate(domain: str, cand: "secrets.SourceCandidate") -> None:
             p, ("model_feat.onnx", "model_metrics.onnx", "metrics.json"))
     elif domain == "upscaler":
         _require_file(p, UPSCALER_EXTS)
+    elif domain == secrets.VAE_DOMAIN:
+        _require_file(p, (".safetensors",))
+    elif secrets.te_domain_family(domain):
+        # 文本编码器 = transformers 目录（Qwen3 / Qwen3-VL / 官方 fp8 单文件版
+        # 都带 config.json）。选到裸权重文件时这条报错会点名缺什么。
+        _require_dir_with(p, (TEXT_ENCODER_MARKER,))
     elif domain == "cltagger":
         _require_file(p, (".onnx",))
         mapping = cand.extra.get("tag_mapping_path", "")
@@ -275,6 +296,18 @@ def _selected_value_reset(domain: str, removed: "secrets.SourceCandidate") -> di
         sel = s.models.selected_upscaler
         if sel and sel in (removed_value, removed.filename):
             return {"models": {"selected_upscaler": DEFAULT_UPSCALER}}
+    if domain == secrets.VAE_DOMAIN and s.models.selected_vae == removed_value:
+        # 空串 = 跟随官方落点（ModelsConfig.selected_vae 的默认语义）
+        return {"models": {"selected_vae": ""}}
+    te_family = secrets.te_domain_family(domain)
+    if te_family and s.models.selected_te.get(te_family) == removed_value:
+        # 官方默认 = 该族 text_encoder_presets 的首项（anima: "" = 官方目录；
+        # krea2: "bf16"）
+        presets = FAMILY_ASSETS[te_family].text_encoder_presets(
+            model_downloader.models_root())
+        return {"models": {"selected_te": {
+            **s.models.selected_te, te_family: str(presets[0]["value"]),
+        }}}
     if domain in FAMILY_ASSETS and s.models.selected.get(domain) == removed_value:
         return {"models": {"selected": {
             **s.models.selected, domain: FAMILY_ASSETS[domain].latest,
