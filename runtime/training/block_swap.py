@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 
 _GIB = 1024 ** 3
 
+
 def _pow2_ceil(n: int) -> int:
     """>= n 的最小 2 的幂（n <= 1 → 1）。与 CachingHostAllocator 的取整同口径。"""
     return 1 if n <= 1 else 1 << (n - 1).bit_length()
