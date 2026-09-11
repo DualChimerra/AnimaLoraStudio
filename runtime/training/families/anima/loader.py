@@ -8,6 +8,8 @@ llm_adapter 缺失兜底、Qwen+T5 双 encoder）；VAEWrapper / load_vae 为跨
 from __future__ import annotations
 
 import logging
+import re
+from functools import lru_cache
 from pathlib import Path
 
 from training.model_loading import (
@@ -17,8 +19,119 @@ from training.model_loading import (
 
 logger = logging.getLogger(__name__)
 
+#: checkpoint 键里的 block 归属（键可能带 model./module. 等前缀，
+#: _load_weights_best_effort 加载时才剥——这里按子串匹配，前缀无关）
+_BLOCK_KEY_RE = re.compile(r"(?:^|\.)blocks\.(\d+)\.")
 
-def load_anima_model(transformer_path, device, dtype, repo_root, *, flash_attn: bool = True):
+
+@lru_cache(maxsize=8)
+def _header_param_counts(checkpoint_path: str) -> tuple[tuple[int, ...], int]:
+    """(每个 block 的参数量, 全模型参数量)，从 safetensors header 数（不读 payload）。
+
+    带缓存：block swap 预检要为 0..N 每个候选值各问一次比例，不缓存就会把同一个
+    header 读 N+1 遍（krea2 侧的 ``_swapped_param_counts`` 同款处理）。key 是路径
+    字符串，返回两个不可变值，缓存本身零内存风险。
+    """
+    from safetensors import safe_open
+
+    per_block: dict[int, int] = {}
+    total = 0
+    with safe_open(str(checkpoint_path), framework="pt", device="cpu") as f:
+        for key in f.keys():
+            numel = 1
+            for dim in f.get_slice(key).get_shape():
+                numel *= dim
+            total += numel
+            m = _BLOCK_KEY_RE.search(key)
+            if m:
+                idx = int(m.group(1))
+                per_block[idx] = per_block.get(idx, 0) + numel
+    if not per_block:
+        return (), total
+    num_blocks = max(per_block) + 1
+    return tuple(per_block.get(i, 0) for i in range(num_blocks)), total
+
+
+def block_count_from_header(checkpoint_path) -> int:
+    """checkpoint 里的 DiT 主干层数（2B=28 / 14B=36）。读不出来返回 0。
+
+    Anima 的层数由 checkpoint 决定，不像 krea2 有固定 config —— 预检要搜推荐值
+    就得先知道上界，而它只能从权重文件本身问。
+    """
+    try:
+        per_block, _total = _header_param_counts(str(checkpoint_path))
+    except Exception:  # noqa: BLE001
+        return 0
+    return len(per_block)
+
+
+def swapped_param_ratio_from_header(checkpoint_path, blocks_to_swap: int) -> float:
+    """换出层占全模型参数的比例，从 safetensors header 数 numel（不读 payload）。
+
+    krea2 用固定 config 数 meta 模型参数；Anima 的层数由 checkpoint 决定
+    （2B=28 层 / 14B=36 层），header 才是版本真相，且数参数天然 dtype 无关
+    （显存折扣必须按比例乘文件实际大小，见 krea2 loader 同名函数的说明）。
+    """
+    if blocks_to_swap <= 0:
+        return 0.0
+    per_block, total = _header_param_counts(str(checkpoint_path))
+    if not per_block or total <= 0:
+        return 0.0
+    num_blocks = len(per_block)
+    first = max(num_blocks - blocks_to_swap, 0)
+    swapped = sum(per_block[i] for i in range(first, num_blocks))
+    return swapped / total
+
+
+def place_model_for_block_swap(model, device, dtype, blocks_to_swap: int) -> int:
+    """换出层不上卡的模型放置：CPU 内 cast 到 dtype，只把非换出部分搬上 GPU。
+
+    §9.4 纪律（docs/design/block-swap.md）：**不能全量上卡再搬下来**——那样
+    GPU 瞬时峰值仍等于完整模型，小卡目标不成立。换出层留在 CPU（dtype 已
+    cast），pinned 化由 ``PinnedBlockSwap._build`` 就地接管（已在 CPU 的张量
+    只 pin、不重复拷贝）。
+
+    返回实际换出层数（clamp 到总层数——blocks_to_swap 是全局设置，用户可能
+    按 36 层版调的值喂给 28 层版，超界按全量换出处理）。
+    """
+    import torch
+
+    from training.sysmem import check_pinned_budget
+
+    total = len(model.blocks)
+    num_swap = min(int(blocks_to_swap), total)
+    first = total - num_swap
+    swapped_prefixes = tuple(f"blocks.{i}." for i in range(first, total))
+
+    # pinned 预算护栏先行（B6：fail-fast，此刻尚无任何 GPU / pinned 分配）
+    elem = torch.empty(0, dtype=dtype).element_size()
+    need = sum(
+        p.numel() for n, p in model.named_parameters()
+        if n.startswith(swapped_prefixes)
+    ) * elem
+    check_pinned_budget(need, blocks=num_swap)
+
+    model.to(dtype=dtype)  # CPU 内 cast（fp32 构建 → 目标 dtype）
+    target = torch.device(device)
+    for name, param in model.named_parameters():
+        if not name.startswith(swapped_prefixes):
+            param.data = param.data.to(target)
+    for name, buf in model.named_buffers():
+        if not name.startswith(swapped_prefixes):
+            buf.data = buf.data.to(target)
+    # 公开标记：采样期 VAE decode 的整模型 offload 必须跳过本模型（一刀切
+    # .to() 恢复时会把 CPU 主副本搬上卡，swap 白做且瞬时占用=完整模型），
+    # families/anima/sampling.py 按它分流
+    model.blocks_to_swap = num_swap
+    logger.info(
+        "block swap 放置：末尾 %d/%d 层留在内存（%.2f GB），其余上卡",
+        num_swap, total, need / 1024 ** 3,
+    )
+    return num_swap
+
+
+def load_anima_model(transformer_path, device, dtype, repo_root, *,
+                     flash_attn: bool = True, blocks_to_swap: int = 0):
     """加载 Anima transformer 模型。
 
     `flash_attn=False` 显式禁用 flash_attn fast path（attention_backend=xformers/none
@@ -106,7 +219,10 @@ def load_anima_model(transformer_path, device, dtype, repo_root, *, flash_attn: 
             logger.warning("检测到 checkpoint 不包含 llm_adapter 权重：已禁用 llm_adapter（回退为直接使用 Qwen embeddings）")
         except Exception:
             pass
-    model = model.to(device=device, dtype=dtype)
+    if blocks_to_swap > 0:
+        place_model_for_block_swap(model, device, dtype, blocks_to_swap)
+    else:
+        model = model.to(device=device, dtype=dtype)
     model.requires_grad_(False)
 
     logger.info(f"Anima 模型加载完成: {model_channels}ch, {num_blocks} blocks")

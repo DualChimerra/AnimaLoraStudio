@@ -15,8 +15,9 @@ CUDA out of memory，不告诉他该把哪个数字调到多少。
 本模块把两侧算术合到一起、提前到加载前，并且**给出推荐值**而不只是拒绝。
 纯算术，不碰 CUDA、不读权重（只 stat 文件大小），失败一律静默放行。
 
-族无关：只要族实现了 ``swapped_param_ratio`` / ``swappable_blocks``（目前只有
-krea2，也只有它有 block_swap 能力位）就参与，否则整块跳过。
+族无关：只要族实现了 ``swapped_param_ratio`` / ``swappable_blocks``（krea2 与
+anima，即有 block_swap 能力位的族）就参与，否则整块跳过。两个方法都收
+``checkpoint_path`` 关键字：anima 的层数与参数分布只有权重文件自己知道。
 """
 
 from __future__ import annotations
@@ -226,15 +227,23 @@ def run(ctx) -> None:
 
     from training import sysmem
 
+    # checkpoint_path 是跨族协议参数：anima 的层数与参数分布由 checkpoint 决定
+    # （2B=28 层 / 14B=36 层），不给就只能返回 0——那会让预检把「换出后显存够」
+    # 误判成「一点也省不下」并拒掉本可以跑的配置。krea2 结构唯一、收下即忽略。
+    transformer_path = str(getattr(args, "transformer_path", "") or "")
+
+    def ratio_at(blocks: int) -> float:
+        return float(ratio_fn(blocks, checkpoint_path=transformer_path))
+
     try:
-        total_blocks = int(blocks_fn())
+        total_blocks = int(blocks_fn(checkpoint_path=transformer_path))
         file_bytes = sysmem._file_bytes([getattr(args, "transformer_path", "")])
         avail_ram = sysmem.available_ram_bytes()
         result = evaluate(
             file_bytes=file_bytes,
             blocks_to_swap=int(getattr(args, "blocks_to_swap", 0) or 0),
             total_blocks=total_blocks,
-            ratio_fn=ratio_fn,
+            ratio_fn=ratio_at,
             free_vram_bytes=sysmem.gpu_free_bytes_global(),
             avail_ram_bytes=avail_ram,
             vram_base_bytes=sysmem._VRAM_BASE_BYTES,
