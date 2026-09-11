@@ -285,6 +285,10 @@ class Fp8LoraMergeAdapter:
             if scale_cpu is not None:
                 module.weight_scale.copy_(scale_cpu.to(module.weight_scale.device))
         self._backup = {}
+        # 模型引用必须一并丢掉——这个句柄还被 _run_generate / _run_xy 的局部
+        # adapters 变量持着，不置空则换 LoRA 重载期间旧模型整份钉在显存里
+        # （XY 逐格换 LoRA 时最多三份模型同驻，上游 #499 实测 32GB 卡第 3 格 OOM）
+        self._model = None
         return True
 
 

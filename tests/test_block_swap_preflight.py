@@ -217,11 +217,13 @@ def test_pinned_limit_agrees_with_guard(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 
+#: 族协议：两个估算方法都收 ``checkpoint_path`` 关键字（anima 的层数与参数分布
+#: 只有权重文件知道；krea2 收下即忽略）。假族按同一形状接。
 def _ctx(*, capabilities=frozenset({"block_swap"}), preflight_on=True):
     family = types.SimpleNamespace(
         spec=types.SimpleNamespace(capabilities=capabilities),
-        swapped_param_ratio=_ratio,
-        swappable_blocks=lambda: _TOTAL_BLOCKS,
+        swapped_param_ratio=lambda blocks, *, checkpoint_path=None: _ratio(blocks),
+        swappable_blocks=lambda *, checkpoint_path=None: _TOTAL_BLOCKS,
     )
     args = types.SimpleNamespace(
         block_swap_preflight=preflight_on,
@@ -262,10 +264,42 @@ def test_run_survives_broken_family_estimate(monkeypatch) -> None:
     monkeypatch.setattr(sysmem, "gpu_free_bytes_global", lambda: _FREE_VRAM_12G)
     monkeypatch.setattr(sysmem, "available_ram_bytes", lambda: _AVAIL_RAM_32G)
 
-    def _boom(_blocks):
+    def _boom(_blocks, *, checkpoint_path=None):
         raise RuntimeError("meta 模型构造失败")
 
     ctx = _ctx()
     ctx.family.swapped_param_ratio = _boom
 
     preflight.run(ctx)
+
+
+def test_run_forwards_checkpoint_path_to_family(monkeypatch) -> None:
+    """anima 的层数/比例只有 checkpoint 自己知道——不透传就会拒掉能跑的配置。
+
+    回归的是一个具体的失败形态：漏传 ``checkpoint_path`` 时 anima 的
+    ``swapped_param_ratio`` 返回 0，预检据此算出「换出多少层都省不下显存」，
+    于是把本来跑得动的 6GB 配置判为不通过。
+    """
+    monkeypatch.setattr(sysmem, "_file_bytes", lambda _p: _FP8_BYTES)
+    monkeypatch.setattr(sysmem, "gpu_free_bytes_global", lambda: _FREE_VRAM_12G)
+    monkeypatch.setattr(sysmem, "available_ram_bytes", lambda: _AVAIL_RAM_32G)
+
+    seen: list[str | None] = []
+
+    def _ratio_spy(blocks, *, checkpoint_path=None):
+        seen.append(checkpoint_path)
+        return _ratio(blocks)
+
+    def _blocks_spy(*, checkpoint_path=None):
+        seen.append(checkpoint_path)
+        return _TOTAL_BLOCKS
+
+    ctx = _ctx()
+    ctx.family.swapped_param_ratio = _ratio_spy
+    ctx.family.swappable_blocks = _blocks_spy
+
+    with pytest.raises(RuntimeError):
+        preflight.run(ctx)
+
+    assert seen, "预检没有向族问过任何估算"
+    assert all(p == "/nonexistent/model.safetensors" for p in seen)

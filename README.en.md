@@ -2,12 +2,18 @@
 
 > **Fork** of the original [WalkingMeatAxolotl/AnimaLoraStudio](https://github.com/WalkingMeatAxolotl/AnimaLoraStudio). Training core, model support (Anima + Krea 2, fp8) and backend are synced with upstream v0.20.2; the UI/UX, runtime modes (Colab / Local) and feature set are this fork's own (no in-app updater / auto-tagging step).
 >
-> **Selectively backported from upstream v0.21–v0.23** (not a full version sync):
-> training-side block swap (Krea 2 on 16GB VRAM, #463 plus its gradient fix #466),
+> **Selectively backported from upstream v0.21–v0.25** (not a full version sync):
+> training-side block swap (Krea 2 on 16GB VRAM, #463 plus its gradient fix #466) and its
+> wiring into Anima — **training on 6GB-class GPUs** (#490, #497),
 > the memory-guard toggle and its off-by-default change (#480, #484),
-> NaViT pack-based step estimates (#482), and the LoKr/LoHa dropout warning spam fix (#468).
-> **Not backported**: generation-side block swap (depends on upstream #455) and the
-> v0.22.0 evaluation-page rework (#469–#471).
+> NaViT pack-based step estimates (#482), the LoKr/LoHa dropout warning spam fix (#468),
+> plus a batch of memory fixes: pinned-memory packing instead of power-of-two rounding
+> (#511, spurious "CUDA out of memory" at startup), returning the allocator cache on an
+> ARB bucket switch (#506), and VRAM leftover reclaim after a failed generation together
+> with dropping the model reference in detach (#499).
+> **Not backported**: generation-side block swap (depends on upstream #455), the
+> v0.22.0 evaluation-page rework (#469–#471), and compute-GPU selection on multi-GPU
+> machines (#494).
 
 [![中文](https://img.shields.io/badge/lang-%E4%B8%AD%E6%96%87-lightgrey)](README.md) [![English](https://img.shields.io/badge/lang-English-blue)](README.en.md) [![Version](https://img.shields.io/badge/version-0.20.2--fork-blue)](CHANGELOG.md)
 
@@ -319,8 +325,8 @@ Current version is **0.12.0**. See [CHANGELOG.md](CHANGELOG.md) for the full his
 
 ## Hardware requirements
 
-- **GPU**: NVIDIA, **16 GB+ VRAM recommended** (RTX 4060Ti 16G / 4070Ti / 4080 / 5070+ / 3090 / 4090 / 5090, etc.); **8 GB is the minimum** (some laptop GPUs are confirmed working, requires disabling sample output + reducing batch / resolution, with noticeably slower training). System GPU usage is low; VRAM is mostly for training. AMD GPUs / Apple Silicon are not supported
-- **RAM**: 16 GB+
+- **GPU**: NVIDIA, **16 GB+ VRAM recommended** (RTX 4060Ti 16G / 4070Ti / 4080 / 5070+ / 3090 / 4090 / 5090, etc.); without block swap **8 GB is the minimum** (some laptop GPUs are confirmed working, requires disabling sample output + reducing batch / resolution, with noticeably slower training). With **block swap** (all 28 Anima blocks swapped out), **training reaches 6 GB-class GPUs** at 1024² with samples on (training-step allocation peak about 1.9 GB plus the resident text encoder; about 11% slower, and the resulting LoRA is unaffected). System GPU usage is low; VRAM is mostly for training. AMD GPUs / Apple Silicon are not supported
+- **RAM**: 16 GB+; block swap additionally **locks** RAM in proportion to the swapped-out blocks (about 3.6 GB for all Anima blocks, about 11 GB for all Krea 2 blocks on an fp8 base)
 - **Storage**: SSD strongly recommended (latent cache + sample output is I/O heavy)
 
 ---

@@ -151,22 +151,31 @@ class Krea2Family:
             path, device, dtype, purpose=purpose, blocks_to_swap=blocks_to_swap,
         )
 
-    def swappable_blocks(self) -> int:
+    def swappable_blocks(self, *, checkpoint_path: str | None = None) -> int:
         """可换出的层数上限（= DiT 主干层数）。
 
         block swap 预检搜索推荐值时需要这个上界。与 ``swapped_param_ratio``
         一样是 duck-typed 可选方法：族没实现就跳过预检（退化成旧行为）。
+
+        ``checkpoint_path`` 是跨族协议参数（anima 的层数由 checkpoint 决定）；
+        krea2 结构唯一（KREA2_CONFIG），不需要。
         """
+        del checkpoint_path
         from modeling.krea2 import KREA2_CONFIG
 
         return int(KREA2_CONFIG.layers)
 
-    def swapped_param_ratio(self, blocks_to_swap: int) -> float:
+    def swapped_param_ratio(self, blocks_to_swap: int, *,
+                            checkpoint_path: str | None = None) -> float:
         """换出层占全模型参数的比例（显存预算折扣用；见 loader 同名函数）。
 
         刻意是比例不是字节数 —— fp8 与 bf16 的文件大小差一倍，按字节折扣会在
         fp8 场景把护栏折扣穿。
+
+        ``checkpoint_path`` 是跨族协议参数（anima 靠它区分 28/36 层版本）；
+        krea2 结构唯一（KREA2_CONFIG），不需要。
         """
+        del checkpoint_path
         from training.families.krea2.loader import swapped_param_ratio
 
         return swapped_param_ratio(blocks_to_swap)

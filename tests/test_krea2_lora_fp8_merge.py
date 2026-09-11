@@ -189,6 +189,10 @@ def test_merge_three_layer_forms_and_detach_restores():
     assert torch.equal(block.k.weight.view(torch.uint8), orig["k"].view(torch.uint8))
     assert torch.equal(block.m.weight.detach(), orig["m"])
     assert torch.equal(block.q.weight_scale, orig["q_scale"])
+    # 还原完成后句柄不能再钉着模型：它还被 _run_generate / _run_xy 的局部
+    # adapters 变量持着，不置空则换 LoRA 重载期间旧模型整份留在显存里
+    # （XY 逐格换 LoRA 时最多三份模型同驻，上游 #499）
+    assert adapter._model is None
 
 
 def _expected_w16_from(weight, scale, tensors, strength) -> torch.Tensor:
